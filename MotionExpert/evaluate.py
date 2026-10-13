@@ -11,10 +11,11 @@ import numpy as np
 import torch
 
 from .config import K12_JOINTS, architecture_metadata, load_config, validate_architecture
-from .dataset.dense_representation import decode_dense_motion
+from .dataset.representation import decode_motion
 from .dataset.motion_layout import motion_layout, SMPLH_REPRE_TYPE
 from .utils.rotation_conversions import rotation_6d_to_matrix
 from .utils.task_conditioning import TASKS, ID_TO_TASK, apply_task_conditioning
+from .visual_contract import archive_visual_compatibility
 
 
 def _rotation_error(prediction, target):
@@ -32,8 +33,8 @@ def _rotation_error(prediction, target):
     return torch.where(proper, angle, torch.full_like(angle, 180)), ~proper
 
 
-def compute_motion_metrics(prediction, target, valid, *, task="recon", forecast_prefix=30,
-                           fps=15, world_from_window=None, floor_transform=None,
+def compute_motion_metrics(prediction, target, valid, *, task="fore", forecast_prefix=6,
+                           fps=5, world_from_window=None, floor_transform=None,
                            floor_height=0., representation=None):
     """Score one unnormalized, unpadded T x 245 window.
 
@@ -122,8 +123,8 @@ def compute_motion_metrics(prediction, target, valid, *, task="recon", forecast_
             raise ValueError("Forecast metrics require the last observed floor transform")
         kwargs["initial_floor_transform"] = torch.as_tensor(floor_transform)[start - 1]
     try:
-        pred_world = decode_dense_motion(prediction[:end], **kwargs)
-        true_world = decode_dense_motion(target[:end], **kwargs)
+        pred_world = decode_motion(prediction[:end], **kwargs)
+        true_world = decode_motion(target[:end], **kwargs)
     except ValueError as error:
         if "Degenerate decoded floor heading" not in str(error):
             raise
@@ -155,7 +156,7 @@ def compute_motion_metrics(prediction, target, valid, *, task="recon", forecast_
 
 
 @torch.no_grad()
-def sampled_validation(module, dataset, max_samples=16, forecast_prefix=30, tasks=TASKS, seed=None):
+def sampled_validation(module, dataset, max_samples=16, forecast_prefix=6, tasks=TASKS, seed=None):
     """Fixed window subset, task-specific floor policy and actual flow sampling."""
     if max_samples < 1:
         raise ValueError("max_samples must be positive")
@@ -193,7 +194,7 @@ def sampled_validation(module, dataset, max_samples=16, forecast_prefix=30, task
                 y = apply_task_conditioning(
                     y, task, forecast_prefix=forecast_prefix,
                     trajectory_condition=False,
-                    noise_only_history=data.MOTION_SUPERVISION == "future_only")
+                    supervise_history=True)
             # Restoring the RNG avoids changing subsequent training minibatches.
             with torch.random.fork_rng(devices=cuda_devices):
                 torch.manual_seed(random_seed + int(index))
@@ -236,14 +237,16 @@ def main():
     parser.add_argument("--split-manifest")
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--tasks", nargs="+", choices=TASKS, default=None,
-                        help="Default: trained task; legacy checkpoints evaluate all three tasks")
+                        help="Forecasting validation")
     parser.add_argument("--max-samples", type=int, default=16)
     parser.add_argument("--seed", type=int, default=62)
     parser.add_argument("--device", default=None)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--allow-visual-adaptation", action="store_true",
+                        help="Explicitly allow a different shared-RGB size profile; DINO weight and normalization identities must match")
     args = parser.parse_args()
     from .motion_expert import MotionExpert
-    from .dataset.dense_motion_dataset import dataset_class_for_representation
+    from .dataset.smplh_motion_dataset import SMPLHMotionDataset
     expert = MotionExpert(args.checkpoint, device=args.device, dtype=torch.float32)
     cfg = load_config(args.config, data_dir=args.data_dir) if args.config else expert.cfg
     if args.data_dir:
@@ -257,18 +260,22 @@ def main():
     tasks = args.tasks or ([data.TRAIN_TASK] if getattr(data, "TRAIN_TASK", None) else list(TASKS))
     # Embedded training statistics travel with the checkpoint. Dataset checks
     # their split/basis provenance even when the original stats file moved.
-    dataset = dataset_class_for_representation(data.REPRE_TYPE)(archive_root=data.ARCHIVE_ROOT, split=args.split,
+    dataset = SMPLHMotionDataset(archive_root=data.ARCHIVE_ROOT, split=args.split,
         repre_type=data.REPRE_TYPE,
         split_manifest=data.SPLIT_MANIFEST, stats_path=expert.normalizer.stats,
         do_normalization=True, cond_img_feat=data.COND_IMG_FEAT, cond_traj=data.COND_TRAJ,
         window=data.WINDOW, fps=data.FPS, forecast_prefix=data.FORECAST_PREFIX, segment_stride=data.SEGMENT_STRIDE,
-        train_task=getattr(data, "TRAIN_TASK", None) or "recon",
-        motion_supervision=getattr(data, "MOTION_SUPERVISION", "future_only"),
+        train_task=getattr(data, "TRAIN_TASK", None) or "fore",
+        motion_supervision=data.MOTION_SUPERVISION,
         require_full_window=getattr(data, "REQUIRE_FULL_WINDOW", False),
         rotation_basis_mode=data.ROTATION_BASIS_MODE, target_joint_basis=data.TARGET_JOINT_BASIS,
         rotation_basis_path=data.ROTATION_BASIS_PATH, normalization_clip=expert.normalizer.clip,
         contact_speed_m_s=data.CONTACT_SPEED_M_S, contact_height_m=data.CONTACT_HEIGHT_M,
-        min_valid_image_fraction=data.MIN_VALID_IMAGE_FRACTION)
+        min_valid_image_fraction=data.MIN_VALID_IMAGE_FRACTION,
+        vision_profile_root=getattr(data,"VISION_PROFILE_ROOT",None),
+        image_profile=getattr(data,"IMAGE_PROFILE",None))
+    visual_metadata = archive_visual_compatibility(dataset, expert.visual_conditioning,
+                        allow_visual_adaptation=args.allow_visual_adaptation)
     def sample(y):
         task = ID_TO_TASK[int(y["task_id"][0])]
         return expert.sample(y, task=task, forecast_prefix=data.FORECAST_PREFIX,
@@ -281,7 +288,8 @@ def main():
         "split_fingerprint": dataset.split_fingerprint, "seed": args.seed,
         "max_samples": args.max_samples, "tasks": tasks,
         "fps": data.FPS, "window": data.WINDOW, "forecast_prefix": data.FORECAST_PREFIX,
-        "conditioning": "images_only" if data.FPS == 5 and data.TRAIN_TASK == "fore" else "legacy",
+        "conditioning": "images_only",
+        **visual_metadata,
         "metrics": metrics}
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False, indent=2))

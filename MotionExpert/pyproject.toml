@@ -13,8 +13,6 @@ dynamic = ["dependencies"]
 motionexpert-train = "MotionExpert.train:main"
 motionexpert-infer = "MotionExpert.infer:main"
 motionexpert-export = "MotionExpert.export_weights:main"
-motionexpert-check-data = "MotionExpert.check_data:main"
-motionexpert-split = "MotionExpert.split_manifest:main"
 motionexpert-stats = "MotionExpert.compute_joint_motion_stats:main"
 motionexpert-eval = "MotionExpert.evaluate:main"
 

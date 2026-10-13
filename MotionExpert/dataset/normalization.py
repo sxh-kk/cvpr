@@ -1,9 +1,9 @@
-"""Strict training-only dense statistics; binary contacts keep their [0,1] scale."""
+"""Strict train-only SMPL-H245 statistics; binary contacts keep their [0,1] scale."""
 from pathlib import Path
 import math
 import torch
 
-from .dense_representation import CONTACT_SLICE, GLOBAL_SLICE, MOTION_DIM, REPRE_TYPE, TRAJECTORY_DIM
+from .representation import CONTACT_SLICE, GLOBAL_SLICE, MOTION_DIM, REPRE_TYPE, TRAJECTORY_DIM
 from .motion_layout import motion_layout, SMPLH_REPRE_TYPE
 
 STATS_FORMAT = "motionexpert-dense-stats-v1"
@@ -11,55 +11,29 @@ _DEFAULT_CLIP = object()
 
 
 def statistics_motion_supervision(stats):
-    """Old schema4 forecasting statistics supervised only future frames."""
-    value = stats.get("motion_supervision")
-    if value is None:
-        return "future_only" if stats.get("train_task") == "fore" else None
-    if value not in ("joint", "future_only"):
-        raise ValueError("Statistics motion_supervision must be joint or future_only")
-    return value
+    if stats.get("motion_supervision") != "joint":
+        raise ValueError("Statistics must supervise joint historical and future motion")
+    return "joint"
 
 
 def validate_statistics_profile(stats):
-    """Retain legacy15Hz assets, but never infer the new forecast contract."""
-    fps = stats.get("fps")
-    if type(fps) is not int or fps < 1 or 30 % fps:
-        raise ValueError("Statistics FPS must be an integer divisor of native30Hz")
-    version = stats.get("stats_schema_version", 3)
-    if type(version) is not int or version not in (3, 4):
-        raise ValueError("Unsupported dense statistics schema")
-    if version == 3:
-        if fps != 15:
-            raise ValueError("New sampling profiles require statistics schema4; legacy statistics are15Hz only")
-        return
-    task = stats.get("train_task")
-    if task not in ("recon", "fore") or stats.get("label_task") != task:
-        raise ValueError("Statistics require matching train_task and label_task")
-    scope = "observed_prefix" if task == "fore" else "full_window"
-    supervision = statistics_motion_supervision(stats)
-    if supervision == "joint" and task != "fore":
-        raise ValueError("Joint statistics require forecasting with observed-prefix conditioning")
-    statistics_scope = ("all_valid_frames" if supervision == "joint" else
-                        "future_only" if task == "fore" else "all_real_frames")
-    if stats.get("ground_estimation_scope") != scope or stats.get("image_validity_scope") != scope:
-        raise ValueError("Statistics ground/image scope does not match the training task")
-    if stats.get("statistics_scope") != statistics_scope:
-        raise ValueError("Statistics target scope does not match the training task")
-    if type(stats.get("complete_windows_only")) is not bool:
-        raise ValueError("Statistics require an explicit complete-window policy")
-    if type(stats.get("sampling_step")) is not int or stats["sampling_step"] != 30 // fps:
-        raise ValueError("Statistics sampling_step disagrees with native30Hz/FPS")
+    expected = {"fps": 5, "stats_schema_version": 4, "train_task": "fore", "label_task": "fore",
+                "window": 11, "forecast_prefix": 6, "complete_windows_only": True,
+                "sampling_step": 6, "ground_estimation_scope": "observed_prefix",
+                "image_validity_scope": "observed_prefix", "statistics_scope": "all_valid_frames",
+                "motion_supervision": "joint"}
+    for key, value in expected.items():
+        if stats.get(key) != value:
+            raise ValueError(f"SMPL-H statistics {key} must be {value!r}")
     fraction = stats.get("min_valid_image_fraction")
     if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
         raise ValueError("Statistics require a valid observed-image threshold")
-    if fps == 5 and (task != "fore" or not stats["complete_windows_only"]):
-        raise ValueError("5Hz statistics require complete forecasting windows and prefix-floor labels")
 
 
 class MotionNormalizer:
     def __init__(self, stats=None, clip=_DEFAULT_CLIP, *, allow_diagnostic=False):
         if stats is None:
-            raise ValueError("MotionExpert requires train-only STATS_PATH; legacy bundled153 statistics cannot be reused")
+            raise ValueError("MotionExpert requires train-only STATS_PATH")
         if isinstance(stats, (str, Path)):
             stats = torch.load(stats, map_location="cpu", weights_only=True)
         if not isinstance(stats, dict) or stats.get("format") != STATS_FORMAT:

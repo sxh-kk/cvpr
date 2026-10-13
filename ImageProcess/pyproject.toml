@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvpr-image-process"
+version = "1.0.0"
+description = "Shared RGB geometry and synchronized window augmentation for MotionExpert and Psi0"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "Pillow>=10.0"]
+
+[tool.setuptools]
+packages = ["ImageProcess"]
+package-dir = {"ImageProcess" = "."}
+
+[tool.setuptools.package-data]
+ImageProcess = ["configs/*.json"]

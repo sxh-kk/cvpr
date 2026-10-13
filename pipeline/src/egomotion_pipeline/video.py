@@ -36,25 +36,40 @@ def _nearest_frames(iterator, targets, max_error_s):
         iterator.close()
 
 
-def _mp4_frames(path, decoder_threads=0):
-    if not Path(path).exists():
-        raise FileNotFoundError(path)
+def indexed_video_frames(path, indices, *, decoder_threads=0):
+    """Read exact decoded frame IDs for the verified HM release mapping.
+
+    Frames lacking PTS still occupy their original index; they never shift later IDs.
+    """
+    indices = np.asarray(indices)
+    if (indices.ndim != 1 or indices.dtype.kind not in "iu" or np.any(indices < 0)
+            or np.any(np.diff(indices.astype(np.int64)) <= 0)):
+        raise ValueError("Video frame indices must be nonnegative strictly increasing integers")
+    offset = 0
+    if not len(indices):
+        return
     with av.open(str(path)) as container:
+        stream = container.streams.video[0]
         if decoder_threads:
-            stream = container.streams.video[0]
             stream.codec_context.thread_count = decoder_threads
             stream.thread_type = "AUTO"
-        for frame in container.decode(video=0):
-            if frame.pts is not None:
-                yield float(frame.pts*frame.time_base), frame.to_ndarray(format="rgb24")
-
-
-def nearest_video_frames(path, targets, max_error_s, *, decoder_threads=0):
-    yield from _nearest_frames(_mp4_frames(path, decoder_threads), targets, max_error_s)
+        for index, frame in enumerate(container.decode(video=0)):
+            if index != indices[offset]:
+                continue
+            if frame.pts is None:
+                yield None, None
+            else:
+                yield frame.to_ndarray(format="rgb24"), float(frame.pts * frame.time_base)
+            offset += 1
+            if offset == len(indices):
+                return
+        while offset < len(indices):
+            yield None, None
+            offset += 1
 
 
 def _mcap_frames(video, decoder_threads=0):
-    from .egosuite_mcap import decoded_messages, timestamp_ns
+    from .mcap_decode import decoded_messages, timestamp_ns
     codecs = {"h264": "h264", "h265": "hevc", "vp9": "vp9", "av1": "av1"}
     codec, current_format, last_stamp = None, None, None
     origin = int(video["clock_origin_ns"])

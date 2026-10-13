@@ -1,17 +1,12 @@
 import numpy as np
 import re
 from pathlib import Path
-from .body_model import file_sha256
-from .storage import read_arrays, write_arrays, atomic_json, quality_report, digest
-from .video import nearest_video_frames, nearest_mcap_video_frames, image_preprocessor
-from .schema import (DINO_CHECKPOINT, DINO_SHAPE, DINO_FLAT_DIM, SCHEMA_VERSION,
-                     V4_SCHEMA_VERSION, dino_format)
-from .dino_optimization import (optimization_options, ParallelPILPreprocessor,
-                                prepared_batches)
+from .io import file_sha256
+from .contracts import DINO_CHECKPOINT, DINO_SHAPE, dino_format
+from .dino_optimization import optimization_options, ParallelPILPreprocessor
 
 
-DINO_PREPROCESSING = {"do_resize": True, "size": {"shortest_edge": 336},
-                      "resample": 3, "do_center_crop": False,
+DINO_PREPROCESSING = {"do_resize": False, "resample": 3, "do_center_crop": False,
                       "do_rescale": True, "rescale_factor": 1/255,
                       "do_normalize": True, "image_mean": [0.485, 0.456, 0.406],
                       "image_std": [0.229, 0.224, 0.225]}
@@ -25,6 +20,9 @@ class DinoEncoder:
         self.torch = torch
         self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
         self.options = optimization_options(config)
+        profile = config.get("image_profile", "256x480")
+        from ImageProcess import SharedImageProcessor, load_profile
+        self.shared_processor = SharedImageProcessor(load_profile(profile))
         cuda = str(self.device).startswith("cuda")
         if not cuda and (self.options["inference_precision"] != "fp32"
                          or self.options["pin_memory"] or self.options["compile_model"]):
@@ -41,9 +39,11 @@ class DinoEncoder:
             raise ValueError("DINO revision must be a 40-character commit hash, or 'local'")
         kwargs = {"revision": revision} if revision != "local" else {"local_files_only": True}
         self.processor = AutoImageProcessor.from_pretrained(checkpoint, use_fast=False, **kwargs)
-        # Match UniEgoMotion's Resize(336, bicubic) + ImageNet normalization.
-        # Override HF's default 256 resize / 224 center crop explicitly.
-        for key, value in DINO_PREPROCESSING.items():
+        preprocessing = dict(DINO_PREPROCESSING)
+        preprocessing.update(size={"height": self.shared_processor.profile.output_hw[0],
+                                   "width": self.shared_processor.profile.output_hw[1]})
+        # Geometry is shared with Psi0; branch-specific ImageNet normalization follows it.
+        for key, value in preprocessing.items():
             setattr(self.processor, key, value)
         model_kwargs = dict(kwargs)
         if self.options["attention_implementation"] != "auto":
@@ -59,11 +59,12 @@ class DinoEncoder:
         self.metadata = {**dino_format(), "checkpoint": checkpoint, "revision": revision,
                          "resolved_revision": getattr(self.model.config, "_commit_hash", None),
                          "processor": self.processor.to_dict(),
-                         "preprocessing": {**DINO_PREPROCESSING, "input": "RGB uint8 after source-specific geometry",
-                                           "resize": "shortest_edge_keep_aspect", "interpolation": "bicubic"},
+                         "preprocessing": {**preprocessing, "input": "RGB uint8 after source-specific geometry",
+                                           "resize": "shared_image_profile",
+                                           "interpolation": "profile_defined"},
                          "inference_dtype": str(next(self.model.parameters()).dtype),
                          "torch_version": torch.__version__, "transformers_version": transformers.__version__}
-        # Preserve legacy signatures when no optimization was explicitly requested.
+        self.metadata["image_process"] = self.shared_processor.metadata
         if any(key in config for key in self.options):
             self.metadata["optimization"] = {**self.options, "implementation": "pil-prefetch-v1",
                 "attention_resolved": getattr(model_config, "_attn_implementation", "unknown"),
@@ -74,15 +75,26 @@ class DinoEncoder:
             if not paths:
                 raise ValueError("Local DINO checkpoint has no fingerprintable model/config files")
             self.metadata["local_file_sha256"] = {str(p.relative_to(checkpoint)): file_sha256(p) for p in paths}
-        self.parallel_processor = (ParallelPILPreprocessor(self.options["preprocess_workers"])
+        self.parallel_processor = (ParallelPILPreprocessor(self.options["preprocess_workers"], self.shared_processor)
             if self.options["preprocessor"] == "pil_parallel" else None)
         if self.options["compile_model"]:
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
-    def prepare(self, images):
+    def prepare(self, images, *, processed=False, image_processor=None):
         processor = getattr(self, "parallel_processor", None)
-        inputs = ({"pixel_values": self.torch.from_numpy(processor(images))} if processor is not None
-                  else self.processor(images=images, return_tensors="pt"))
+        shared = image_processor or getattr(self, "shared_processor", None)
+        if processor is not None:
+            inputs = {"pixel_values": self.torch.from_numpy(processor(images, processed=processed, image_processor=shared))}
+        else:
+            if shared is not None:
+                if processed:
+                    if any(np.asarray(im).shape != (*shared.profile.output_hw, 3) or np.asarray(im).dtype != np.uint8 for im in images):
+                        raise ValueError("Shared RGB must be uint8 HWC and match the DINO image profile")
+                else:
+                    images = [shared.process_image(im) for im in images]
+            elif processed:
+                raise ValueError("Already processed RGB requires an explicit shared image profile")
+            inputs = self.processor(images=images, return_tensors="pt")
         if getattr(self, "options", {}).get("pin_memory", False):
             inputs = {key: value.pin_memory() for key, value in inputs.items()}
         return inputs
@@ -100,6 +112,26 @@ class DinoEncoder:
     def __call__(self, images):
         return self.encode_prepared(self.prepare(images))
 
+    def encode_window(self, images, *, stage="posttrain", training=True, seed=None, augmentation=None):
+        """Encode one history with shared augmentation; return the same RGB for the other branch.
+
+        DINO remains frozen. Convert img_embs to a tensor and use MotionExpert.forward_features
+        to train MotionExpert. Future frames are never passed to this encoder.
+        """
+        from ImageProcess import SharedImageProcessor
+        # One frozen DINO supports all three stages without reloading its weights.
+        target = "256x320" if stage == "posttrain" else "256x480" if stage in {"pretrain", "robust"} else None
+        expected_hw = (256, 320) if stage == "posttrain" else (256, 480)
+        shared = (SharedImageProcessor(target) if target is not None and
+                  self.shared_processor.profile.output_hw != expected_hw else self.shared_processor)
+        window = shared.process_window(images, stage=stage, training=training,
+                                       seed=seed, augmentation=augmentation)
+        features = self.encode_prepared(self.prepare(window.images, processed=True, image_processor=shared))
+        if features.shape != (len(window.images), *DINO_SHAPE) or not np.isfinite(features).all():
+            raise ValueError("DINO window must contain finite CLS + register features")
+        return {"img_embs": features, "rgb": window.images, "augmentation": window.augmentation,
+                "image_process": shared.metadata, "stage": stage}
+
     def close(self):
         processor = getattr(self, "parallel_processor", None)
         if processor is not None:
@@ -107,103 +139,10 @@ class DinoEncoder:
 
 
 def extraction_options(config):
-    batch_size = int(config.get("batch_size", 32))
+    batch_size = config.get("batch_size", 32)
     tolerance = float(config.get("max_video_error_s", 1/60+.001))
-    if batch_size <= 0:
-        raise ValueError("DINO batch_size must be positive")
-    if not np.isfinite(tolerance) or tolerance < 0:
-        raise ValueError("DINO max_video_error_s must be finite and nonnegative")
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError("DINO batch_size must be a positive integer")
+    if not np.isfinite(tolerance) or tolerance <= 0:
+        raise ValueError("DINO max_video_error_s must be finite and positive")
     return batch_size, tolerance
-
-
-def episode_signature(record, config, encoder_metadata):
-    video = record["video"]
-    if not video:
-        raise ValueError(f"{record['source_key']}: no ego video in provenance")
-    stat = Path(video["path"]).stat()
-    fingerprint = {"size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    signature = digest({"config": config, "video": video, "video_fingerprint": fingerprint,
-                        "encoder": encoder_metadata})
-    return signature, fingerprint
-
-
-def extract_episode_arrays(record, arrays, config, encoder):
-    """Compute one episode in memory; the caller owns all archive writes."""
-    batch_size, tolerance = extraction_options(config)
-    options = optimization_options(config)
-    signature, video_fingerprint = episode_signature(record, config, encoder.metadata)
-    video = record["video"]
-    count = record["length"]
-    arrays["observation.features.dino"][:] = 0
-    arrays["observation.valid.dino"][:] = False
-    arrays["observation.video_timestamp"][:] = 0
-    arrays["observation.video_time_error"][:] = 0
-    target = (arrays["observation.source_timestamp"] - float(video.get("timestamp_origin", 0))
-              + float(video["from_timestamp"]))
-    process = image_preprocessor(video.get("preprocessing", {"mode": "raw"}))
-    decoder = {"decoder_threads": options["decoder_threads"]} if options["decoder_threads"] else {}
-    frames = (nearest_mcap_video_frames(video, target, tolerance, **decoder) if video.get("kind") == "mcap"
-              else nearest_video_frames(video["path"], target, tolerance, **decoder))
-    def batches():
-        images, indices, pts_values = [], [], []
-        try:
-            for index, (image, pts) in enumerate(frames):
-                if image is None or pts < float(video["from_timestamp"])-1e-6 or pts > float(video["to_timestamp"])+1e-6:
-                    continue
-                images.append(process(image))
-                indices.append(index); pts_values.append(pts)
-                if len(images) >= batch_size:
-                    yield images, indices, pts_values
-                    images, indices, pts_values = [], [], []
-            if images:
-                yield images, indices, pts_values
-        finally:
-            frames.close()
-    prepared = prepared_batches(batches(), getattr(encoder, "prepare", lambda images: images),
-                                options["prefetch_batches"])
-    encode = getattr(encoder, "encode_prepared", encoder)
-    try:
-        for inputs, indices, pts_values in prepared:
-            feature = np.asarray(encode(inputs), dtype=np.float32)
-            if feature.shape != (len(indices), *DINO_SHAPE) or not np.isfinite(feature).all():
-                raise ValueError("DINO encoder must return finite (batch, 5, 1024) CLS + register tokens")
-            arrays["observation.features.dino"][indices] = feature.reshape(len(indices), DINO_FLAT_DIM)
-            arrays["observation.valid.dino"][indices] = True
-            arrays["observation.video_timestamp"][indices] = pts_values
-            arrays["observation.video_time_error"][indices] = np.asarray(pts_values)-target[indices]
-    finally:
-        prepared.close()
-    if not arrays["observation.valid.dino"].any():
-        raise ValueError(f"{record['source_key']}: no aligned video frames")
-    record["dino"] = {"state": "complete", "signature": signature,
-                      "encoder": encoder.metadata, "video": video, "target_fps": 30,
-                      "max_video_error_s": tolerance, "valid_count": int(arrays["observation.valid.dino"].sum()),
-                      "video_fingerprint": video_fingerprint}
-    record["quality"] = quality_report(arrays)
-
-
-def extract_features(archive, config, encoder=None):
-    archive.assert_ready()
-    if archive.schema_version not in {V4_SCHEMA_VERSION, SCHEMA_VERSION}:
-        raise ValueError("Legacy CLS-only archive: run upgrade-dino before extracting 5x1024 features")
-    extraction_options(config)
-    options = optimization_options(config)
-    owns_encoder = encoder is None
-    encoder = encoder or DinoEncoder(config)
-    try:
-        for record in archive.records():
-            signature, _ = episode_signature(record, config, encoder.metadata)
-            if record["dino"]["state"] == "complete":
-                if record["dino"].get("signature") != signature:
-                    raise ValueError("Existing DINO features use a different model/preprocessing; create a new archive")
-                continue
-            arrays = read_arrays(archive.data_path(record["episode_index"]), archive.specs)
-            extract_episode_arrays(record, arrays, config, encoder)
-            write_arrays(archive.data_path(record["episode_index"]), arrays, archive.specs,
-                         optimized_dino=options["optimized_storage"])
-            atomic_json(archive.record_path(record["episode_index"]), record)
-            print(f"DINO {record['source_key']}: {record['dino']['valid_count']}/{record['length']}", flush=True)
-        archive.finalize()
-    finally:
-        if owns_encoder:
-            encoder.close()

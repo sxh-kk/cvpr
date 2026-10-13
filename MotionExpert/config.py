@@ -1,4 +1,4 @@
-"""Versioned dense motion contract and training configuration."""
+"""Current SMPL-H245 forecasting model and shared-image training configuration."""
 
 import math
 import os
@@ -11,9 +11,6 @@ MOTION_DIM = 245
 TRAJECTORY_DIM = 18
 IMAGE_TOKEN_COUNT = 5
 IMAGE_FEATURE_DIM = 1024
-REPRESENTATION_VERSION = "dense12_rot6d_hands21_contacts_v1"
-LEGACY_ARCHITECTURE = "e7_dense12_hands21_v2"
-GLOBAL_ARCHITECTURE = "e7_dense12_hands21_global_v2"
 SMPLH_REPRESENTATION_VERSION = "smplh12_rot6d_hands21_contacts_v1"
 SMPLH_MODEL_SHA256 = "be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947"
 SMPLH_SCHEMA = "egomotion-smplh16-bodyparams-hands21-camera-floor-dino5-v1"
@@ -23,23 +20,26 @@ def _ns(**values):
     return SimpleNamespace(**values)
 
 
-def motion_expert_config(*, global_token=True):
-    """Dense E7 backbone; source-native axes are explicit and single-source."""
-    archive = "/gaozt-test1/datasets/MixEgoMotion"
+
+def smplh_motion_expert_config():
+    """SMPL-H245, 5Hz historical6 to future5, with shared-image DINO conditioning."""
+    archive = "/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1"
     data = _ns(
-        DATA_DIR=archive, ARCHIVE_ROOT=archive, DATASET_NAME="egosuite",
-        REPRE_TYPE=REPRESENTATION_VERSION, COND_BETAS=False,
+        DATA_DIR=archive, ARCHIVE_ROOT=archive, DATASET_NAME="mixegomotion_smplh",
+        REPRE_TYPE=SMPLH_REPRESENTATION_VERSION, COND_BETAS=False,
         COND_IMG_FEAT=True, COND_TRAJ=True, IMG_FEAT_TYPE="dinov2_reg",
         FPS=5, FRAME_PHASE=0, WINDOW=11, FORECAST_PREFIX=6, SEGMENT_STRIDE=5,
-        TRAIN_TASK="fore", REQUIRE_FULL_WINDOW=True, TRAJECTORY_CONDITION_PROB=0.0,
+        TRAIN_TASK="fore", REQUIRE_FULL_WINDOW=True, TRAJECTORY_CONDITION_PROB=0.5,
         MOTION_SUPERVISION="joint",
-        SPLIT_MANIFEST=str(ROOT / "exp/dense_k12/splits.json"),
-        STATS_PATH=str(ROOT / "exp/dense_k12_fore_5hz_joint/stats.pt"), STATS_MODE="dense_masked",
+        SPLIT_MANIFEST=archive + "/meta/splits.json",
+        STATS_PATH="/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint.pt", STATS_MODE="smplh_masked",
         NORMALIZATION_CLIP=None, ROW_GROUP_CACHE_MB=128, PARQUET_FILE_CACHE=8,
-        ROTATION_BASIS_PATH=None, ROTATION_BASIS_MODE="source_native",
-        TARGET_JOINT_BASIS="egosuite_native_v1", REQUIRE_VERIFIED_ROTATIONS=True,
+        VISION_PROFILE_ROOT=archive + "/vision_profiles/psi0_256x480_v1_30hz", IMAGE_PROFILE="256x480",
+        ROTATION_BASIS_PATH=None, ROTATION_BASIS_MODE="smplh_model_defined",
+        TARGET_JOINT_BASIS="smplh_body22_axes_v1", REQUIRE_VERIFIED_ROTATIONS=True,
+        MODEL_SHA256=SMPLH_MODEL_SHA256, SMPLH_MODEL_PATH=None,
         CONTACT_SPEED_M_S=0.2, CONTACT_HEIGHT_M=0.10,
-        BATCH_SIZE=8, NUM_WORKERS=4, PIN_MEMORY=True,
+        BATCH_SIZE=256, NUM_WORKERS=24, PIN_MEMORY=True,
         PERSISTENT_WORKERS=True, PREFETCH_FACTOR=2, DROP_LAST=True,
         MIN_VALID_IMAGE_FRACTION=0.5, SOURCE_BALANCE=False,
     )
@@ -54,7 +54,7 @@ def motion_expert_config(*, global_token=True):
         MODEL_NAME="uem", CKPT_PATH=None, INIT_CKPT_PATH=None,
         GENERATIVE_TYPE="flow", LEARN_TRAJ=False, ENCODER_TSFM=None,
         MOTION_EXPERT=expert, OUTPUT_BRANCH_MODE="single", ZERO_MASK_TOKEN=False,
-        PREDICT_XSTART=True, GLOBAL_TOKEN_COUNT=1 if global_token else 0,
+        PREDICT_XSTART=True, GLOBAL_TOKEN_COUNT=1,
         INPUT_FEATS=MOTION_DIM, TRAJ_DIM=TRAJECTORY_DIM,
         IMAGE_TOKENS=IMAGE_TOKEN_COUNT, IMAGE_DIM=IMAGE_FEATURE_DIM,
     )
@@ -64,48 +64,30 @@ def motion_expert_config(*, global_token=True):
         GLOBAL_FEATURE_START=108, GLOBAL_FEATURE_END=117,
     )
     train = _ns(
-        EXP_PATH=str(ROOT / "exp/dense_k12_fore_5hz_joint"), LR=1e-4, SEED=62,
+        EXP_PATH=str(ROOT / "exp/smplh_k12_psi0_pretrain"), LR=1e-4, SEED=62,
         USE_CKPT_LR=True, FUSED_ADAMW=False, BATCHED_METRIC_SYNC=False, WEIGHT_DECAY=0.01,
-        NUM_EPOCHS=300, NUM_GPUS=1, PRECISION="bf16-mixed",
+        NUM_EPOCHS=200, NUM_GPUS=8, PRECISION="bf16-mixed",
         ACCUMULATE_GRAD_BATCHES=1, GRADIENT_CLIP_VAL=1.0, EMA_DECAY=0.992028,
-        SCHEDULER="cosine_warmup", SCHEDULER_TOTAL_EPOCHS=300,
+        SCHEDULER="cosine_warmup", SCHEDULER_TOTAL_EPOCHS=200,
         WARMUP_EPOCHS=20, MIN_LR_RATIO=0.1, MAX_STEPS=-1,
         NUM_SANITY_VAL_STEPS=0, LOG_EVERY_N_STEPS=10, PROGRESS_REFRESH_RATE=10,
-        CHECK_VAL_EVERY_N_EPOCHS=5, SAVE_EVERY_N_EPOCHS=10,
+        CHECK_VAL_EVERY_N_EPOCHS=5, SAVE_EVERY_N_EPOCHS=20,
         SAMPLE_VAL_EVERY_N_EPOCHS=5, SAMPLE_VAL_MAX_SAMPLES=16,
     )
     return _ns(DATA=data, SPARSE_JOINTS=_ns(ENABLED=True, INDICES=list(K12_JOINTS)),
                MODEL=model, FLOW=flow, TRAIN=train)
 
-
-def smplh_motion_expert_config(*, global_token=True):
-    """Keep the K12/245D network; derive its labels from common SMPL-H FK."""
-    cfg = motion_expert_config(global_token=global_token)
-    archive = "/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1"
-    cfg.DATA.DATA_DIR = cfg.DATA.ARCHIVE_ROOT = archive
-    cfg.DATA.DATASET_NAME = "mixegomotion_smplh"
-    # Training-only historical trajectory; validation/deployment remain images.
-    # A starting modality-dropout experiment, not a proven optimal probability.
-    cfg.DATA.TRAJECTORY_CONDITION_PROB = 0.5
-    cfg.DATA.REPRE_TYPE = SMPLH_REPRESENTATION_VERSION
-    cfg.DATA.ROTATION_BASIS_MODE = "smplh_model_defined"
-    cfg.DATA.TARGET_JOINT_BASIS = "smplh_body22_axes_v1"
-    cfg.DATA.MODEL_SHA256 = SMPLH_MODEL_SHA256
-    cfg.DATA.SMPLH_MODEL_PATH = None
-    cfg.DATA.SPLIT_MANIFEST = archive + "/meta/splits.json"
-    cfg.DATA.BATCH_SIZE = 64
-    cfg.TRAIN.NUM_GPUS = 8
-    cfg.TRAIN.EXP_PATH = str(ROOT / "exp/smplh_k12_fore_5hz_joint")
-    cfg.DATA.STATS_PATH = cfg.TRAIN.EXP_PATH + "/stats.pt"
-    return cfg
-
-
 def validate_architecture(cfg):
-    smplh = cfg.DATA.REPRE_TYPE == SMPLH_REPRESENTATION_VERSION
+    vision_root = getattr(cfg.DATA, "VISION_PROFILE_ROOT", None)
+    image_profile = getattr(cfg.DATA, "IMAGE_PROFILE", None)
+    if vision_root is not None and (not isinstance(vision_root, str) or not vision_root.strip()):
+        raise ValueError("DATA.VISION_PROFILE_ROOT requires an explicit SMPL-H visual-cache directory")
+    if image_profile is not None and (not isinstance(image_profile, str) or not image_profile.strip()):
+        raise ValueError("DATA.IMAGE_PROFILE must be a shared image profile name or JSON path")
     dim, joints = MOTION_DIM, K12_JOINTS
     global_start, global_end = 108, 117
     expected = {
-        "DATA.REPRE_TYPE": SMPLH_REPRESENTATION_VERSION if smplh else REPRESENTATION_VERSION,
+        "DATA.REPRE_TYPE": SMPLH_REPRESENTATION_VERSION,
         "DATA.COND_BETAS": False, "DATA.COND_IMG_FEAT": True,
         "DATA.COND_TRAJ": True, "DATA.IMG_FEAT_TYPE": "dinov2_reg",
         "DATA.FRAME_PHASE": 0,
@@ -130,17 +112,15 @@ def validate_architecture(cfg):
         for key in path.split("."):
             actual = getattr(actual, key, None)
         if actual != value:
-            raise ValueError(f"Dense MotionExpert requires {path}={value!r}, got {actual!r}")
+            raise ValueError(f"SMPL-H MotionExpert requires {path}={value!r}, got {actual!r}")
     count = cfg.MODEL.GLOBAL_TOKEN_COUNT
-    if type(count) is not int or count not in (0, 1):
-        raise ValueError("GLOBAL_TOKEN_COUNT must be 0 or 1")
-    if type(cfg.DATA.FPS) is not int or cfg.DATA.FPS not in (5, 15):
-        raise ValueError("Dense MotionExpert supports 5Hz forecasting and legacy 15Hz profiles")
-    task = getattr(cfg.DATA, "TRAIN_TASK", None)
-    if task not in (None, "recon", "fore", "gen"):
-        raise ValueError("DATA.TRAIN_TASK must be recon, fore, gen or null for legacy training")
-    if getattr(cfg.DATA, "MOTION_SUPERVISION", "future_only") not in ("joint", "future_only"):
-        raise ValueError("DATA.MOTION_SUPERVISION must be joint or future_only")
+    if type(count) is not int or count != 1:
+        raise ValueError("GLOBAL_TOKEN_COUNT must be 1")
+    if cfg.DATA.FPS != 5 or getattr(cfg.DATA, "TRAIN_TASK", None) != "fore":
+        raise ValueError("MotionExpert supports the 5Hz forecasting protocol")
+    if getattr(cfg.DATA, "MOTION_SUPERVISION", None) != "joint":
+        raise ValueError("MotionExpert jointly supervises historical and future motion")
+    task = "fore"
     probability = getattr(cfg.DATA, "TRAJECTORY_CONDITION_PROB", 0.0)
     if (isinstance(probability, bool) or not isinstance(probability, (int, float))
             or not math.isfinite(probability) or not 0 <= probability <= 1):
@@ -162,26 +142,20 @@ def validate_architecture(cfg):
     if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight <= 0:
         raise ValueError("FLOW.GLOBAL_WEIGHT must be finite and positive")
     if getattr(cfg.DATA, "COND_TEXT", False) or getattr(getattr(cfg.MODEL, "TEXT_CONDITION", None), "ENABLED", False):
-        raise ValueError("Text-conditioned legacy configurations are incompatible with dense MotionExpert")
-    if smplh:
-        if (cfg.DATA.ROTATION_BASIS_MODE != "smplh_model_defined"
-                or cfg.DATA.TARGET_JOINT_BASIS != "smplh_body22_axes_v1"
-                or getattr(cfg.DATA, "MODEL_SHA256", None) != SMPLH_MODEL_SHA256):
-            raise ValueError("SMPL-H requires the matching model-defined body22 axes and model SHA256")
-        if cfg.DATA.ROTATION_BASIS_PATH:
-            raise ValueError("SMPL-H model-defined axes do not use native-axis calibration mappings")
-    elif cfg.DATA.ROTATION_BASIS_MODE not in {"source_native", "unified"}:
-        raise ValueError("ROTATION_BASIS_MODE must be source_native or unified")
+        raise ValueError("MotionExpert has no text-conditioning branch")
+    if (cfg.DATA.ROTATION_BASIS_MODE != "smplh_model_defined"
+            or cfg.DATA.TARGET_JOINT_BASIS != "smplh_body22_axes_v1"
+            or getattr(cfg.DATA, "MODEL_SHA256", None) != SMPLH_MODEL_SHA256
+            or cfg.DATA.ROTATION_BASIS_PATH):
+        raise ValueError("SMPL-H requires the shared model-defined body axes and model SHA256")
     if not cfg.DATA.TARGET_JOINT_BASIS:
         raise ValueError("TARGET_JOINT_BASIS must explicitly identify the supervised joint axes")
-
 
 def architecture_metadata(cfg):
     validate_architecture(cfg)
     count = cfg.MODEL.GLOBAL_TOKEN_COUNT
-    smplh = cfg.DATA.REPRE_TYPE == SMPLH_REPRESENTATION_VERSION
     metadata = {
-        "architecture": GLOBAL_ARCHITECTURE if count else LEGACY_ARCHITECTURE,
+        "architecture": "e7_smplh12_hands21_global_v1",
         "representation": cfg.DATA.REPRE_TYPE, "global_token_count": count,
         "num_prefix_tokens": 1 + count, "hidden_dim": 768,
         "motion_dim": cfg.MODEL.INPUT_FEATS, "trajectory_dim": TRAJECTORY_DIM,
@@ -198,14 +172,12 @@ def architecture_metadata(cfg):
         "feature_t": 1.0, "prediction_type": cfg.FLOW.PREDICTION_TYPE,
         "num_steps": cfg.FLOW.NUM_STEPS, "solver": cfg.FLOW.SOLVER,
     }
-    if smplh:
-        metadata["architecture"] = "e7_smplh12_hands21_global_v1" if count else "e7_smplh12_hands21_v1"
-        metadata["body_model"] = {"type": "smplh", "betas": 16,
-                                  "model_sha256": cfg.DATA.MODEL_SHA256,
-                                  "shape_condition": False, "shape_supervision": None,
-                                  "shape_usage": "source_fk_only"}
+    metadata["body_model"] = {"type": "smplh", "betas": 16,
+                              "model_sha256": cfg.DATA.MODEL_SHA256,
+                              "shape_condition": False, "shape_supervision": None,
+                              "shape_usage": "source_fk_only"}
     if cfg.DATA.FPS == 5:
-        joint = getattr(cfg.DATA, "MOTION_SUPERVISION", "future_only") == "joint"
+        joint = True
         metadata["forecast_protocol"] = {
             "version": "image_history_joint_forecast_v1" if joint else "image_history_forecast_v1",
             "train_task": cfg.DATA.TRAIN_TASK,
@@ -220,7 +192,6 @@ def architecture_metadata(cfg):
         }
     return metadata
 
-
 def as_dict(cfg):
     if isinstance(cfg, SimpleNamespace):
         return {key: as_dict(value) for key, value in vars(cfg).items()}
@@ -230,19 +201,8 @@ def as_dict(cfg):
         return [as_dict(value) for value in cfg]
     return cfg
 
-
 def config_from_dict(values):
-    cfg = (smplh_motion_expert_config() if values.get("DATA", {}).get("REPRE_TYPE") == SMPLH_REPRESENTATION_VERSION
-           else motion_expert_config())
-    # Old checkpoints/YAMLs must not inherit the new forecasting task defaults.
-    supplied_data = values.get("DATA", {})
-    if "MOTION_SUPERVISION" not in supplied_data:
-        # Existing checkpoints retain their loss and sampling protocol.
-        cfg.DATA.MOTION_SUPERVISION = "future_only"
-    if supplied_data.get("FPS") == 15:
-        cfg.DATA.TRAIN_TASK = None
-        cfg.DATA.REQUIRE_FULL_WINDOW = False
-        cfg.DATA.TRAJECTORY_CONDITION_PROB = 0.0
+    cfg = smplh_motion_expert_config()
     def merge(target, source):
         for key, value in source.items():
             if isinstance(value, dict):
@@ -259,7 +219,7 @@ def config_from_dict(values):
 
 def load_config(path=None, *, data_dir=None):
     import yaml
-    with open(path or ROOT / "configs/smplh_k12_global.yaml", encoding="utf-8") as handle:
+    with open(path or ROOT / "configs/smplh_k12_psi0_pretrain.yaml", encoding="utf-8") as handle:
         values = yaml.safe_load(handle)
     if not isinstance(values, dict):
         raise ValueError("Configuration must be a YAML mapping")
@@ -275,10 +235,12 @@ def load_config(path=None, *, data_dir=None):
         # This archive owns its split membership; relocating data relocates
         # that manifest too, rather than borrowing an old absolute path.
         cfg.DATA.SPLIT_MANIFEST = str(Path(cfg.DATA.ARCHIVE_ROOT) / "meta/splits.json")
-    for key in ("SPLIT_MANIFEST", "STATS_PATH", "ROTATION_BASIS_PATH", "SMPLH_MODEL_PATH"):
+    for key in ("SPLIT_MANIFEST", "STATS_PATH", "ROTATION_BASIS_PATH", "SMPLH_MODEL_PATH", "VISION_PROFILE_ROOT"):
         value = getattr(cfg.DATA, key, None)
         if value:
             setattr(cfg.DATA, key, resolve(value))
+    if cfg.DATA.IMAGE_PROFILE and cfg.DATA.IMAGE_PROFILE not in {"256x480", "256x320"}:
+        cfg.DATA.IMAGE_PROFILE = resolve(cfg.DATA.IMAGE_PROFILE)
     for section, key in ((cfg.MODEL, "INIT_CKPT_PATH"), (cfg.MODEL, "CKPT_PATH"), (cfg.TRAIN, "EXP_PATH")):
         value = getattr(section, key, None)
         if value:

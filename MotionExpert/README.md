@@ -1,118 +1,149 @@
 # MotionExpert
 
-默认适配独立 SMPL-H 参数归档 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/`，**保留原有12稀疏身体关节及245维模型输入／输出**。读取时用归档自己的同一 SMPL-H 模型和实际16维beta计算完整身体FK，再选择既有K12；左右各21点使用显式手部标签。MotionExpert 独立读取参数与视觉 Parquet，不依赖 pipeline Python 包或旧 dense22 文件，也不修改归档。
+当前模型读取统一SMPL-H参数归档，在5Hz上用历史5帧＋当前帧图像预测未来5帧运动。
+当前图像与Ψ₀当前图像相同。后训练可取单次 `t=1` 网络调用的hidden作为运动先验，并反传更新MotionExpert。
+下游模型不在此模块内。
 
-时间协议保持 **5Hz，历史1秒＋当前帧的6张图像 → 联合重建历史6帧、预测未来1秒的5帧运动**。11个时刻为 `[-1,-0.8,-0.6,-0.4,-0.2,0,0.2,0.4,0.6,0.8,1]`，从原30Hz按零相位步长6选帧。真实身体和相机用于监督，训练中一半样本还开放历史相机轨迹；真实shape只在数据端FK与审计中使用，不作为模型条件或预测目标。部署只需要历史图像的 DINO 特征。
+## 时间、图像与条件
 
-## 表示与原 UniEgoMotion 的对应
+11个时刻为 `[-1,-0.8,-0.6,-0.4,-0.2,0,0.2,0.4,0.6,0.8,1]` 秒。
+原始运动和离线DINO均为30Hz，MotionExpert按零相位步长6采样。
+输入DINO为 `[B,6,5,1024]`，CLS＋4 register；未来5帧图像不作为条件。
+模型联合监督全部11帧运动，不输入干净历史人体姿态。
 
-参考官方 [v4_beta 编码／解码](https://github.com/chaitanya100100/UniEgoMotion/blob/580c92c6d70a91672c4106bab30ca82cdd80f379/dataset/representation_utils.py) 的旋转6D、相机地面参考和联合生成方式。原版包含22身体关节、手PCA与shape；当前模型沿用项目既有K12稀疏身体表示和显式手21点，不增加完整22关节或shape预测分支。
+| 阶段 | 最终RGB H×W | 增强 |
+| --- | --- | --- |
+| 预训练 | 256×480 | 确定性共享几何 |
+| 后训练 | 256×320 | 窗口共享颜色增强 |
+| Robust | 256×480 | 窗口共享颜色＋随机裁切 |
 
-| 输出 | 通道切片（左闭右开） | 维数 |
-|---|---|---:|
-| 身体12稀疏关节，逐关节前两行6D＋XYZ | `[0:108]` | 108 |
-| 相机地面参考系的旋转6D＋平移3D增量 | `[108:117]` | 9 |
-| 左手21点XYZ | `[117:180]` | 63 |
-| 右手21点XYZ | `[180:243]` | 63 |
-| 双脚接触代理 | `[243:245]` | 2 |
-| 总计 | | **245** |
+共享处理位于 [ImageProcess](../ImageProcess/README.md)。两路使用同一处理后的当前RGB，各编码器各自归一化。
+在线增强需在线DINO编码；固定离线特征只用于当前确定性预训练。
+真机建议先攒满约1秒历史后启用运动先验；当前接口要求6个真实时刻，不进行首帧复制补历史。
+历史缓冲的时间对齐、就绪判定与调度由调用方负责。
 
-身体索引保持 `[0,4,5,10,11,13,14,15,18,19,20,21]`：pelvis、左右knee、左右foot、左右collar、head、左右elbow、左右wrist。表示版本为 `smplh12_rot6d_hands21_contacts_v1`，与旧原生轴dense12版本明确区分。`SPARSE_JOINTS.ENABLED=true`、`MODEL.INPUT_FEATS=245`；配置拒绝切换成全22或351维。HM逐帧beta原值用于FK并保留在misc，不复制首帧或强制平均；没有beta预测头或beta损失。
+训练保留历史相机轨迹模态dropout：每样本概率0.5开放前6帧有效18维轨迹。
+验证、测试和 `forward_features()` 隐藏真实相机轨迹；未来图像和轨迹始终隐藏。
+身体和手部真值始终只作为监督。
 
-世界坐标为米、Z-up。窗口先将首帧实际相机的水平位置和朝向规范化，再以每帧相机的地面投影建立参考系；身体全局旋转与手点变换到此参考系。旋转编码取矩阵前两行。相邻参考增量在上一帧参考系中表达，首帧保存初始参考位姿；轨迹标签仍为18维（相机相对地面位姿9＋参考增量9），与运动重复增量共享统计。
+## 运动表示
 
-解码返回12个身体关节XYZ／全局旋转、双手21点与地面参考轨迹。稀疏12关节无法直接恢复完整SMPL-H局部pose、beta或trans，因此接口不输出这些未预测参数；不把缺失关节补成真实姿态。显式手点不需要手指PCA，也不转换为完整finger pose。身体XYZ和旋转保持独立预测，显式手腕与身体模型手腕的偏差在评估中单独报告。
+读同一自有SMPL-H模型及逐帧16维beta做FK，再选既有K12：
+`[0,4,5,10,11,13,14,15,18,19,20,21]`，对应pelvis、左右knee、左右foot、
+左右collar、head、左右elbow、左右wrist。双手使用左右各21点显式XYZ监督。
+表示版本 `smplh12_rot6d_hands21_contacts_v1`，身体轴为 `smplh_body22_axes_v1`。
 
-## 数据准入、mask与来源
+| 通道切片 | 内容 | 维数 |
+| --- | --- | ---: |
+| `[0:108]` | 身体12关节，逐关节旋转6D＋XYZ | 108 |
+| `[108:117]` | 相机地面参考系旋转6D＋平移3D增量 | 9 |
+| `[117:180]` | 左手21点XYZ | 63 |
+| `[180:243]` | 右手21点XYZ | 63 |
+| `[243:245]` | 双脚接触代理 | 2 |
+| 总计 | 模型运动输入／输出 | **245** |
 
-新归档目标为 EgoSuite 6,614段／26,841,893帧与 EgoExo4D-HM 2,649段／11,295,991帧。当前记录中9,216段满足 `training_eligible`，47条HM隔离记录保留但不进入训练。正式读取要求 `.pipeline/dataset-state.json` 为 `state=accepted`、`independent_acceptance_pending=false`。这两个条件满足前，转换完成不能视为正式训练数据已发布。
+另有18维相机轨迹：相机相对地面参考位姿9维＋参考运动增量9维。
+重复的参考增量共享归一化统计。6D取旋转矩阵前两行。
+世界坐标米、Z-up；窗口首帧相机的水平位置／朝向规范化，然后逐帧转到相机地面参考系。
+相邻增量在上一帧参考系中表达，首帧保留初始参考约定。
+输出包括K12位置／旋转、双手点、参考运动和接触，不预测完整SMPL-H pose或shape。
 
-读取使用归档原有 `meta/splits.json`，不重新随机切分：EgoSuite沿用人物／录制分组，HM沿用participant／capture连通分量。reader核对全部record、receipt、文件尺寸与时间身份、全局frame/index、split成员及分组；fingerprint绑定参数schema、模型SHA、全部record与归档索引。已有外置全量验收报告时继续核对其结果和binding；归档搬迁不要求保留旧数据或外置job目录。窗口读取再次检查文件稳定性，不在每个batch重算数百GB哈希。
+身体6D、XYZ、双手、增量和接触全部保留独立有效mask与损失。
+标签mask只约束监督；缺失标签的运动通道在训练中保留独立高斯噪声。
+`t=1` 的全部245维输入与部署的一步hidden入口一致，不由未来标签可用性清零噪声。
+EgoSuite身体为拟合估计，HM为发布的优化参数；来源观测、插值、完成和confidence仍留在数据中。
+有效地面优先使用归档值；缺失时只用历史6帧原始有效脚点高度均值减2cm兜底。
+参考仍无效的窗口不进入训练。接触在5Hz重算，阈值0.2m/s及0.1m，属于代理标签。
 
-两来源共用归档的52关节、6890顶点、真实16维beta模型，SHA256为 `be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947`。旋转策略为 `smplh_model_defined / smplh_body22_axes_v1`：模型定义目标轴，原生轴认证和绝对旋转精度认证标记继续保留。EgoSuite身体是拟合估计；HM来自发布的优化参数，数值可用不等于捕获真值。
+## 当前数据与训练
 
-身体监督使用 `estimated.valid`，原观测、插值、完成标签、confidence与残差留在sample的misc中。不同来源confidence的含义不同，本轮没有直接改为confidence加权损失。双手每点XYZ使用各自mask，独立于身体和可选手指PCA；EgoSuite未拟合finger pose仍可正常参与显式手部监督。HM无效参数被有限零值存储时，mask仍保持无效。
+归档：`/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1`。
+两来源共9,263 episodes／38,137,884原生帧，原分割在 `meta/splits.json`。
+保留47段HM隔离记录，reader按training eligibility及窗口mask筛选。
+旧dense缓存和旧视觉文件已删除；reader只支持新的共享profile视觉缓存。
+SMPL-H、双手、相机、地面、mask、模型和物理fingerprint保持原样。
 
-归档地面无效时，只用所选历史前6帧的 `source.feet_world/valid` 估计脚高度均值再减2cm；不使用未来脚点或拟合补全脚点兜底。仍无法确定参考地面的窗口拒绝进入身体训练。脚接触由来源脚点在5Hz上重新计算，使用0.2m/s速度与0.1m高度阈值，保留独立mask。地面和接触均为代理标签，不是独立测量真值。
+完整train运动统计位于 `/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint.pt`，
+原样迁移，无需因新图像尺寸重新计算。新缓存必须保持原mask和训练群体，否则拒绝复用统计。
+缓存manifest必须complete/all且与归档、分割、30Hz帧join和profile一致。
+统计绑定物理表示，checkpoint另外绑定视觉版本。
+归档推理和评测默认要求共享图像profile及DINO权重／归一化／token顺序与checkpoint一致。
+显式添加 `--allow-visual-adaptation` 可允许共享RGB尺寸profile变化，DINO身份仍必须匹配；
+输出会记录训练视觉版本、实际缓存版本及适配声明。在线后训练的 `forward_features()` 支持两种尺寸。
 
-DINO保持 `dinov2-with-registers-large` 的 `[5,1024]`（CLS＋4 register）。新reader只加载前6帧embedding，后5帧视觉值置零并隐藏；历史有效图像比例默认至少0.5。运动统计只读DINO有效性，不加载embedding。
+唯一正式预训练配置：[smplh_k12_psi0_pretrain.yaml](configs/smplh_k12_psi0_pretrain.yaml)。
 
-## 模型、训练与采样
+| 参数 | 设置 |
+| --- | --- |
+| GPU／batch／workers | 8卡，每卡256，全局2048；每卡24workers |
+| 优化器 | AdamW，LR1e-4，weight decay0.01，梯度范数裁剪1.0 |
+| 精度 | BF16 mixed |
+| 周期 | 200 epochs；20 epochs warmup，然后cosine降至1e-5 |
+| 保存／验证 | 每20 epochs保存，结束保存final；每5 epochs验证 |
+| 模型 | hidden768、12层、1 shared＋11 routed experts、Top-2、一个GLOBAL token |
+| 生成 | x0 Flow Matching，10步Euler采样；EMA0.992028 |
+| 提速开关 | fused AdamW和批量指标同步均保持关闭 |
 
-保留12层、hidden768、每层1个shared＋11个routed experts、Top-2路由、4帧chunk和一个GLOBAL token。输入／输出投影保持245维。使用x0 Flow Matching、10步Euler、EMA与MoE均衡损失。
-
-显式 `TRAIN_TASK=fore / MOTION_SUPERVISION=joint`：全部11帧的有效K12身体、手、参考增量和接触参与损失。历史真值属于待生成目标；推理从全部11帧高斯噪声开始，历史和未来共同更新。SMPL-H默认 `TRAJECTORY_CONDITION_PROB=0.5`，训练逐样本独立抽签，决定是否开放前6帧有效的18维相机轨迹；这是长期期望比例，不保证每个batch恰好一半。图像始终只开放前6帧，不再额外随机隐藏整段视频。
-
-| 阶段／样本类型 | 历史6帧DINO | 历史6帧真实相机轨迹 | 未来5帧图像／真实轨迹 |
-|---|---|---|---|
-| 训练，概率0.5 | 可见有效帧 | 可见有效通道 | 全部隐藏 |
-| 训练，概率0.5 | 可见有效帧 | 全部隐藏 | 全部隐藏 |
-| 验证、测试、部署 | 可见有效帧 | 全部隐藏 | 全部隐藏 |
-
-两类训练样本都联合监督11帧，不输入干净历史人体姿态。未来参考增量仍是运动预测目标，但从不作为条件输入。独立缺失mask继续生效；开放轨迹不把无效通道变为有效。这里的0.5是模态dropout概率，与采样CFG权重及损失权重分别配置。
-
-这样可以让共享网络在有／无轨迹时都学习，思路与 [ModDrop](https://arxiv.org/abs/1501.00102) 的缺失模态训练一致，但0.5只是起始实验值，没有证据表明最优。最相关的 [UniEgoMotion补充表3](https://arxiv.org/html/2508.01126v1#A3) 中，统一模型去掉轨迹的预测MPJPE为0.322m，单独仅图像训练为0.318m；其主要预测协议在推理时也提供历史轨迹。因此不能据有轨迹分支loss下降推断纯图像部署会改善，也不能将该论文的2–4秒指标直接当成我们的1秒K12结果。固定数据、步数和seed，对比概率0／0.25／0.5，以**仅图像验证的未来5帧**指标选择配置。
-
-若混合训练没有改善纯图像效果，可另行研究“图像＋历史轨迹教师→仅图像学生”。[第一视角多模态蒸馏](https://arxiv.org/abs/2307.07483) 在动作识别中验证了训练额外模态、部署仅RGB的路径；迁移到本运动预测任务仍需设计和消融。当前实现没有教师、学生或蒸馏损失。
-
-损失保留有效通道MSE与 `GLOBAL_WEIGHT=8`，增量权重仍作用于 `[108:117]`。分别报告身体6D／XYZ、左右手、增量旋转／平移、接触的有效计数和MSE。主验证只评价未来5帧：K12身体和手MPJPE、旋转角度、参考漂移、手腕偏差与脚部物理指标。world还原使用预测参考增量；真实最后观察参考位姿仅是坐标输出锚点，不是网络条件。纯图像部署无此锚点时，可输出相对参考坐标的运动。
-
-## 使用
-
-默认 SMPL-H 训练配置为8卡、每卡 batch256、梯度累积1，有效全局 batch2048；训练200 epoch，学习率调度总周期也为200 epoch，峰值学习率 `1e-4`。前20 epoch线性warmup，随后余弦衰减，在第200 epoch达到最低学习率 `1e-5`（`MIN_LR_RATIO=0.1`）。每20 epoch保存checkpoint，每5 epoch验证，训练结束额外保存 `final.ckpt`。其余参数保持：EMA `0.992028`、每卡24个数据加载 worker（8卡共192个）、BF16及原有注意力实现，采样仍为5Hz、历史6帧＋未来5帧。正式训练使用普通AdamW和原有逐指标日志同步，`FUSED_ADAMW=False`、`BATCHED_METRIC_SYNC=False`。
-
-保存间隔与学习率曲线在训练启动时确定；修改YAML后需要启动或恢复训练才会生效，正在运行的进程不会自动重新读取该配置。本次运行将在第20 epoch完整保存后，以200 epoch调度周期及20 epoch保存间隔恢复；两条学习率曲线在该位置均为 `1e-4`，优化器、EMA与调度计数继续保留。
-
-两项可选优化保留在代码中：启用 `BATCHED_METRIC_SYNC` 时，训练step指标在原有每10个优化器步的日志周期内合并为一次跨卡归约，保留 `train/*_step` 标签；epoch指标累计全部batch（包括尾部batch），按样本数加权后统一归约，保留 `train/*_epoch` 标签。验证日志仍沿用原路径。同时使用BF16与fused优化器时，无GradScaler的专用precision插件使Lightning 2.5仍执行原有1.0范数梯度裁剪；当前正式配置使用原precision路径。
-
-八卡实数据对照每组预热32步、测量64步，并重复原配置基线：原配置678.9／690.4窗口/秒，仅fused为689.1，仅日志优化为690.9，两项合用为689.2。组合的训练调用平均耗时比两次基线均值减少约18%，测量区间每卡Python层all-reduce由1216次降到6次（不包含C++层DDP梯度通信）；整体吞吐差异仍在基线运行波动内，本轮未确认明显的端到端提速。按当前200 epoch估算纯训练约3.4天，不包括验证、checkpoint写入与启动开销，也不代表已验证长期收敛。
-
-测速报告位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-speed-optimizations-20261012T163539Z/summary.json`。各组loss、参数、最终梯度、Adam状态和EMA均通过有限值检查；42项相关测试及20个子测试通过。每卡32 workers的实测吞吐更低；每卡batch512出现非有限数值，暂不采用。正式训练状态与日志、输出目录见 `/gaozt-test1/datasets/MixEgoMotion/training/current_run.json`；统计直接复用已验收的全量train统计。
-
-```bash
-python -m pip install -e ./MotionExpert
-# 默认即此配置
-python -m MotionExpert.compute_joint_motion_stats \
-  --config MotionExpert/configs/smplh_k12_global.yaml \
-  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt
-python -m MotionExpert.check_data --config MotionExpert/configs/smplh_k12_global.yaml
-python -m MotionExpert.train --config MotionExpert/configs/smplh_k12_global.yaml --from-scratch
-```
-
-必须在归档正式accepted后计算全部train窗口的SMPL-H K12 245＋18统计。统计逐通道排除无效值，contacts保持mean0/std1，重复增量严格共享统计。维度相同不代表轴和标签分布相同：旧原生轴245统计不能复用，已撤回的351统计也不兼容。`--limit-windows`产生的部分统计标为diagnostic，不可启动正式训练；代码内部 `allow_unpublished=True` 仅供只读诊断，没有正式训练配置开关。
-
-全量统计可并行分片，每个 `I=0..15` 各运行一次（`III`为三位补零索引）：
-
-```bash
-python -m MotionExpert.compute_joint_motion_stats \
-  --config MotionExpert/configs/smplh_k12_global.yaml \
-  --num-shards 16 --shard-index I --shard-mode contiguous \
-  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/shards/stats.shard-III-of-016.pt
-python -m MotionExpert.merge_joint_motion_stats \
-  --input-dir MotionExpert/exp/smplh_k12_fore_5hz_joint/shards --stem stats --num-shards 16 \
-  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt
-```
-
-分片合并检查表示、模型、split、采样协议、区间无重叠及全覆盖。Parquet按列及row group读取，worker缓存受字节上限控制。统计和产物写在归档之外。
+新DINO完整提取后，从仓库根目录执行：
 
 ```bash
-python -m MotionExpert.evaluate \
-  --checkpoint MotionExpert/exp/smplh_k12_fore_5hz_joint/last.ckpt \
-  --split val --max-samples 16 --output MotionExpert/exp/smplh_k12_fore_5hz_joint/val_metrics.json
-python -m MotionExpert.export_weights \
-  MotionExpert/exp/smplh_k12_fore_5hz_joint/last.ckpt MotionExpert/weights/smplh_k12_global_ema_fp32.pt
+cd /root/workspace/wbc/guanzerong/cvpr
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python \
+  -m MotionExpert.train \
+  --config MotionExpert/configs/smplh_k12_psi0_pretrain.yaml \
+  --from-scratch
 ```
 
-推理API `expert.predict_future({"img_embs": img_embs})` 接受 `[B,6,5,1024]`，返回 `future_motion[_denormalized] [B,5,245]`；完整motion为 `[B,11,245]`，hidden为 `[B,11,768]`，GLOBAL hidden为 `[B,768]`。坐标解码输出 `[B,5,12,3]` 身体和左右各 `[B,5,21,3]` 手点；稀疏解码无需加载完整人体模型，数据端FK及checkpoint仍绑定模型SHA。
+Lightning按配置启动8卡DDP，无需另套torchrun。输出为
+`/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_from_scratch`。
+不使用旧MotionExpert checkpoint；保留的DINO预训练权重仍用于特征提取。
+全量DINO已使用BF16、每进程batch128、每卡2进程启动；MotionExpert训练尚未启动。
+这些是DINO提取参数，MotionExpert每卡训练batch仍为256。DINO命令见 [pipeline README](../pipeline/README.md)。
+续训默认沿用checkpoint学习率；如设置 `TRAIN.USE_CKPT_LR: false`，新学习率会在当前调度阶段生效，
+并同步更新scheduler基准，保留已完成的epoch与step。
 
-恢复训练使用 `--resume`；`--from-scratch` 与 `--init-weights` 为明确的新运行入口，三者互斥。原生轴245权重虽投影尺寸相同，表示和轴不同，当前严格入口仍拒绝误恢复／直接初始化；旧153／text和已撤回351权重不兼容。Checkpoint、统计和导出权重绑定表示、K12顺序、模型SHA与5Hz联合协议。单独改变轨迹开放概率不改变物理标签、窗口或统计，因此无需重新处理归档／重算同表示统计；checkpoint的训练协议另绑定该概率，概率不同的checkpoint不能直接严格恢复或初始化。
+## 一步hidden与在线共享图像
 
-## 验证及旧实验
+`forward_features()` 保留autograd，默认在高斯噪声 `t=1` 上执行一次条件模型调用：
+
+- `one_step_hidden [B,11,768]`：全部11个运动时刻的hidden。
+- `one_step_global [B,768]`：GLOBAL hidden。
+
+该入口不进行完整10步采样，不接收干净人体目标，未来条件隐藏。
+默认不启用CFG；显式提供 `cond_scale` 会增加无条件网络调用。
+调用方可固定seed或提供噪声以控制重复推理中的随机性。
+
+```python
+import json
+import torch
+from MotionExpert import MotionExpert
+from egomotion_pipeline.features import DinoEncoder
+
+expert = MotionExpert(weights="new-run/checkpoint.ckpt", device="cuda",
+                      dtype=torch.float32, use_ema=False).train()
+encoder = DinoEncoder(json.load(open("pipeline/configs/dino.local.json")))
+
+# history_rgb为5Hz六个真实时刻，最后一帧就是Ψ₀当前帧。
+window = encoder.encode_window(history_rgb, stage="posttrain", seed=123)
+# Robust改为stage="robust"；DINO仍使用同一份冻结预训练权重。
+img_embs = torch.from_numpy(window["img_embs"])[None].to("cuda")
+features = expert.forward_features({"img_embs": img_embs}, seed=0)
+# Ψ₀使用window["rgb"][-1]；下游loss经features反传更新运动网络。
+```
+
+MotionExpert是wrapper；外部nn.Module／DDP应注册 `expert.model` 为子模块。
+只用hidden时部分输出head没有梯度，外部DDP需处理未使用参数，如 `find_unused_parameters=True`。
+`train()/eval()`及`parameters()`控制同一运动网络。
+冻结运动模型时可用无梯度 `extract_features()`；完整运动预测用 `predict_future()`，
+返回未来 `[B,5,245]` 与完整 `[B,11,245]`。坐标解码得到身体 `[B,5,12,3]` 和双手各 `[B,5,21,3]`。
+
+## 当前检查入口
+
+保留当前时间／mask／SMPL-H坐标解码、训练噪声、采样验证、续训调度、视觉版本及一步hidden梯度的关键回归：
 
 ```bash
 python -m pytest MotionExpert/tests -q
 ```
 
-本次验证与限制记录在 [review.md](review.md)，训练验收计划见 [validation_plan.md](validation_plan.md)。小样本结构验证不等于已完成新模型训练，也不等于全量上游拟合已验收。
-
-旧 `configs/dense_k12_global.yaml` 保留245维EgoSuite原生轴实验；其历史验证仍在 `exp/dense_k12_fore_5hz_joint/`。`motion_expert_config()` 为旧程序的明确兼容factory，`smplh_motion_expert_config()` 为SMPL-H K12配置factory，`load_config()` 默认选择SMPL-H K12。`exp/smplh22_fore_5hz_joint/` 是已撤回351方案的历史诊断，不能用于当前模型准入。所有结构诊断均不代表已完成全量训练。
+已有运动数值验收不重复执行。新特征完整提取后，训练启动前的读取检查负责验证视觉版本和统计兼容性。

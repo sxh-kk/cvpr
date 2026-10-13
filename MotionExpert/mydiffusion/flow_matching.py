@@ -327,6 +327,7 @@ class FlowMatching:
         batch_size = x_start.shape[0]
         conditioning = model_kwargs.get("y", {})
         generation_mask = self._generation_mask(x_start, conditioning)
+        label_mask = feature_mask_for(x_start, conditioning)
         x_start = apply_feature_mask(x_start, conditioning)
         if noise is None:
             noise = torch.randn_like(x_start)
@@ -336,12 +337,6 @@ class FlowMatching:
             )
         else:
             noise = noise.to(device=x_start.device, dtype=x_start.dtype)
-        raw_noise = noise
-        noise = apply_feature_mask(noise, conditioning)
-        if generation_mask is not None:
-            # Context noise must not reveal whether history labels are missing.
-            noise = torch.where(generation_mask, noise, raw_noise)
-
         if t is None:
             t = self.sample_timesteps(batch_size, x_start.device)
         else:
@@ -349,6 +344,13 @@ class FlowMatching:
 
         x_t = self.interpolate(x_start, noise, t)
         target_velocity = noise - x_start
+        if label_mask is not None:
+            # Missing targets are unknown motion, rather than a known zero
+            # state. Keep their independent noise at every flow time; at t=1
+            # all channels then match the full Gaussian deployment input.
+            x_t = torch.where(label_mask, x_t, noise)
+            target_velocity = torch.where(label_mask, target_velocity,
+                                          torch.zeros_like(target_velocity))
         if generation_mask is not None:
             x_t = torch.where(generation_mask, x_t, noise)
             target_velocity = torch.where(generation_mask, target_velocity,

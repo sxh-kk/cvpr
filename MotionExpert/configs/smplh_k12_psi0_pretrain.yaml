@@ -1,0 +1,40 @@
+# New run after native30Hz DINO re-extraction. Launch with --from-scratch.
+# DINO is frozen pretrained; MotionExpert uses no previous training checkpoint.
+DATA:
+  ARCHIVE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1
+  SPLIT_MANIFEST: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/meta/splits.json
+  STATS_PATH: /gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint.pt
+  VISION_PROFILE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/vision_profiles/psi0_256x480_v1_30hz
+  IMAGE_PROFILE: 256x480
+  REPRE_TYPE: smplh12_rot6d_hands21_contacts_v1
+  ROTATION_BASIS_MODE: smplh_model_defined
+  TARGET_JOINT_BASIS: smplh_body22_axes_v1
+  MODEL_SHA256: be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947
+  FPS: 5
+  FRAME_PHASE: 0
+  WINDOW: 11
+  FORECAST_PREFIX: 6
+  SEGMENT_STRIDE: 5
+  TRAIN_TASK: fore
+  MOTION_SUPERVISION: joint
+  REQUIRE_FULL_WINDOW: true
+  TRAJECTORY_CONDITION_PROB: 0.5
+  MIN_VALID_IMAGE_FRACTION: 0.5
+  BATCH_SIZE: 256
+  NUM_WORKERS: 24
+MODEL:
+  GLOBAL_TOKEN_COUNT: 1
+  INIT_CKPT_PATH: null
+  CKPT_PATH: null
+FLOW:
+  GLOBAL_WEIGHT: 8.0
+TRAIN:
+  EXP_PATH: /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_from_scratch
+  NUM_GPUS: 8
+  LR: 1.0e-4
+  NUM_EPOCHS: 200
+  SCHEDULER_TOTAL_EPOCHS: 200
+  SAVE_EVERY_N_EPOCHS: 20
+  PRECISION: bf16-mixed
+  FUSED_ADAMW: false
+  BATCHED_METRIC_SYNC: false

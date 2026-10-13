@@ -4,7 +4,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 
-from .dense_representation import DenseWindow, build_dense_window, decode_dense_motion
+from .representation import MotionWindow, build_motion_window, decode_motion as _decode_motion
 from .motion_layout import SMPLH_REPRE_TYPE, motion_layout
 
 REPRE_TYPE = SMPLH_REPRE_TYPE
@@ -39,7 +39,7 @@ def build_smplh_window(arrays, metadata, *, task="fore", forecast_prefix=6, fps=
     checked_arrays = dict(arrays)
     checked_arrays["observation.valid.head_reference_rotation"] = (
         head_valid.reshape(count) & basis.reshape(count)).reshape(head_valid.shape)
-    window = build_dense_window(
+    window = build_motion_window(
         checked_arrays, metadata, task=task, forecast_prefix=forecast_prefix, fps=fps,
         rotation_basis_verified=True, joint_indices=motion_layout(REPRE_TYPE).joint_indices,
         source_feet_world=arrays["source.feet_world"],
@@ -53,7 +53,7 @@ def build_smplh_window(arrays, metadata, *, task="fore", forecast_prefix=6, fps=
         shape_is_prediction_target=False, shape_is_condition=False,
         body_fk_joint_count=22, body_joint_indices=list(motion_layout(REPRE_TYPE).joint_indices),
         ground_fallback_body="native_source_feet", contact_body="native_source_feet")
-    return DenseWindow(window.motion, window.motion_valid, window.trajectory, window.trajectory_valid, meta)
+    return MotionWindow(window.motion, window.motion_valid, window.trajectory, window.trajectory_valid, meta)
 
 
 def decode_smplh_motion(motion, **kwargs):
@@ -65,7 +65,7 @@ def decode_smplh_motion(motion, **kwargs):
     value = torch.as_tensor(motion)
     if value.ndim != 2 or value.shape[-1] != MOTION_DIM:
         raise ValueError("SMPL-H sparse decode requires T x 245 motion")
-    return decode_dense_motion(value, **kwargs)
+    return _decode_motion(value, **kwargs)
 
 
 decode_motion = decode_smplh_motion

@@ -11,8 +11,8 @@ from pathlib import Path
 import torch
 from tqdm.auto import tqdm
 
-from .dataset.ee4d_motion_dataset import EE4D_Motion_Dataset
-from .dataset.dense_representation import CONTACT_SLICE, GLOBAL_SLICE, REPRE_TYPE
+from .dataset.smplh_motion_dataset import SMPLHMotionDataset
+from .dataset.representation import CONTACT_SLICE, GLOBAL_SLICE, REPRE_TYPE
 from .dataset.motion_layout import motion_layout, SMPLH_REPRE_TYPE
 from .dataset.normalization import STATS_FORMAT
 from .config import load_config
@@ -125,7 +125,7 @@ def _finalize(acc, context=""):
     }
 
 
-def _accumulate(dataset: EE4D_Motion_Dataset, indices, *, progress=True) -> dict:
+def _accumulate(dataset: SMPLHMotionDataset, indices, *, progress=True) -> dict:
     if dataset.split != "train" or dataset.do_normalization:
         raise ValueError("Raw accumulators require unnormalized train data only")
     motion_dim = int(dataset.motion_feature_dim)
@@ -137,8 +137,7 @@ def _accumulate(dataset: EE4D_Motion_Dataset, indices, *, progress=True) -> dict
     sequence_qc = {}
     indices = list(indices)
     for index in tqdm(indices, desc="joint masked stats", disable=not progress):
-        # Match forecast labels and their prefix-only floor even when an
-        # auxiliary reconstruction task is also used by the training loop.
+        # Keep the historical-prefix ground policy for all supervised frames.
         sample = dataset.get_sample(index, task=dataset.train_task)
         valid_frames = sample["y"]["valid_frames"].bool()
         if dataset.train_task == "fore":
@@ -259,7 +258,7 @@ def _finalize_accumulators(raw: dict) -> dict:
 
 
 def compute_stats(
-    dataset: EE4D_Motion_Dataset,
+    dataset: SMPLHMotionDataset,
     *,
     limit_windows: int = 0,
     indices=None,
@@ -298,7 +297,7 @@ def main() -> None:
     archive_path = Path(root).resolve()
     if output == archive_path or archive_path in output.parents:
         raise ValueError("Statistics must be saved outside the immutable archive")
-    dataset = EE4D_Motion_Dataset(archive_root=root, split="train",
+    dataset = SMPLHMotionDataset(archive_root=root, split="train",
         repre_type=data.REPRE_TYPE,
         split_manifest=args.split_manifest or data.SPLIT_MANIFEST,
         window=data.WINDOW, fps=data.FPS, forecast_prefix=data.FORECAST_PREFIX,
@@ -309,8 +308,10 @@ def main() -> None:
         contact_speed_m_s=getattr(data,"CONTACT_SPEED_M_S",.2), contact_height_m=getattr(data,"CONTACT_HEIGHT_M",.1),
         row_group_cache_mb=getattr(data,"ROW_GROUP_CACHE_MB",128),
         parquet_file_cache=getattr(data,"PARQUET_FILE_CACHE",8),
+        vision_profile_root=getattr(data,"VISION_PROFILE_ROOT",None),
+        image_profile=getattr(data,"IMAGE_PROFILE",None),
         min_valid_image_fraction=getattr(data,"MIN_VALID_IMAGE_FRACTION",0.),
-        train_task=getattr(data,"TRAIN_TASK",None) or "recon",require_full_window=getattr(data,"REQUIRE_FULL_WINDOW",False),
+        train_task=getattr(data,"TRAIN_TASK",None) or "fore",require_full_window=getattr(data,"REQUIRE_FULL_WINDOW",False),
         motion_supervision=getattr(data,"MOTION_SUPERVISION",None))
     windows = min(len(dataset), args.limit_windows) if args.limit_windows > 0 else len(dataset)
     indices, partition = shard_partition(windows, args.num_shards, args.shard_index, args.shard_mode)
@@ -325,7 +326,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.{os.getpid()}.tmp")
     torch.save(stats, temporary); temporary.replace(args.output)
-    LOGGER.info("saved dense train statistics to %s: windows=%d, source_frames=%s",
+    LOGGER.info("saved SMPL-H train statistics to %s: windows=%d, source_frames=%s",
                 args.output, stats["num_windows"], stats["source_valid_frames"])
 
 

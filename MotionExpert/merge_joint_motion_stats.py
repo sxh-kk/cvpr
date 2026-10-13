@@ -21,9 +21,9 @@ from .dataset.motion_layout import motion_layout, SMPLH_REPRE_TYPE
 def _load(path: Path) -> dict:
     value = torch.load(path, weights_only=True)
     if not isinstance(value, dict) or value.get("kind") != "joint_masked_partial":
-        raise ValueError(f"not a dense train partial stats file: {path}")
-    if type(value.get("stats_schema_version")) is not int or value["stats_schema_version"] not in (3, STATS_SCHEMA_VERSION):
-        raise ValueError(f"Dense stats schema mismatch in {path}; legacy153/SMPL shards cannot be reused")
+        raise ValueError(f"not a SMPL-H train partial stats file: {path}")
+    if type(value.get("stats_schema_version")) is not int or value["stats_schema_version"] != STATS_SCHEMA_VERSION:
+        raise ValueError(f"SMPL-H stats schema mismatch in {path}")
     validate_statistics_profile(value)
     for key,dim in (("motion_acc",motion_layout(value["representation"]).motion_dim),("traj_acc",18)):
         if any(tuple(tensor.shape)!=(dim,) for tensor in value[key].values()):
@@ -62,7 +62,7 @@ def _merge_sequence_qc(target: dict, source: dict) -> None:
 
 
 def _validate_partition(shard, *, expected_index, num_shards, path):
-    """Validate new coverage metadata while accepting legacy round-robin sets."""
+    """Validate explicit complete training-window shard coverage."""
     if type(shard.get("shard_index")) is not int or shard["shard_index"] != expected_index:
         raise ValueError(f"shard index mismatch in {path}: expected {expected_index}")
     if type(shard.get("num_shards")) is not int or shard["num_shards"] != num_shards:
@@ -71,10 +71,8 @@ def _validate_partition(shard, *, expected_index, num_shards, path):
     if type(count) is not int or count < 0:
         raise ValueError(f"Invalid num_windows in {path}")
     fields = ("window_index_start", "window_index_stop", "total_index_windows")
-    if "shard_mode" not in shard and not any(key in shard for key in fields):
-        if shard.get("representation") == SMPLH_REPRE_TYPE:
-            raise ValueError(f"SMPL-H statistics require explicit complete partition coverage in {path}")
-        return {"shard_mode": "round_robin", "total_index_windows": None, "legacy": True}
+    if "shard_mode" not in shard or not all(key in shard for key in fields):
+        raise ValueError("Statistics shards require explicit window coverage")
     if any(type(shard.get(key)) is not int for key in fields):
         raise ValueError(f"Incomplete statistics partition metadata in {path}")
     mode, total = shard.get("shard_mode"), shard["total_index_windows"]
@@ -83,7 +81,7 @@ def _validate_partition(shard, *, expected_index, num_shards, path):
         raise ValueError(f"Statistics shard interval does not match its index in {path}")
     if count != len(indices):
         raise ValueError(f"Statistics shard num_windows does not match its interval in {path}")
-    return {"shard_mode": mode, "total_index_windows": total, "legacy": False}
+    return {"shard_mode": mode, "total_index_windows": total}
 
 
 def main() -> None:

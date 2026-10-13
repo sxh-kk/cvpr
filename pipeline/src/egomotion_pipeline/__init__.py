@@ -1,3 +1,3 @@
-"""Independent dataset conversion; no MotionExpert imports or modifications."""
+"""Original-camera DINO extraction for accepted SMPL-H parameter data."""
 
-__version__ = "0.7.0"
+__version__ = "1.0.0"

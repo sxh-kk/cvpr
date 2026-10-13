@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from .checkpoints import read_checkpoint, model_state, checkpoint_config, validate_checkpoint_statistics
+from .visual_contract import checkpoint_visual_contract
 from .config import architecture_metadata, as_dict
 from .dataset.normalization import MotionNormalizer
 from .model import UniEgoMotion
@@ -34,13 +35,15 @@ def export(checkpoint_path, output_path, *, use_ema=True):
     validate_checkpoint_statistics(cfg, checkpoint, normalizer)
     weights_kind = "ema" if use_ema and checkpoint.get("ema_state_format") == "original_model_with_ema_optimizer_v1" else checkpoint.get("weights", "model")
     architecture = architecture_metadata(cfg)
+    visual = checkpoint_visual_contract(checkpoint)
     torch.save({
-        "format": "motionexpert_weights_dense_v1",
+        "format": "motionexpert_weights_smplh_v1",
         "state_dict": state,
         "hyper_parameters": as_dict(cfg),
         "motionexpert_architecture": architecture,
         "motionexpert_normalization": normalizer.stats,
         "motionexpert_normalization_clip": normalizer.clip,
+        "motionexpert_visual_conditioning": visual,
         "weights": weights_kind,
     }, output)
     torch.save(dict(normalizer.stats, normalization_clip=normalizer.clip), output.with_suffix(".stats.pt"))
@@ -52,6 +55,7 @@ def export(checkpoint_path, output_path, *, use_ema=True):
         "parameters": sum(p.numel() for p in model.parameters()),
         "dtype": "float32", "bytes": output.stat().st_size,
         "normalization": output.with_suffix(".stats.pt").name,
+        "visual_conditioning": visual,
     }
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(metadata, indent=2), flush=True)

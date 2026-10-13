@@ -1,138 +1,39 @@
-# MotionExpert / VLMExpert 上传与迁移文档
+# 环境与数据迁移
 
-当前更新（2026-10-12）：第3节按现有SMPL-H参数归档和八卡训练配置更新；本次八卡训练尚未启动。MotionExpert与pipeline的当前接口以 [MotionExpert/README.md](../MotionExpert/README.md) 和 [pipeline/README.md](../pipeline/README.md) 为准。下文2026-10-06的文件数量、清单及测试结果保留为初次上传的历史快照，不代表当前代码的新验收结果。
-
-清点日期：2026-10-06。目标仓库：<https://github.com/sxh-kk/cvpr>，公开，默认分支 `main`。
-
-## 1. 本次迁移范围
-
-两个项目保留原来的目录名称与包布局。上传副本独立于原工作目录，原代码和本地权重继续保留。
-
-```text
-cvpr/
-├── MotionExpert/             # motionexpert 包，训练 / 推理 / GLOBAL
-├── VLMExpert/                # psi 包，VLM / WBT / baselines / real
-│   └── third_party/          # 展开的第三方源码和静态资源快照
-├── docs/
-│   ├── MIGRATION.md
-│   └── inventory/
-│       ├── summary.json
-│       ├── files.csv
-│       └── upstream_dependencies.json
-└── scripts/verify_inventory.py
-```
-
-| 项目 | 项目文件数 | 项目文件原始字节数 | 主要内容 |
-| --- | ---: | ---: | --- |
-| MotionExpert | 51 | 364,412 | 训练、推理、EMA、Flow Matching、模型、数据读取、两份 YAML、测试、统计资源和项目文档 |
-| VLMExpert | 5,926 | 约 2.45 GB | PSI0 / GLOBAL / WBT、本地 baselines、部署与 teleop、FAST tokenizer、统计资源、机器人 assets 和第三方依赖 |
-
-表中的字节数以原项目快照为参考；最终发布字节数、SHA-256 和修改记录以清单为准。
-仓库新增的 README、迁移文档、清点报告及校验脚本不计入这两个项目的文件数。
-Git LFS 使用 368 个文件路径，内容以机器人网格、演示媒体、第三方原生库和安装包为主；checkpoint 不在其中。
-
-### 上传内容
-
-- 两个项目的 Python / C++ 源码、训练脚本、配置、测试、文档与依赖声明。
-- MotionExpert 的 `assets/e7_normalization.pt` 和 `assets/smplx_representation.pt`，它们是统计 / 表示资源。
-- VLMExpert 的 `assets/stats/` 和 `src/fast/egodex-rel-50w-1x48-v2048-s100/` tokenizer 配置与词表。
-- 机器人 URDF、网格、SDK 资源、示例和第三方许可证；静态 SMPL 关节回归矩阵及 adapter 归一化统计继续保留。
-
-### 排除内容
-
-- 所有 `weights/`、`checkpoints/` 中的文件及 `.ckpt`、`.safetensors`、`.onnx` 等模型权重。
-- `.pt` / `.pth` 模型与离线张量产物，明确识别的统计和静态表示资源除外。
-- MotionExpert 的 `weights/e7_k12_400m_text_ema_fp32.pt`（1,630,872,294 字节）。
-- SONIC / AMO / adapter 等控制模型及 EgoVLA 的手部网络权重。
-- `.env`、私有机器配置、虚拟环境、缓存、`*.egg-info`、构建产物、日志及实验输出。
-- 原 checkout 的 `.git` 指针、`.gitmodules` 和嵌套 `.gitattributes`；第三方内容已展开，仓库采用统一的 Git LFS 规则。
-- 工作目录外的数据集、HF / Torch 缓存和另行训练的模型目录，它们不属于这两个项目的上传副本。
-
-`files.csv` 的 `uploaded` / `excluded` 状态和 `reason` 列可用于逐项追溯。被排除项仅记录路径、类别与大小，不记录文件内容。
-上传文件记录最终 `sha256` 与原始 `source_sha256`；公开发布修改列为 `publication_change`。
-
-公开副本移除了 `VLMExpert/src/psi/utils/utils.py` 中一条含 Hugging Face token 的注释，改为说明从 `HF_TOKEN` 环境变量读取认证。
-两个项目的 README 增加了本仓库不提供权重的迁移说明。模型计算、训练流程及配置数值沿用原代码。
-
-## 2. 获取仓库与校验
-
-准备 Git 和 Git LFS 后执行：
+MotionExpert、pipeline和ImageProcess的当前接口以各自README为准。
+旧运动实验、旧dense归档、旧视觉特征和旧Motion checkpoint已清理。
+Git仓库不包含训练数据、模型权重或运行环境。
 
 ```bash
 git lfs install
 git clone https://github.com/sxh-kk/cvpr.git
 cd cvpr
 git lfs pull
-python scripts/verify_inventory.py
 ```
 
-Git LFS 跟踪的是非 checkpoint 资源。GitHub 的 ZIP 下载可能不能直接提供全部资源实体；需要完整目录时使用 Git clone 与 `git lfs pull`。
-代码浏览可跳过 LFS 下载；机器人资产或媒体的完整验证需要补齐 LFS。
-校验脚本检查清单中的文件大小、SHA-256、符号链接与排除项是否意外出现在快照中。
-
-## 3. MotionExpert 环境与路径
-
-MotionExpert使用Python >= 3.10、PyTorch >= 2.4和`pytorch-lightning >= 2.4, < 2.6`；完整依赖以 [requirements.txt](../MotionExpert/requirements.txt) 与 [pyproject.toml](../MotionExpert/pyproject.toml) 为准。建立独立环境，GPU训练按机器CUDA环境安装兼容的PyTorch。本模型读取预提取的DINO特征，不再使用文本分支、CLIP文本sidecar或`motionexpert-text`入口。
-
-以下命令均从仓库根目录执行，仅为迁移示例，本次文档更新不执行安装、统计或训练：
+MotionExpert和DINO提取使用独立环境，分别安装所需GPU版PyTorch，再安装项目：
 
 ```bash
-python3.10 -m venv .venv-motion
-source .venv-motion/bin/activate
+python -m pip install -e ./ImageProcess
+python -m pip install -e './pipeline[dino]'
+# 在训练环境中：
+python -m pip install -e ./ImageProcess
 python -m pip install -e ./MotionExpert
 ```
 
-安装后的入口包括`motionexpert-train`、`motionexpert-infer`、`motionexpert-export`、`motionexpert-check-data`、`motionexpert-split`、`motionexpert-stats`和`motionexpert-eval`。
+迁移运动归档时需完整复制 `smplh-parameters-v1` 的motion、records、receipt、metadata、
+自有模型、验收证据和旧vision退休清单，并单独复制 `statistics/smplh_k12_5hz_joint.pt`。
+DINO提取还需原始MCAP／MP4及DINO预训练权重，修改record中的原视频路径须同步重建来源绑定。
+新视觉缓存提取后与数据共同迁移。训练配置中的归档、分割、统计、视觉和输出路径须指向新位置。
 
-### 数据准备
+当前数据／提取格式见 [pipeline](../pipeline/README.md)，
+从头训练与一步hidden接口见 [MotionExpert](../MotionExpert/README.md)，
+两路同步RGB处理见 [ImageProcess](../ImageProcess/README.md)。
 
-默认读取独立SMPL-H参数归档`/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1`。迁移时可用`MOTIONEXPERT_DATA_DIR`或`--data-dir`指定实际归档路径；reader随数据根目录读取自有`meta/splits.json`，不会重新随机切分。训练要求归档正式accepted且独立验收不再pending；隔离记录保留并排除出训练。
+仓库 `docs/inventory` 与 `scripts/verify_inventory.py` 是2026-10-06初次迁移快照，
+不作为当前MotionExpert文件或训练协议的验证入口。第三方许可与VLM资产来源继续保留。
 
-归档包含自有运动／视觉Parquet、episode记录、模型、手部表示资源及验收证据。MotionExpert读取同一SMPL-H模型与真实16维beta进行FK，保留K12身体、左右各21点显式手、相机、地面、DINO和独立mask；不依赖pipeline Python包、旧dense22文件或旧EE4D／Nymeria的`.pt`数据包。模型权重和训练数据不随代码仓库提供。
-
-当前接口为245维运动＋18维相机轨迹；身体采用逐关节6D旋转＋XYZ，旋转／位置监督保留各自mask。时间协议为5Hz、11帧，历史6帧（含当前帧）＋未来5帧。DINO使用`dinov2-with-registers-large`的5×1024特征（CLS＋4 register），训练和推理只开放历史6帧图像；训练按现有0.5概率提供历史相机轨迹，验证与部署使用图像条件。
-
-```bash
-export MOTIONEXPERT_DATA_DIR=/data/MixEgoMotion/smplh-parameters-v1
-python -m MotionExpert.check_data --config MotionExpert/configs/smplh_k12_global.yaml
-```
-
-归一化统计只使用全部train窗口，存放在归档外，默认`MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt`。已有同归档、同表示和同采样协议的完整统计可直接迁移；若改变统计存储位置，同步修改`DATA.STATS_PATH`。仅缺少兼容统计时才需要生成：
-
-```bash
-python -m MotionExpert.compute_joint_motion_stats \
-  --config MotionExpert/configs/smplh_k12_global.yaml \
-  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt
-```
-
-旧文本／原生轴统计或只取部分窗口的诊断统计不能用于当前正式训练；仅修改batch或GPU数不要求重算已有兼容统计。完整分片统计及合并流程见MotionExpert README。
-
-### 训练与外部权重
-
-当前`configs/smplh_k12_global.yaml`配置为每卡batch64、8卡、梯度累积1，即全局batch512；峰值LR为`1e-4`。其余参数保持：300 epoch、20 epoch warmup、EMA `0.992028`、BF16 mixed、每卡4个worker、`FUSED_ADAMW=False`及原保存周期。本次八卡训练尚未启动；以下仅为备齐数据、统计和GPU环境后的启动示例：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 \
-  --module MotionExpert.train --config MotionExpert/configs/smplh_k12_global.yaml \
-  --from-scratch --devices 8
-```
-
-`--devices`、`--batch-size`等CLI参数会覆盖配置，迁移时须保持预期有效batch。`--ddp-socket`仅在需要单机通信兼容选项时使用；默认通信环境不启用。
-
-同阶段恢复使用兼容的完整`.ckpt`；`--from-scratch`、`--init-weights`与`--resume`互斥。Checkpoint、统计和导出权重绑定表示、K12顺序、SMPL-H模型及5Hz联合协议，旧文本或原生轴E7权重不能直接作为当前模型初始化／恢复的兼容权重。
-
-```bash
-python -m MotionExpert.train --resume /models/smplh-k12/last.ckpt
-python -m MotionExpert.export_weights \
-  /models/smplh-k12/last.ckpt /models/smplh-k12/export.pt
-python -m MotionExpert.infer --input /data/conditioning.pt \
-  --weights /models/smplh-k12/export.pt --features-only --output /data/features.pt
-```
-
-`predict_future`的图像输入为`[B,6,5,1024]`，返回未来5帧`[B,5,245]`和完整11帧运动；隐藏特征为`[B,11,768]`，GLOBAL特征为`[B,768]`。解码得到K12身体和左右各21点手部，不输出未预测的完整SMPL-H参数。配套统计应与训练检查点／导出文件一起迁移；具体接口与mask约定见MotionExpert README。
-
-## 4. VLMExpert 环境与路径
+## VLMExpert 环境与路径
 
 目录名称是 `VLMExpert`，安装包和导入名仍为 `psi`。它依赖 Python 3.10、PyTorch 2.7.0、Transformers 4.57.0 等，完整声明见 `pyproject.toml` 与 `uv.lock`。
 与 MotionExpert 分开安装，避免不同 Transformers 版本互相覆盖。
@@ -226,44 +127,3 @@ WBT 使用 `src/psi/config/train/posttrain_wbt_psi0_config.py`，默认数据根
 需要 SIMPLE 仿真时，继续按原 README / `examples/quick_start/simple.md` 安装 SIMPLE、cuRobo、Isaac Sim 等运行依赖。
 源码与 SDK 资源不等于已安装的运行环境。AMO、SONIC、adapter、EgoVLA 网络等权重均须从原项目文档指向的位置另行准备，按原相对路径放回。
 第三方源码的本地新增文件可能被其 `.gitignore` 忽略，提交前可用 `git check-ignore` 检查；明确需要的新增源码可逐文件添加。
-
-## 5. 清点与验证结果
-
-验证日期：2026-10-06，使用现有兼容环境，在 CPU 上执行项目已有回归测试：
-
-| 验证 | 结果 | 内容 |
-| --- | --- | --- |
-| MotionExpert | 18 / 18 通过 | 两种数据来源、对齐、mask、归一化、GLOBAL / EMA、特征与采样一致性 |
-| VLMExpert | 26 / 26 通过 | GLOBAL 梯度、causal 前缀、词表、保存 / 导出 / HE 衔接和 WBT 协议 |
-| 发布副本完整性 | 以 `verify_inventory.py` 输出为准 | 上传文件大小、SHA-256、符号链接、排除项、checkpoint 边界 |
-
-MotionExpert：
-
-```bash
-cd MotionExpert
-source .venv/bin/activate
-python -m unittest tests.test_pipeline tests.test_global -v
-```
-
-VLMExpert：
-
-```bash
-cd VLMExpert
-source .venv-psi/bin/activate
-PYTHONPATH=src OMP_NUM_THREADS=2 python -m unittest discover -s tests -p 'test_*.py' -v
-```
-
-这里的 unittest discovery 执行 GLOBAL / WBT 测试类；`test_simple_datagen_curobo_missing.py` 的 pytest 风格函数不属于这 26 项。
-迁移验证未执行完整数据集训练、GPU 多卡训练、SIMPLE 仿真或机器人部署，也未验证被排除的外部 checkpoint。
-原根 Python 环境曾因 Transformers 与 huggingface-hub 版本不匹配无法导入；本次使用两个项目对应的兼容环境完成了测试，没有更改共享环境。
-
-## 6. 上传后再次迁移
-
-1. Git clone，并补齐 Git LFS 的非 checkpoint 资源。
-2. 执行 `python scripts/verify_inventory.py`，确认快照完整。
-3. 为 MotionExpert / VLMExpert 分别建立 Python 环境。
-4. 准备训练数据、模型缓存、实际 `.env` 和外部权重，修改数据 / 输出路径。
-5. 执行两组回归测试，再按项目说明进行数据检查、训练或特征提取。
-
-后续产生的 checkpoint、日志和私有配置应保留在本机或另行管理；仓库根 `.gitignore` 已加入这些排除规则。
-第三方文件继续遵循各自的许可与版权声明，VLMExpert 的原 PSI0 来源与引用信息保留在原 README 中。

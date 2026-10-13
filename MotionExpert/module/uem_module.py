@@ -1,4 +1,4 @@
-"""Training and sampling for versioned body, explicit hands and shape targets."""
+"""Training and sampling for K12 body, reference motion, explicit hands and contacts."""
 
 import math
 from collections.abc import Mapping
@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import LambdaLR, StepLR
 
 from ..config import as_dict, architecture_metadata
 from ..checkpoints import validate_checkpoint_architecture, validate_checkpoint_statistics
+from ..visual_contract import training_visual_contract, validate_visual_resume
 from ..model import UniEgoMotion
 from ..mydiffusion.flow_matching import FlowMatching
 from ..utils.task_conditioning import TASKS, apply_task_conditioning
@@ -22,12 +23,24 @@ def _config_value(config, name, default=None):
     return config.get(name, default) if isinstance(config, Mapping) else getattr(config, name, default)
 
 
+def _unwrap_optimizer(optimizer):
+    """Resolve Lightning/EMA wrappers without changing their state."""
+    seen = set()
+    while id(optimizer) not in seen:
+        seen.add(id(optimizer))
+        inner = getattr(optimizer, "optimizer", None)
+        if inner is None:
+            return optimizer
+        optimizer = inner
+    raise ValueError("Cyclic optimizer wrapper")
+
+
 def _validate_training_phase(value):
     if not isinstance(value, Mapping) or value.get("format") != TRAINING_PHASE_FORMAT:
         raise ValueError("Invalid MotionExpert training phase format")
     origin = value.get("origin")
     epoch = value.get("effective_shared_unfreeze_epoch")
-    if origin not in ("from_scratch", "dense_warm_start"):
+    if origin not in ("from_scratch", "weights_init"):
         raise ValueError("Invalid MotionExpert training origin")
     if type(epoch) is not int or epoch < 0 or (origin == "from_scratch" and epoch != 0):
         raise ValueError("Invalid effective shared unfreeze epoch for training origin")
@@ -46,17 +59,17 @@ def _training_phase_for_model_config(model_config):
         raise ValueError("Incomplete MotionExpert training phase configuration")
     if origin is _MISSING:
         # CKPT_PATH resumes a run; it says nothing about how that run started.
-        origin = "dense_warm_start" if _config_value(model_config, "INIT_CKPT_PATH") else "from_scratch"
-        epoch = requested_epoch if origin == "dense_warm_start" else 0
+        origin = "weights_init" if _config_value(model_config, "INIT_CKPT_PATH") else "from_scratch"
+        epoch = requested_epoch if origin == "weights_init" else 0
     phase = _validate_training_phase({"format": TRAINING_PHASE_FORMAT, "origin": origin,
                                       "effective_shared_unfreeze_epoch": epoch})
-    if origin == "dense_warm_start" and epoch != requested_epoch:
+    if origin == "weights_init" and epoch != requested_epoch:
         raise ValueError("Warm-start training phase disagrees with SHARED_UNFREEZE_EPOCH")
     return phase
 
 
 def training_phase_from_checkpoint(checkpoint):
-    """Keep a run's origin; legacy checkpoints use their original init path."""
+    """Keep the declared initialization origin of the current training run."""
     hyperparameters = checkpoint.get("hyper_parameters")
     if not isinstance(hyperparameters, Mapping) or not isinstance(hyperparameters.get("MODEL"), Mapping):
         raise ValueError("Checkpoint training phase requires original MODEL hyperparameters")
@@ -75,21 +88,11 @@ def restore_training_phase(cfg, checkpoint):
     requested_epoch = cfg.MODEL.MOTION_EXPERT.SHARED_UNFREEZE_EPOCH
     if type(requested_epoch) is not int or requested_epoch < 0:
         raise ValueError("SHARED_UNFREEZE_EPOCH must be a non-negative integer")
-    if (phase["origin"] == "dense_warm_start"
+    if (phase["origin"] == "weights_init"
             and requested_epoch != phase["effective_shared_unfreeze_epoch"]):
         raise ValueError("Resume cannot change the warm-start shared unfreeze epoch")
     original_model = checkpoint["hyper_parameters"]["MODEL"]
     original_expert = original_model.get("MOTION_EXPERT", {})
-    if ("motionexpert_training_phase" not in checkpoint
-            and "TRAINING_ORIGIN" not in original_model
-            and original_model.get("CKPT_PATH") and not original_model.get("INIT_CKPT_PATH")
-            and _config_value(original_expert, "SHARED_UNFREEZE_EPOCH", 0) > 0):
-        logger.warning(
-            "Legacy resumed checkpoint has no recorded training origin or init path; "
-            "its original fresh/warm-start phase cannot be distinguished. Conservatively "
-            "using from_scratch with shared/backbone training from epoch 0; the original "
-            "warm-start schedule cannot be recovered from this checkpoint."
-        )
     cfg.MODEL.TRAINING_ORIGIN = phase["origin"]
     cfg.MODEL.EFFECTIVE_SHARED_UNFREEZE_EPOCH = phase["effective_shared_unfreeze_epoch"]
     return phase
@@ -119,7 +122,7 @@ class UEM_Module(pl.LightningModule):
 
     def _shared_unfreeze_epoch(self):
         # New dense input/output and condition projections have no pretrained
-        # 153D counterpart. Fresh training must train the whole model at once.
+        # Fresh training updates the whole motion network.
         return _training_phase_for_model_config(self.cfg.MODEL)["effective_shared_unfreeze_epoch"]
 
     def _set_motion_expert_train_phase(self, epoch):
@@ -289,26 +292,51 @@ class UEM_Module(pl.LightningModule):
     def on_train_start(self):
         self._set_motion_expert_train_phase(int(self.current_epoch))
         if self.cfg.MODEL.CKPT_PATH and not self.cfg.TRAIN.USE_CKPT_LR:
-            for group in self.optimizers().param_groups:
-                group["lr"] = self.cfg.TRAIN.LR * float(group.get("lr_scale", 1.0))
+            self._override_resumed_learning_rates()
+
+    def _override_resumed_learning_rates(self):
+        """Rebase the restored schedule at its existing epoch, including EMA."""
+        optimizers = {_unwrap_optimizer(opt) for opt in self.trainer.optimizers}
+        schedulers = [config.scheduler for config in self.trainer.lr_scheduler_configs]
+        for scheduler in schedulers:
+            if not isinstance(scheduler, (LambdaLR, StepLR)):
+                raise ValueError("Learning-rate override supports LambdaLR and StepLR")
+            if _unwrap_optimizer(scheduler.optimizer) not in optimizers:
+                raise ValueError("Restored scheduler does not match the training optimizer")
+        for optimizer in optimizers:
+            optimizer.defaults["lr"] = self.cfg.TRAIN.LR
+            optimizer.defaults["weight_decay"] = self.cfg.TRAIN.WEIGHT_DECAY
+            for group in optimizer.param_groups:
+                base_lr = self.cfg.TRAIN.LR * float(group.get("lr_scale", 1.0))
+                group["lr"] = group["initial_lr"] = base_lr
                 group["weight_decay"] = self.cfg.TRAIN.WEIGHT_DECAY
+        for scheduler in schedulers:
+            groups = _unwrap_optimizer(scheduler.optimizer).param_groups
+            scheduler.base_lrs = [group["initial_lr"] for group in groups]
+            if isinstance(scheduler, LambdaLR):
+                current_lrs = [base * factor(scheduler.last_epoch)
+                               for base, factor in zip(scheduler.base_lrs, scheduler.lr_lambdas)]
+            else:
+                factor = scheduler.gamma ** (max(0, scheduler.last_epoch) // scheduler.step_size)
+                current_lrs = [base * factor for base in scheduler.base_lrs]
+            for group, lr in zip(groups, current_lrs):
+                group["lr"] = lr
+            scheduler._last_lr = current_lrs
 
     def _image_forecast_profile(self):
         data = self.cfg.DATA
-        return (getattr(data, "TRAIN_TASK", "recon") == "fore"
+        return (getattr(data, "TRAIN_TASK", "fore") == "fore"
                 and data.FPS == 5)
 
     def _joint_motion_supervision(self):
-        mode = getattr(self.cfg.DATA, "MOTION_SUPERVISION", "future_only")
-        if mode not in ("joint", "future_only"):
-            raise ValueError("MOTION_SUPERVISION must be joint or future_only")
+        mode = self.cfg.DATA.MOTION_SUPERVISION
+        if mode != "joint":
+            raise ValueError("MOTION_SUPERVISION must be joint")
         return self._image_forecast_profile() and mode == "joint"
 
     def _task_conditioning(self, y, mode):
         """Match the supervised task to the image-only deployment inputs."""
-        task = getattr(self.cfg.DATA, "TRAIN_TASK", "recon")
-        if task is None:
-            return dict(y)  # Explicit legacy checkpoint configuration.
+        task = self.cfg.DATA.TRAIN_TASK
         probability = getattr(self.cfg.DATA, "TRAJECTORY_CONDITION_PROB",
                               0.0 if self._image_forecast_profile() else 1.0)
         if (isinstance(probability, bool) or not isinstance(probability, (int, float))
@@ -374,9 +402,11 @@ class UEM_Module(pl.LightningModule):
         checkpoint["motionexpert_normalization"] = self.normalizer.stats
         checkpoint["motionexpert_normalization_clip"] = self.normalizer.clip
         checkpoint["motionexpert_training_phase"] = _training_phase_for_model_config(self.cfg.MODEL)
+        checkpoint["motionexpert_visual_conditioning"] = training_visual_contract(self.cfg)
 
     def on_load_checkpoint(self, checkpoint):
         validate_checkpoint_architecture(self.cfg, checkpoint)
+        validate_visual_resume(self.cfg, checkpoint)
         validate_checkpoint_statistics(self.cfg, checkpoint, self.normalizer)
         if training_phase_from_checkpoint(checkpoint) != _training_phase_for_model_config(self.cfg.MODEL):
             raise ValueError("Checkpoint training phase does not match the resolved resume phase")
@@ -446,7 +476,7 @@ class UEM_Module(pl.LightningModule):
                return_one_step_hidden=False, return_one_step_features=False):
         if self._image_forecast_profile():
             y = apply_task_conditioning(
-                y, y.get("task_id", getattr(self.cfg.DATA, "TRAIN_TASK", "fore")),
+                y, "fore",
                 forecast_prefix=self.cfg.DATA.FORECAST_PREFIX,
                 trajectory_condition=False,
                 noise_only_history=not self._joint_motion_supervision())

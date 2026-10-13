@@ -17,7 +17,7 @@ import torch
 
 from ..config import SMPLH_MODEL_SHA256, SMPLH_SCHEMA
 from ..utils.rotation_conversions import matrix_to_quaternion
-from .dense_motion_dataset import ProjectedParquetReader
+from .parquet_reader import ProjectedParquetReader
 
 MODEL_SHA256 = SMPLH_MODEL_SHA256
 PARAMETER_SCHEMA_VERSION = SMPLH_SCHEMA
@@ -59,9 +59,6 @@ def _specs():
 
 MOTION_SPECS = _specs()
 MOTION_COLUMNS = tuple(MOTION_SPECS)
-VISION_JOIN_COLUMNS = ("frame_index", "episode_index", "timestamp", "observation.source_timestamp",
-                       "source.video_frame_index", "observation.valid.dino", "observation.video_timestamp",
-                       "observation.video_time_error")
 
 
 def canonical_json(value):
@@ -163,11 +160,13 @@ class SMPLHBodyModel:
 
 
 class SMPLHParameterArchive:
-    def __init__(self, root, *, cache_mb=128, file_cache=8, allow_unpublished=False):
+    def __init__(self, root, *, cache_mb=128, file_cache=8, allow_unpublished=False,
+                 vision_profile_root=None, image_profile=None):
         if type(allow_unpublished) is not bool:
             raise ValueError("allow_unpublished must be boolean")
         self.root = Path(root).resolve(strict=True)
         self.allow_unpublished = allow_unpublished
+        self.vision_cache = None
         self.reader = ProjectedParquetReader(cache_mb=cache_mb, file_cache=file_cache)
         self.info = json.loads((self.root / "meta/info.json").read_text())
         if (self.info.get("schema_version") != PARAMETER_SCHEMA_VERSION or self.info.get("fps") != 30
@@ -186,6 +185,29 @@ class SMPLHParameterArchive:
         if not paths:
             raise ValueError("No committed SMPL-H parameter episodes")
         self._records = [json.loads(p.read_text()) for p in paths]
+        self._retirement_path = self.root / ".pipeline/retired-vision.json"
+        self._retirement_stamp = None
+        self._retired_vision = {}
+        if self._retirement_path.exists():
+            retirement = json.loads(self._retirement_path.read_text())
+            if (retirement.get("format") != "smplh-legacy-vision-retirement-v1"
+                    or retirement.get("info_sha256") != file_sha256(self.root / "meta/info.json")
+                    or retirement.get("records_manifest_sha256") != hashlib.sha256(canonical_json(self._records)).hexdigest()
+                    or not isinstance(retirement.get("episodes"), list)):
+                raise ValueError("Legacy vision retirement is not bound to this SMPL-H archive")
+            for entry in retirement["episodes"]:
+                idx = entry.get("episode_index")
+                if type(idx) is not int or not 0 <= idx < len(self._records) or idx in self._retired_vision:
+                    raise ValueError("Invalid or duplicate retired vision episode")
+                record = self._records[idx]
+                if entry.get("path") != record["vision_path"] or entry.get("sha256") != record["vision_sha256"]:
+                    raise ValueError("Retired vision identity differs from committed record")
+                relative = Path(entry["path"])
+                if (relative.is_absolute() or ".." in relative.parts
+                        or not (self.root / relative).resolve().is_relative_to(self.root)):
+                    raise ValueError("Retired vision path escapes the owned archive")
+                self._retired_vision[idx] = entry
+            self._retirement_stamp = _stamp(self._retirement_path)
         self._record_paths, self._record_stamps, self._artifact_stamps = {}, {}, {}
         offset = 0
         for i, (path, record) in enumerate(zip(paths, self._records)):
@@ -204,12 +226,19 @@ class SMPLHParameterArchive:
             _sha(receipt.get("conversion_binding"), "conversion_binding")
             self._artifact_stamps[receipt_path] = _stamp(receipt_path)
             for role, key in (("motion", "data_path"), ("vision", "vision_path")):
-                artifact = self.owned_path(record[key])
                 digest = _sha(record.get(f"{role}_sha256"), f"{role}_sha256")
                 if receipt.get(role, {}).get("sha256") != digest:
                     raise ValueError(f"SMPL-H {role} receipt digest differs from episode record")
-                stamp = _stamp(artifact)
                 original = receipt.get("output_identities", {}).get(role, {})
+                if role == "vision" and i in self._retired_vision:
+                    retired = self._retired_vision[i]
+                    if (retired.get("bytes"), retired.get("mtime_ns")) != (original.get("bytes"), original.get("mtime_ns")):
+                        raise ValueError("Retired vision identity differs from committed receipt")
+                    # Historical receipts remain immutable; replacement features
+                    # have their own profile manifest and original motion joins.
+                    continue
+                artifact = self.owned_path(record[key])
+                stamp = _stamp(artifact)
                 if stamp != (original.get("bytes"), original.get("mtime_ns")):
                     raise ValueError(f"Committed SMPL-H {role} file identity changed")
                 self._artifact_stamps[artifact] = stamp
@@ -248,6 +277,12 @@ class SMPLHParameterArchive:
         self.archive_fingerprint = hashlib.sha256(canonical_json(self.binding)).hexdigest()
         self.manifest = dict(self.manifest, archive_fingerprint=self.archive_fingerprint)
         self._check_acceptance()
+        if vision_profile_root is not None:
+            from .vision_cache import VisionProfileCache
+            self.vision_cache = VisionProfileCache(vision_profile_root, self, image_profile=image_profile,
+                                                   file_cache=file_cache)
+        elif image_profile is not None:
+            raise ValueError("IMAGE_PROFILE requires VISION_PROFILE_ROOT for archive training")
         self._artifact_stamps[self.model_path] = _stamp(self.model_path)
         self.assert_current()
 
@@ -459,17 +494,34 @@ class SMPLHParameterArchive:
         for path, original in self._metadata_stamps.items():
             if _stamp(path) != original:
                 raise ValueError("SMPL-H archive metadata changed; rebuild dataset and statistics")
+        if self._retirement_stamp is not None and _stamp(self._retirement_path) != self._retirement_stamp:
+            raise ValueError("Legacy vision retirement changed while reading the archive")
+        if self._retirement_stamp is None and self._retirement_path.exists():
+            raise ValueError("Legacy vision retirement was added; reopen the archive")
         indices = range(len(self._records)) if record is None else (record["episode_index"],)
         for idx in indices:
             if _stamp(self._record_paths[idx]) != self._record_stamps[idx]:
                 raise ValueError("SMPL-H episode record changed; rebuild dataset and statistics")
             rec = self._records[idx]
-            for name in (rec["data_path"], rec["vision_path"], f"episodes/{idx:08d}/receipt.json"):
+            names = [rec["data_path"], f"episodes/{idx:08d}/receipt.json"]
+            if idx not in self._retired_vision:
+                names.append(rec["vision_path"])
+            for name in names:
                 path = self.owned_path(name)
                 if _stamp(path) != self._artifact_stamps[path]:
                     raise ValueError("Committed SMPL-H episode file changed")
         if any(_stamp(path) != original for path, original in self._asset_stamps.items()):
             raise ValueError("Owned SMPL-H model or hand basis changed")
+        if self.vision_cache is not None:
+            self.vision_cache.assert_current(None if record is None else record["episode_index"])
+
+    def read_image_validity(self, record, selected, *, expected=None):
+        if self.vision_cache is not None:
+            return self.vision_cache.read(record, selected, expected=expected)["observation.valid.dino"]
+        if expected is not None and "observation.valid.dino" in expected:
+            return expected["observation.valid.dino"].copy()
+        return self.reader.read(self.data_path(record["episode_index"]), selected,
+                                ["observation.valid.dino"])["observation.valid.dino"]
 
     def _motion(self, record, selected):
         path = self.data_path(record["episode_index"])
@@ -534,6 +586,8 @@ class SMPLHParameterArchive:
             raise ValueError("SMPL-H window starts must match the zero-phase training FPS")
         if type(num_frames) is not int or num_frames < 2 or type(forecast_prefix) is not int or not 0 < forecast_prefix < num_frames:
             raise ValueError("SMPL-H complete windows require a nonempty prefix and future")
+        if self.vision_cache is not None and fps != 5:
+            raise ValueError("The shared vision cache uses the zero-phase 5Hz protocol")
         record = self._records[episode_index]
         self.assert_current(record)
         selected = start_frame + np.arange(num_frames) * (30 // fps)
@@ -548,37 +602,24 @@ class SMPLHParameterArchive:
             arrays[f"observation.valid.body_{component}"] = valid.copy()
             arrays[f"observation.source_observed.body_{component}"] = arrays[f"source.observed.body_{component}"].copy()
             arrays[f"observation.estimated.completed.body_{component}"] = arrays[f"estimated.completed.body_{component}"].copy()
-        if load_dino:
-            if record.get("dino", {}).get("state") != "complete":
-                raise ValueError("SMPL-H visual features are not complete")
-            vision_path = self.owned_path(record["vision_path"])
-            _, (parquet, _) = self.reader._file(vision_path)
-            if parquet.metadata.num_rows != record["length"]:
-                raise ValueError("SMPL-H vision length differs from motion")
-            columns = [k for k in VISION_JOIN_COLUMNS if k in parquet.schema_arrow.names]
-            if not {"episode_index", "frame_index", "observation.valid.dino"} <= set(columns):
-                raise ValueError("SMPL-H vision identity/availability columns are missing")
-            image = self.reader.read(vision_path, selected[:forecast_prefix], columns + [DINO_COLUMN])
-            for key in columns:
-                if key in arrays:
-                    same = np.array_equal(image[key], arrays[key][:forecast_prefix])
-                    if key == "timestamp":
-                        # Preserve either a promoted motion float32 grid or
-                        # the exact native float64 video clock.
-                        same = image[key].dtype in (np.dtype("float32"), np.dtype("float64")) and (same or np.array_equal(
-                            image[key], (selected[:forecast_prefix] / 30).astype(image[key].dtype)))
-                    if not same:
-                        raise ValueError(f"SMPL-H vision/motion frame/time join differs: {key}")
-            value = image[DINO_COLUMN]
-            if value.shape != (forecast_prefix, 5120) or value.dtype != np.float32:
-                raise ValueError("SMPL-H DINO must preserve all five1024 tokens")
-            valid = image["observation.valid.dino"].astype(bool) & np.isfinite(value).all(-1)
-            arrays[DINO_COLUMN] = np.zeros((num_frames, 5120), np.float32)
-            arrays[DINO_COLUMN][:forecast_prefix] = np.where(valid[:, None], value, 0)
+        if self.vision_cache is not None:
+            expected = {key: value[:forecast_prefix] for key, value in arrays.items()}
+            image = self.vision_cache.read(record, selected[:forecast_prefix], expected=expected,
+                                            load_features=load_dino)
+            valid = image["observation.valid.dino"]
             arrays["observation.valid.dino"] = np.r_[valid, np.zeros(num_frames - forecast_prefix, bool)]
+            for key in ("observation.video_timestamp", "observation.video_time_error"):
+                arrays[key] = np.r_[image[key], np.zeros(num_frames - forecast_prefix, np.float64)]
+            if load_dino:
+                arrays[DINO_COLUMN] = np.zeros((num_frames, 5120), np.float32)
+                arrays[DINO_COLUMN][:forecast_prefix] = image[DINO_COLUMN]
+        elif load_dino:
+            raise ValueError("DINO must be re-extracted with the shared image profile; set VISION_PROFILE_ROOT")
         metadata = deepcopy(record["metadata"])
         metadata.update(rotation_supervision_policy="smplh_model_defined", rotation_target_basis="smplh_body22_axes_v1",
                         target_model_axes_defined=True, model_sha256=self.model_sha256, archive_schema_version=PARAMETER_SCHEMA_VERSION)
+        if self.vision_cache is not None:
+            metadata["vision_profile"] = deepcopy(self.vision_cache.metadata)
         # Original certification flags are retained. Model-defined axes enable
         # estimated-parameter supervision without claiming native axis truth.
         self.assert_current(record)

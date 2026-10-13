@@ -5,7 +5,6 @@ from queue import Empty, Full, Queue
 import threading
 
 import numpy as np
-from PIL import Image
 
 
 def optimization_options(config):
@@ -26,7 +25,7 @@ def optimization_options(config):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"DINO {name} must be an integer >= {minimum}")
         options[name] = value
-    for name in ["pin_memory", "compile_model", "optimized_storage"]:
+    for name in ["pin_memory", "compile_model"]:
         value = config.get(name, False)
         if not isinstance(value, bool):
             raise ValueError(f"DINO {name} must be boolean")
@@ -35,31 +34,41 @@ def optimization_options(config):
 
 
 class ParallelPILPreprocessor:
-    """The HF/UniEgoMotion resize and normalization, with parallel PIL resize."""
+    """Shared RGB geometry and ImageNet normalization using a bounded thread pool."""
 
-    def __init__(self, workers):
+    def __init__(self, workers, image_processor=None):
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dino-resize")
+        if image_processor is None:
+            from ImageProcess import SharedImageProcessor
+            image_processor = SharedImageProcessor("256x480")
+        self.image_processor = image_processor
         self.mean = np.asarray([.485, .456, .406], dtype=np.float32)
         self.std = np.asarray([.229, .224, .225], dtype=np.float32)
 
-    def image(self, image):
+    def image(self, image, *, processed=False, image_processor=None):
         image = np.asarray(image)
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("Parallel DINO preprocessing requires HWC RGB uint8")
         height, width = image.shape[:2]
         if min(height, width) < 1:
             raise ValueError("DINO image dimensions must be positive")
-        size = (int(width*336/height), 336) if height <= width else (336, int(height*336/width))
-        pixels = np.asarray(Image.fromarray(image).resize(size, Image.Resampling.BICUBIC))
+        shared = image_processor or self.image_processor
+        if processed:
+            if (height, width) != shared.profile.output_hw:
+                raise ValueError("Shared RGB dimensions do not match the DINO image profile")
+            pixels = image
+        else:
+            pixels = shared.process_image(image)
         # HF rescale promotes to float64, then rounds to float32 before normalize.
         pixels = (pixels.astype(np.float64)*(1/255)).astype(np.float32)
         pixels = (pixels-self.mean)/self.std
         return pixels.transpose(2, 0, 1)
 
-    def __call__(self, images):
+    def __call__(self, images, *, processed=False, image_processor=None):
         if not images:
             raise ValueError("DINO requires a nonempty image batch")
-        return np.stack(list(self.pool.map(self.image, images)))
+        return np.stack(list(self.pool.map(lambda image: self.image(image, processed=processed,
+                                                                   image_processor=image_processor), images)))
 
     def close(self):
         self.pool.shutdown(wait=True, cancel_futures=True)

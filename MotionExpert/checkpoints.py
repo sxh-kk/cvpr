@@ -1,4 +1,4 @@
-"""Strict loading of dense K12 motion weights and Lightning EMA checkpoints."""
+"""Strict loading of SMPL-H K12 motion weights and Lightning EMA checkpoints."""
 
 from collections.abc import Mapping
 from pathlib import Path
@@ -38,21 +38,16 @@ def _state_dict(checkpoint):
 
 
 def checkpoint_config(checkpoint):
-    """Reject the old 153D/text model before allocating the new backbone."""
+    """Validate SMPL-H245 configuration and weight dimensions before allocation."""
     state = _state_dict(checkpoint)
     input_weight = state.get("input_process.weight")
     if input_weight is not None and input_weight.ndim != 2:
         raise ValueError("Checkpoint input_process.weight must be a matrix")
-    legacy_text = any(name.startswith(("text_", "embed_text_cond."))
-                      or name == "mask_tokens.text" for name in state)
-    if legacy_text or (input_weight is not None and input_weight.shape[-1] != MOTION_DIM):
-        raise ValueError(
-            "Legacy SMPL/text MotionExpert checkpoint is incompatible with the "
-            "245D K12 with explicit hands representation; train a matching model."
-        )
+    if input_weight is not None and input_weight.shape[-1] != MOTION_DIM:
+        raise ValueError("Checkpoint input_process must match the 245-channel motion state")
     metadata = checkpoint.get("motionexpert_architecture")
     if not isinstance(metadata, Mapping) or "hyper_parameters" not in checkpoint:
-        raise ValueError("Dense checkpoints require architecture metadata and hyper_parameters; use motionexpert-export")
+        raise ValueError("SMPL-H checkpoints require architecture metadata and hyper_parameters; use motionexpert-export")
     cfg = config_from_dict(checkpoint["hyper_parameters"])
     validate_architecture(cfg)
     has_global = "global_token" in state
@@ -105,7 +100,7 @@ def model_state(model, checkpoint, *, use_ema=True):
                 ordered.extend(values)
             named = ordered
         if len(named) != len(ema):
-            raise ValueError("EMA tensor count does not match the dense MotionExpert")
+            raise ValueError("EMA tensor count does not match the SMPL-H MotionExpert")
         for (name, parameter), value in zip(named, ema):
             if parameter.shape != value.shape:
                 raise ValueError(f"EMA tensor shape mismatch: {name}")
@@ -136,7 +131,7 @@ def validate_checkpoint_statistics(cfg, checkpoint, normalizer):
             "ground_estimation_scope": "observed_prefix",
             "image_validity_scope": "observed_prefix",
             "min_valid_image_fraction": cfg.DATA.MIN_VALID_IMAGE_FRACTION,
-            "statistics_scope": ("all_valid_frames" if cfg.DATA.MOTION_SUPERVISION == "joint" else "future_only"),
+            "statistics_scope": "all_valid_frames",
         })
         if cfg.DATA.MOTION_SUPERVISION == "joint" or "motion_supervision" in stats:
             expected["motion_supervision"] = cfg.DATA.MOTION_SUPERVISION

@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..utils.task_conditioning import apply_task_conditioning
-from .dense_representation import quaternion_matrix
+from .representation import quaternion_matrix
 from .motion_layout import K12_JOINT_INDICES, SMPLH_REPRE_TYPE, motion_layout
 from .normalization import MotionNormalizer
 from .smplh_archive import SMPLHParameterArchive, PARAMETER_SCHEMA_VERSION, DINO_COLUMN
@@ -26,7 +26,8 @@ class SMPLHMotionDataset(Dataset):
                  require_verified_rotations=True, normalization_clip=None,
                  contact_speed_m_s=.2, contact_height_m=.1, min_valid_image_fraction=0.,
                  train_task="fore", require_full_window=True, motion_supervision="joint",
-                 allow_unpublished=False, episode_indices=None, **legacy):
+                 allow_unpublished=False, episode_indices=None, vision_profile_root=None,
+                 image_profile=None, **legacy):
         if cond_betas or bool(legacy.get("cond_text", False)):
             raise ValueError("SMPL-H beta16 is used only for source FK and audit metadata")
         if repre_type != SMPLH_REPRE_TYPE or img_feat_type != "dinov2_reg":
@@ -39,15 +40,18 @@ class SMPLHMotionDataset(Dataset):
             raise ValueError("SMPL-H245 main profile is5Hz, complete11 frames and observed prefix6")
         if train_task != "fore" or require_full_window is not True:
             raise ValueError("SMPL-H245 requires forecast labels and complete windows")
-        if motion_supervision not in ("joint", "future_only"):
-            raise ValueError("SMPL-H motion supervision must be joint or future_only")
+        if motion_supervision != "joint":
+            raise ValueError("SMPL-H motion supervision must be joint")
         if type(segment_stride) is not int or segment_stride < 1 or split not in ("train", "val", "test"):
             raise ValueError("Invalid SMPL-H segment stride or split")
         self.allow_unpublished = allow_unpublished
         self.diagnostic = bool(allow_unpublished or episode_indices is not None)
         self.archive = SMPLHParameterArchive(archive_root or data_dir or "", cache_mb=row_group_cache_mb,
-                                             file_cache=parquet_file_cache, allow_unpublished=allow_unpublished)
+                                             file_cache=parquet_file_cache, allow_unpublished=allow_unpublished,
+                                             vision_profile_root=vision_profile_root, image_profile=image_profile)
         self.root, self.reader = self.archive.root, self.archive.reader
+        self.vision_profile = self.archive.vision_cache.metadata if self.archive.vision_cache is not None else None
+        self.image_profile = self.archive.vision_cache.image_profile if self.archive.vision_cache is not None else None
         self.archive_schema_version, self.model_sha256 = PARAMETER_SCHEMA_VERSION, self.archive.model_sha256
         if split_manifest and Path(split_manifest).resolve() != self.archive.manifest_path.resolve():
             raise ValueError("SMPL-H training must retain the owned original meta/splits.json")
@@ -77,7 +81,7 @@ class SMPLHMotionDataset(Dataset):
         self.split, self.window, self.fps, self.forecast_prefix = split, window, fps, forecast_prefix
         self.sampling_step, self.segment_stride = 6, segment_stride
         self.train_task, self.require_full_window, self.motion_supervision = train_task, True, motion_supervision
-        self.statistics_scope = "all_valid_frames" if motion_supervision == "joint" else "future_only"
+        self.statistics_scope = "all_valid_frames"
         self.ground_estimation_scope = self.image_validity_scope = "observed_prefix"
         self.cond_img_feat, self.cond_traj, self.do_normalization = bool(cond_img_feat), bool(cond_traj), bool(do_normalization)
         self.repre_type, self.motion_feature_dim = SMPLH_REPRE_TYPE, 245
@@ -140,13 +144,21 @@ class SMPLHMotionDataset(Dataset):
         ground = record["metadata"].get("ground", {})
         if not ground.get("valid", False):
             columns.append("source.feet_world")
-        if self.min_valid_image_fraction > 0:
+        if self.min_valid_image_fraction > 0 or self.archive.vision_cache is not None:
             columns.append("observation.valid.dino")
-        arrays = self.reader.read(self.archive.data_path(record["episode_index"]), selected, columns)
+        path = self.archive.data_path(record["episode_index"])
+        if self.archive.vision_cache is not None:
+            columns.append("observation.source_timestamp")
+            _, (parquet, _) = self.reader._file(path)
+            if "source.video_frame_index" in parquet.schema_arrow.names:
+                columns.append("source.video_frame_index")
+        arrays = self.reader.read(path, selected, columns)
         if (not np.array_equal(arrays["frame_index"], selected) or not np.all(arrays["episode_index"] == record["episode_index"])
                 or not np.array_equal(arrays["index"], record["dataset_from_index"] + selected)
                 or not np.array_equal(arrays["timestamp"], (selected / 30).astype(np.float32))):
             raise ValueError("SMPL-H index frame/global-index/time join differs")
+        if self.archive.vision_cache is not None:
+            arrays["observation.valid.dino"] = self.archive.read_image_validity(record, selected, expected=arrays)
         q, p = arrays["observation.state.head_reference_world_rotation"], arrays["observation.state.head_reference_world"]
         head_valid = (arrays["observation.valid.head_reference_position"].astype(bool)
                       & arrays["observation.valid.head_reference_rotation"].astype(bool)
@@ -200,6 +212,8 @@ class SMPLHMotionDataset(Dataset):
         return self.get_from_seq_and_st(self.seq_names[sequence], start, idx=int(index), task=task)
 
     def get_from_seq_and_st(self, seq_name, st, idx=-1, task=None):
+        if task not in (None, "fore"):
+            raise ValueError("SMPL-H245 supports forecasting only")
         if seq_name not in self._seq_indices:
             raise KeyError(f"Unknown SMPL-H sequence {seq_name}")
         sequence = self._seq_indices[seq_name]

@@ -12,9 +12,10 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies import DDPStrategy
 
 from .config import load_config, as_dict, validate_architecture
-from .check_data import validate_paths
+from .readiness import validate_paths
 from .checkpoints import read_checkpoint, model_state, checkpoint_config, validate_checkpoint_architecture, validate_checkpoint_statistics
-from .dataset.ee4d_motion_dataset import EE4D_Motion_DataModule
+from .visual_contract import validate_visual_resume
+from .dataset.data_module import SMPLHMotionDataModule
 from .ema import EMA
 from .module.uem_module import UEM_Module, restore_training_phase
 from .precision import trainer_precision_options
@@ -97,6 +98,7 @@ def main():
     if resume:
         checkpoint = read_checkpoint(cfg.MODEL.CKPT_PATH)
         validate_checkpoint_architecture(cfg, checkpoint)
+        validate_visual_resume(cfg, checkpoint)
         restore_training_phase(cfg, checkpoint)
         del checkpoint
     validate_paths(cfg)
@@ -105,7 +107,7 @@ def main():
     torch.set_num_threads(4)
     output = Path(cfg.TRAIN.EXP_PATH)
     output.mkdir(parents=True, exist_ok=True)
-    dm = EE4D_Motion_DataModule(cfg)
+    dm = SMPLHMotionDataModule(cfg)
     # Validate the archive/splits/statistics and real DINO availability before
     # allocating the 400M-parameter model or optimizer.
     dm.setup("fit")

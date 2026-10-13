@@ -1,4 +1,4 @@
-"""Image-only K12 forecasting from SMPL-H FK or legacy dense observations."""
+"""Image-only SMPL-H245 forecasting and differentiable first-call features."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Mapping
 import torch
 
 from .checkpoints import checkpoint_config, model_state, read_checkpoint, validate_checkpoint_statistics
+from .visual_contract import checkpoint_visual_contract
 from .config import architecture_metadata
 from .dataset.motion_layout import motion_layout
 from .dataset.normalization import MotionNormalizer
@@ -25,12 +26,14 @@ class MotionExpert:
     """
 
     def __init__(self, weights=None, device=None, dtype=None, stats=None, use_ema=True):
-        root = Path(__file__).resolve().parent
-        weights = Path(weights or root / "weights" / "smplh_k12_global_ema_fp32.pt")
+        if weights is None:
+            raise ValueError("Pass explicit MotionExpert weights from the current shared-image training run")
+        weights = Path(weights)
         if not weights.is_file():
             raise FileNotFoundError(f"MotionExpert weights not found: {weights}")
         checkpoint = read_checkpoint(weights)
         self.cfg = checkpoint_config(checkpoint)
+        self.visual_conditioning = checkpoint_visual_contract(checkpoint)
         self.weights_path = str(weights.resolve())
         if use_ema and checkpoint.get("ema_state_format") not in (None, "original_model_with_ema_optimizer_v1"):
             raise ValueError(f"Unsupported EMA checkpoint format: {checkpoint['ema_state_format']}")
@@ -76,6 +79,37 @@ class MotionExpert:
     def motion_dim(self):
         return motion_layout(self.cfg.DATA.REPRE_TYPE).motion_dim
 
+    @property
+    def training(self):
+        return self.model.training
+
+    def train(self, mode=True):
+        """Set the underlying motion network's mode without changing grad state."""
+        self.model.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
+
+    def parameters(self, recurse=True):
+        """Expose motion parameters to a regular PyTorch optimizer."""
+        return self.model.parameters(recurse=recurse)
+
+    def named_parameters(self, prefix="", recurse=True, remove_duplicate=True):
+        return self.model.named_parameters(prefix=prefix, recurse=recurse,
+                                           remove_duplicate=remove_duplicate)
+
+    def requires_grad_(self, requires_grad=True):
+        self.model.requires_grad_(requires_grad)
+        return self
+
+    def state_dict(self, *args, **kwargs):
+        """Return the underlying model state, preserving exported key names."""
+        return self.model.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        return self.model.load_state_dict(state_dict, *args, **kwargs)
+
     def _prepare(self, conditioning: Mapping[str, torch.Tensor], *, normalized=True,
                  task=None, output_frames=None, forecast_prefix=None):
         if not isinstance(conditioning, Mapping):
@@ -92,13 +126,11 @@ class MotionExpert:
         batch, observed_frames = image.shape[:2]
         if type(output_frames) is not int and output_frames is not None:
             raise ValueError("output_frames must be an integer")
-        frames = observed_frames if output_frames is None else output_frames
-        if batch < 1 or not 1 <= observed_frames <= frames <= 5000:
-            raise ValueError("Expected B >= 1 and 1 <= input frames <= output_frames <= 5000")
-        if frames != observed_frames and task not in ("fore", "gen"):
-            raise ValueError("Only fore/gen can extend observations to output_frames")
-        if "traj" not in conditioning and task not in ("fore", "gen"):
-            raise KeyError("conditioning is missing traj")
+        frames = self.cfg.DATA.WINDOW if output_frames is None else output_frames
+        if batch < 1 or observed_frames not in (6, 11) or frames != 11:
+            raise ValueError("Expected B >= 1, historical6 or complete11 input frames and output_frames=11")
+        if task not in (None, "fore"):
+            raise ValueError("MotionExpert supports forecasting only")
         trajectory = torch.as_tensor(conditioning.get("traj", torch.zeros(batch, observed_frames, 18)))
         if tuple(trajectory.shape) != (batch, observed_frames, 18):
             raise ValueError(f"traj must have shape [B,T,18], got {tuple(trajectory.shape)}")
@@ -111,8 +143,8 @@ class MotionExpert:
 
         valid = frame_mask("valid_frames", torch.ones(batch, observed_frames, dtype=torch.bool))
         image_valid = frame_mask("valid_img_embs", valid)
-        if not valid.any(dim=1).all():
-            raise ValueError("Each sequence must contain at least one valid observation")
+        if not valid[:, :self.cfg.DATA.FORECAST_PREFIX].any(dim=1).all():
+            raise ValueError("Each sequence must contain at least one valid historical observation")
         trajectory_valid = torch.as_tensor(
             conditioning.get("trajectory_valid", valid[..., None].expand(-1, -1, 18)),
             device=self.device, dtype=torch.bool,
@@ -130,21 +162,13 @@ class MotionExpert:
                           for key in ("traj_mask", "img_mask")}
         traj_hidden = supplied_masks["traj_mask"] | ~valid
         img_hidden = supplied_masks["img_mask"] | ~valid
-        if task == "gen":
-            traj_hidden = torch.ones_like(traj_hidden)
-            img_hidden = img_hidden | (torch.arange(observed_frames, device=self.device)[None] > 0)
-        elif task == "fore":
-            prefix = getattr(self.cfg.DATA, "FORECAST_PREFIX", 30) if forecast_prefix is None else forecast_prefix
-            if type(prefix) is not int or prefix < 1:
-                raise ValueError("forecast_prefix must be a positive integer")
-            prefix = min(prefix, observed_frames)
-            future = torch.arange(observed_frames, device=self.device)[None] >= prefix
-            traj_hidden, img_hidden = traj_hidden | future, img_hidden | future
-            if self._image_forecast_profile():
-                # The deployed model consumes images only, even if an archive
-                # batch includes camera labels for supervision or evaluation.
-                traj_hidden = torch.ones_like(traj_hidden)
-                trajectory_valid = torch.zeros_like(trajectory_valid)
+        prefix = self.cfg.DATA.FORECAST_PREFIX if forecast_prefix is None else forecast_prefix
+        if prefix != 6:
+            raise ValueError("forecast_prefix must be 6")
+        future = torch.arange(observed_frames, device=self.device)[None] >= prefix
+        traj_hidden = torch.ones_like(traj_hidden)
+        img_hidden |= future
+        trajectory_valid = torch.zeros_like(trajectory_valid)
         visible_trajectory = trajectory_valid & ~traj_hidden[..., None]
         visible_images = image_valid & ~img_hidden
         trajectory = trajectory.to(device=self.device, dtype=torch.float32)
@@ -175,21 +199,10 @@ class MotionExpert:
             conditioning, normalized=normalized, task=task, output_frames=output_frames,
             forecast_prefix=forecast_prefix,
         )
-        if task is not None:
-            prefix = getattr(self.cfg.DATA, "FORECAST_PREFIX", 30) if forecast_prefix is None else forecast_prefix
-            if type(prefix) is not int or prefix < 1:
-                raise ValueError("forecast_prefix must be a positive integer")
-            prefix = min(prefix, observed_frames)
-            if task == "fore" and prefix >= frames:
-                raise ValueError("Forecasting needs at least one frame after the observed prefix")
-            image_forecast = task == "fore" and self._image_forecast_profile()
-            y = apply_task_conditioning(
-                y, task, forecast_prefix=prefix,
-                trajectory_condition=not image_forecast,
-                noise_only_history=image_forecast and self.cfg.DATA.MOTION_SUPERVISION == "future_only")
-            y["task_conditioning"] = True
-            if task == "fore":
-                y["observed_prefix"] = prefix
+        if task not in (None, "fore"):
+            raise ValueError("MotionExpert supports forecasting only")
+        y = apply_task_conditioning(y, "fore", forecast_prefix=6, trajectory_condition=False)
+        y["observed_prefix"] = 6
         generator = None
         if seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(int(seed))
@@ -201,17 +214,18 @@ class MotionExpert:
         return {
             "feature_mask": y["valid_frames"].clone(),
             "metadata": {
-                **architecture_metadata(self.cfg), "task": task or "custom",
+                **architecture_metadata(self.cfg), "task": "fore",
                 "output_frames": int(y["valid_frames"].shape[1]),
-                "observed_prefix": y.get("observed_prefix", 1 if task == "gen" else None),
+                "observed_prefix": y.get("observed_prefix", 6),
                 "seed": None if seed is None else int(seed),
                 "cond_scale": None if cond_scale is None else float(cond_scale),
                 "weights": self.weights_path, "weights_kind": self.weights_kind,
+                "trained_visual_conditioning": getattr(self, "visual_conditioning", None),
             },
         }
 
     @torch.inference_mode()
-    def sample(self, conditioning: Mapping[str, torch.Tensor], *, seed=None, task=None,
+    def sample(self, conditioning: Mapping[str, torch.Tensor], *, seed=None, task="fore",
                forecast_prefix=None, output_frames=None, cond_scale=None, normalized=True,
                denormalize=False, decode=False, decode_kwargs=None, return_all_pred_xstart=False):
         y, noise = self._sampling_inputs(
@@ -243,12 +257,8 @@ class MotionExpert:
         if denormalize or decode:
             output["motion_denormalized"] = self.normalizer.denormalize(output["motion"])
         if decode:
-            from .dataset.dense_representation import decode_dense_motion
-            decoder = decode_dense_motion
-            from .dataset.motion_layout import SMPLH_REPRE_TYPE
-            if self.cfg.DATA.REPRE_TYPE == SMPLH_REPRE_TYPE:
-                from .dataset.smplh_representation import decode_smplh_motion
-                decoder = decode_smplh_motion
+            from .dataset.smplh_representation import decode_smplh_motion
+            decoder = decode_smplh_motion
             physical = output["motion_denormalized"]
             decoded = []
             for index, sample_motion in enumerate(physical):
@@ -296,10 +306,8 @@ class MotionExpert:
         return self.sample(conditioning, task="fore", forecast_prefix=self.cfg.DATA.FORECAST_PREFIX,
                            output_frames=self.cfg.DATA.WINDOW, **kwargs)
 
-    @torch.no_grad()
-    def extract_features(self, conditioning: Mapping[str, torch.Tensor], *, seed=None, task=None,
-                         forecast_prefix=None, output_frames=None, cond_scale=None, normalized=True):
-        """Run one flow call and return ordinary tensors usable by a trainable head."""
+    def _one_step_features(self, conditioning, *, seed, task, forecast_prefix,
+                           output_frames, cond_scale, normalized):
         y, noise = self._sampling_inputs(
             conditioning, seed=seed, task=task, forecast_prefix=forecast_prefix,
             normalized=normalized, output_frames=output_frames,
@@ -313,5 +321,46 @@ class MotionExpert:
             output = {"one_step_hidden": hidden}
         output.update(self._feature_metadata(y, task=task, seed=seed, cond_scale=cond_scale))
         return output
+
+    def forward_features(self, conditioning: Mapping[str, torch.Tensor], *, seed=None,
+                         task=None, forecast_prefix=None, output_frames=None,
+                         cond_scale=None, normalized=True):
+        """Differentiable first flow call at t=1 for downstream post-training.
+
+        The current 5Hz forecasting profile defaults to six observed images
+        and eleven generated-state tokens. A full eleven-frame archive input
+        is also accepted, but its future images and all trajectories are hidden.
+        No clean motion target or future label mask is used as a condition.
+
+        This method preserves the caller's grad state and train/eval mode.
+        ``extract_features`` remains the explicit frozen-feature interface.
+        """
+        if task is None and self._image_forecast_profile():
+            task = "fore"
+            prefix = self.cfg.DATA.FORECAST_PREFIX if forecast_prefix is None else forecast_prefix
+            frames = self.cfg.DATA.WINDOW if output_frames is None else output_frames
+            if isinstance(conditioning, Mapping) and "img_embs" in conditioning:
+                image = torch.as_tensor(conditioning["img_embs"])
+                if image.ndim >= 2 and image.shape[1] not in (prefix, frames):
+                    raise ValueError(
+                        f"forward_features requires {prefix} observed image frames "
+                        f"or a complete {frames}-frame masked window")
+        if task == "fore" and self._image_forecast_profile() and output_frames is None:
+            output_frames = self.cfg.DATA.WINDOW
+        return self._one_step_features(
+            conditioning, seed=seed, task=task, forecast_prefix=forecast_prefix,
+            output_frames=output_frames, cond_scale=cond_scale, normalized=normalized)
+
+    @torch.no_grad()
+    def extract_features(self, conditioning: Mapping[str, torch.Tensor], *, seed=None, task="fore",
+                         forecast_prefix=None, output_frames=None, cond_scale=None, normalized=True):
+        """Run one frozen flow call; these features do not update MotionExpert.
+
+        The six-frame forecasting prefix is padded to the fixed eleven-frame window.
+        Use ``forward_features`` when the downstream loss must update this model.
+        """
+        return self._one_step_features(
+            conditioning, seed=seed, task=task, forecast_prefix=forecast_prefix,
+            output_frames=output_frames, cond_scale=cond_scale, normalized=normalized)
 
     __call__ = sample

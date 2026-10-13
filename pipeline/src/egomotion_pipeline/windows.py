@@ -72,6 +72,11 @@ def prepare_window(arrays, metadata, *, start_frame, num_frames, fps=15, canonic
             result[f"observation.state.{key}_world_rotation"] = values.reshape(num_frames, -1).astype(np.float32)
     verified = bool(meta.get("head_reference", {}).get("basis_verified", False))
     derive_ground_features(result, ground, verified)
+    # Physical v5 caches must follow a changed ground/world reference. Keep
+    # historical v3/v4 windows at their original physical column contract.
+    if "observation.state.body_world_rot6d_xyz" in result:
+        from .unified_dense22 import encode_unified_dense22
+        result.update(encode_unified_dense22(result, meta))
     meta.update(ground=ground, training_window={
         "archive_fps": 30, "fps": int(fps), "source_frame_indices": selected.tolist(),
         "canonicalized": bool(canonicalize), "window_from_archive_world": transform.tolist(),

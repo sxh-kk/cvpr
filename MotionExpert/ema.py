@@ -322,7 +322,30 @@ class EMAOptimizer(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         self.join()
-
+        parameters = list(self.all_parameters())
+        averages = state_dict.get("ema", ())
+        if len(averages) != len(parameters):
+            raise ValueError("EMA checkpoint tensor count does not match optimizer parameters")
+        for index, (average, parameter) in enumerate(zip(averages, parameters)):
+            if not isinstance(average, torch.Tensor) or average.shape != parameter.shape:
+                raise ValueError(f"EMA checkpoint tensor shape mismatch at parameter {index}")
+        saved_optimizer = state_dict.get("opt", {})
+        saved_groups = saved_optimizer.get("param_groups", [])
+        if len(saved_groups) != len(self.param_groups):
+            raise ValueError("Optimizer checkpoint parameter-group count is incompatible")
+        saved_parameters = []
+        for saved, current in zip(saved_groups, self.param_groups):
+            if (len(saved.get("params", ())) != len(current["params"])
+                    or saved.get("phase") != current.get("phase")):
+                raise ValueError("Optimizer checkpoint parameter-group order or phase is incompatible")
+            saved_parameters.extend(zip(saved["params"], current["params"]))
+        for saved_id, parameter in saved_parameters:
+            for name, value in saved_optimizer.get("state", {}).get(saved_id, {}).items():
+                if isinstance(value, torch.Tensor) and name != "step" and value.shape != parameter.shape:
+                    raise ValueError(f"Optimizer checkpoint state {name} has an incompatible parameter shape")
+        if not 0 <= state_dict["decay"] <= 1 or state_dict["every_n_steps"] < 1:
+            raise ValueError("Invalid EMA checkpoint decay or update interval")
+        # Validate before modifying either optimizer or EMA state.
         self.optimizer.load_state_dict(state_dict["opt"])
         self.ema_params = tuple(param.to(self.device) for param in copy.deepcopy(state_dict["ema"]))
         self.current_step = state_dict["current_step"]

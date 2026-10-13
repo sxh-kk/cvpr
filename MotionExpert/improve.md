@@ -1,5 +1,7 @@
 # MotionExpert 改进方案：Video-only One-step Denoised Features for Action Expert
 
+> 历史讨论：本文不作为当前实现接口。SMPL-H K12／245维、5Hz联合重建／预测、DINO5、无文本版本见 [README.md](README.md)；文中设想需单独实验，不代表当前训练行为。
+
 状态：设计方案，尚未实施
 
 日期：2026-09-13

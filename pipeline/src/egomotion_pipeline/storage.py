@@ -10,7 +10,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from .schema import (BODY_NAMES, HAND_NAMES, SCHEMA_VERSION, LEGACY_SCHEMA_VERSION,
-                     DINO_TOKEN_DIM, feature_specs, dino_format)
+                     V4_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS,
+                     DINO_TOKEN_DIM, feature_specs_for_schema, dino_format)
 
 
 def json_bytes(value):
@@ -33,7 +34,22 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def write_arrays(path, arrays, specs):
+def joint_basis_metadata(metadata):
+    """Label an already corrected source without claiming its original axes.
+
+    This only describes provenance; it neither applies a correction nor
+    certifies axes. An explicit nonempty target label is retained.
+    """
+    result = dict(metadata)
+    basis = result.get("target_joint_basis")
+    if basis is not None and (not isinstance(basis, str) or not basis.strip()):
+        raise ValueError("target_joint_basis must be an explicit nonempty string")
+    if result.get("body_basis_correction") is not None and basis is None:
+        result["target_joint_basis"] = "source_corrected_unspecified"
+    return result
+
+
+def write_arrays(path, arrays, specs, *, optimized_dino=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = {}
@@ -48,8 +64,19 @@ def write_arrays(path, arrays, specs):
             columns[key] = pa.FixedSizeListArray.from_arrays(pa.array(value.reshape(-1)), shape[0])
     table = pa.table(columns)
     tmp = path.with_suffix(".parquet.tmp")
-    pq.write_table(table, tmp, compression="zstd", row_group_size=3000)
-    os.replace(tmp, path)
+    options = {}
+    if optimized_dino:
+        feature = "observation.features.dino"
+        leaf = feature+".list.element"
+        options = {"use_dictionary": [key+(".list.element" if spec["shape"] != [1] else "")
+                       for key, spec in specs.items() if key != feature],
+                   "use_byte_stream_split": [leaf], "compression_level": {leaf: 1}}
+    try:
+        pq.write_table(table, tmp, compression="zstd", row_group_size=3000, **options)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def read_arrays(path, specs):
@@ -94,17 +121,21 @@ def quality_report(arrays):
 class Archive:
     def __init__(self, root, config=None, *, _allow_upgrade=False):
         self.root = Path(root)
+        self._allow_upgrade = bool(_allow_upgrade)
         self._records = None
         self._by_key = {}
         self.root.mkdir(parents=True, exist_ok=True)
         upgrade = self.root / ".pipeline/dino_upgrade.json"
         if not _allow_upgrade and upgrade.exists() and read_json(upgrade).get("state") != "complete":
             raise ValueError("DINO format upgrade is unfinished; resume upgrade-dino before reading/writing this archive")
+        dense_upgrade = self.root / ".pipeline/dense_v5_upgrade.json"
+        if not _allow_upgrade and dense_upgrade.exists() and read_json(dense_upgrade).get("state") != "complete":
+            raise ValueError("Dense v5 integration is unfinished; resume upgrade-dense-v5 before reading/writing this archive")
         provenance = self.root / ".pipeline/config.json"
         self.schema_version = read_json(provenance).get("schema_version") if provenance.exists() else SCHEMA_VERSION
-        if self.schema_version not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
+        if self.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
             raise ValueError("Archive schema is incompatible with camera-floor dense22; reconvert to a new output directory")
-        self.specs = feature_specs(DINO_TOKEN_DIM) if self.schema_version == LEGACY_SCHEMA_VERSION else feature_specs()
+        self.specs = feature_specs_for_schema(self.schema_version)
         if config is not None:
             requested = archive_provenance(config)
             if provenance.exists() and read_json(provenance) != requested:
@@ -116,33 +147,54 @@ class Archive:
         elif not provenance.exists():
             raise ValueError("Not an egomotion pipeline archive")
 
+    def assert_ready(self):
+        """Reject unfinished migrations and stale, previously opened objects."""
+        if self._allow_upgrade:
+            return
+        for filename, message in (
+            ("dino_upgrade.json", "DINO format upgrade is unfinished; resume upgrade-dino"),
+            ("dense_v5_upgrade.json", "Dense v5 integration is unfinished; resume upgrade-dense-v5"),
+        ):
+            path = self.root/".pipeline"/filename
+            if path.exists() and read_json(path).get("state") != "complete":
+                raise ValueError(message+" before reading/writing this archive")
+        version = read_json(self.root/".pipeline/config.json").get("schema_version")
+        if version != self.schema_version:
+            raise ValueError("Archive schema changed after this object was opened; reopen the archive")
+
     @contextlib.contextmanager
     def lock(self):
+        self.assert_ready()
         with (self.root/".pipeline/lock").open("a") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise RuntimeError("Another process is writing this archive") from exc
             try:
+                self.assert_ready()
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def records(self):
+        self.assert_ready()
         if self._records is None:
             self._records = [read_json(p) for p in sorted((self.root/".pipeline/episodes").glob("*.json"))]
             self._by_key = {r["source_key"]: r for r in self._records}
         return self._records
 
     def data_path(self, index):
+        self.assert_ready()
         return self.root / f"data/chunk-{index//1000:03d}/file-{index%1000:03d}.parquet"
 
     def record_path(self, index):
+        self.assert_ready()
         return self.root / f".pipeline/episodes/{index:08d}.json"
 
     def read_window(self, episode_index, *, start_frame, num_frames, fps=15, canonicalize=True):
         """Read a selected dense22 window and rebuild its floor-dependent fields."""
         from .windows import prepare_window
+        self.assert_ready()
         if isinstance(episode_index, bool) or not isinstance(episode_index, (int, np.integer)) or not 0 <= episode_index < len(self.records()):
             raise ValueError("episode_index is outside this archive")
         record = self.records()[episode_index]
@@ -151,8 +203,9 @@ class Archive:
                               num_frames=num_frames, fps=fps, canonicalize=canonicalize)
 
     def add(self, episode, arrays, input_fingerprint):
+        self.assert_ready()
         if self.schema_version != SCHEMA_VERSION:
-            raise ValueError("Legacy archive cannot accept new-schema frames; run upgrade-dino first")
+            raise ValueError("An older archive cannot accept v5 frames; upgrade v3 DINO to v4, then run upgrade-dense-v5")
         records = self.records()
         key = episode.source+":"+episode.uid
         old = self._by_key.get(key)
@@ -168,17 +221,26 @@ class Archive:
         arrays.update({"index": np.arange(start, start+count, dtype=np.int64),
                        "frame_index": np.arange(count, dtype=np.int64),
                        "episode_index": np.full(count, index, np.int64), "task_index": np.zeros(count, np.int64)})
+        episode.metadata = joint_basis_metadata(episode.metadata)
+        from .unified_dense22 import (encode_unified_dense22, unified_metadata,
+                                     representation_provenance)
+        source_record = {"source": episode.source, "metadata": episode.metadata}
+        arrays.update(encode_unified_dense22(arrays, source_record))
+        episode.metadata["unified_dense22"] = unified_metadata(source_record)
+        representation = representation_provenance(arrays)
         write_arrays(self.data_path(index), arrays, self.specs)
         record = {"episode_index": index, "source_key": key, "source": episode.source, "source_uid": episode.uid,
                   "length": count, "dataset_from_index": start, "dataset_to_index": start+count,
                   "input_fingerprint": input_fingerprint, "metadata": episode.metadata, "video": episode.video,
-                  "quality": quality_report(arrays), "dino": {"state": "pending"}}
+                  "quality": quality_report(arrays), "dino": {"state": "pending"},
+                  "motion_representation": representation}
         atomic_json(self.record_path(index), record)
         records.append(record)
         self._by_key[key] = record
         return True
 
     def finalize(self):
+        self.assert_ready()
         records = self.records()
         if not records:
             return
@@ -211,15 +273,16 @@ class Archive:
         tasks = tasks.replace_schema_metadata({b"pandas": json.dumps(schema_meta).encode()})
         pq.write_table(tasks, meta/"tasks.parquet.tmp")
         os.replace(meta/"tasks.parquet.tmp", meta/"tasks.parquet")
-        info = {"codebase_version": "v3.0", "robot_type": "human", "fps": 30,
+        info = {"codebase_version": "v3.0", "schema_version": self.schema_version,
+                "robot_type": "human", "fps": 30,
                 "total_episodes": len(records), "total_frames": sum(r["length"] for r in records), "total_tasks": 1,
                 "chunks_size": 1000, "data_files_size_in_mb": 100, "video_files_size_in_mb": 200,
                 "splits": {"all": f"0:{len(records)}"}, "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
                 "video_path": None, "features": self.specs}
         atomic_json(meta/"info.json", info)
-        atomic_json(meta/"ontology.json", {"body_joints": BODY_NAMES, "hand_joints": HAND_NAMES,
+        ontology = {"body_joints": BODY_NAMES, "hand_joints": HAND_NAMES,
                    "schema_version": self.schema_version,
-                   "dino": dino_format() if self.schema_version == SCHEMA_VERSION else {
+                   "dino": dino_format() if self.schema_version in {V4_SCHEMA_VERSION, SCHEMA_VERSION} else {
                        "shape": [1, DINO_TOKEN_DIM], "flat_shape": [DINO_TOKEN_DIM], "token_order": ["cls"],
                        "storage_dtype": "float32", "status": "legacy_cls_only"},
                    "position_unit": "meter", "target_world_axes": "X forward, Y left, Z up; require coordinate_verified",
@@ -235,4 +298,12 @@ class Archive:
                    "body_head_floor_valid": "body_position AND projected-camera position/rotation validity; independent of body rotation basis",
                    "training_trajectory": "canonicalize each selected training window and compute relative trajectory only after training-FPS selection",
                    "training_floor_fallback": "Archive.read_window resolves failed floor estimates from selected valid feet mean Z minus 0.02m, then rebuilds local fields",
-                   "floor": "horizontal plane in output world; estimated or annotated; validity separate from verification"})
+                   "floor": "horizontal plane in output world; estimated or annotated; validity separate from verification"}
+        if self.schema_version == SCHEMA_VERSION:
+            from .unified_dense22 import ENCODING_POLICY, producer_signature
+            ontology["unified_dense22"] = ENCODING_POLICY
+            ontology["motion_representation_producer_signature"] = producer_signature()
+            ontology["body_world_rot6d_xyz"] = "authoritative native/global rotation encoding with source XYZ; 22x9"
+            ontology["body_floor_rot6d_xyz"] = "22x9 camera floor cache; recompute from world after changing floor/world"
+            ontology["hand_floor"] = "each hand21 XYZ in same camera-floor frame, independent joint validity/interpolation masks"
+        atomic_json(meta/"ontology.json", ontology)

@@ -5,11 +5,13 @@ sampling converts it to velocity (x_t - x0) / t and integrates toward t=0.
 """
 
 from __future__ import annotations
+import math
 from collections.abc import Mapping
 from typing import Any, Dict, Iterator, Optional, Sequence, Tuple, Union
 
 import torch
 from .mask_utils import apply_feature_mask, feature_mask_for
+from ..dataset.motion_layout import motion_layout
 
 Tensor = torch.Tensor
 
@@ -23,19 +25,49 @@ def _append_dims(value, ndim):
 class FlowMatching:
     def __init__(self, num_steps=10, solver="euler", beta_alpha=1.5, beta_beta=1.0,
                  t_min=0.001, prediction_type="x0", global_weight=8.0,
-                 global_feature_start=108, global_feature_end=117):
+                 global_feature_start=None, global_feature_end=None):
         if not isinstance(num_steps, int) or num_steps <= 0:
             raise ValueError("num_steps must be positive")
         if solver != "euler" or prediction_type != "x0":
             raise ValueError("E7 uses x0 prediction and Euler sampling")
-        if beta_alpha <= 0 or beta_beta <= 0 or not 0 <= t_min < 1:
+        if (not all(math.isfinite(value) for value in (beta_alpha, beta_beta, t_min))
+                or beta_alpha <= 0 or beta_beta <= 0 or not 0 <= t_min < 1):
             raise ValueError("Invalid flow timestep distribution")
-        if global_weight <= 0 or not 0 <= global_feature_start < global_feature_end:
+        if (global_feature_start is None) != (global_feature_end is None):
+            raise ValueError("Provide both global feature bounds or neither")
+        self._automatic_global_slice = global_feature_start is None
+        if self._automatic_global_slice:
+            global_feature_start, global_feature_end = 108, 117
+        if not math.isfinite(global_weight) or global_weight <= 0 or not 0 <= global_feature_start < global_feature_end:
             raise ValueError("Invalid global feature weighting")
         self.num_steps, self.solver = num_steps, solver
         self.beta_alpha, self.beta_beta, self.t_min = beta_alpha, beta_beta, t_min
         self.prediction_type, self.global_weight = prediction_type, global_weight
         self.global_feature_start, self.global_feature_end = global_feature_start, global_feature_end
+
+    def _global_bounds(self, dimension):
+        if self._automatic_global_slice and dimension == 245:
+            region = motion_layout(dimension).global_slice
+            return region.start, region.stop
+        return self.global_feature_start, self.global_feature_end
+
+    @staticmethod
+    def _generation_mask(state: Tensor, conditioning: Mapping[str, Any]) -> Optional[Tensor]:
+        """Task time domain, independent of availability of supervised labels.
+
+        Joint forecasting omits this mask and denoises the full motion sequence.
+        The optional future-only experiment uses false historical frames as
+        initial Gaussian context throughout sampling, never as history GT.
+        """
+        raw = conditioning.get("motion_generation_mask")
+        if raw is None:
+            return None
+        if state.ndim != 3:
+            raise ValueError("motion_generation_mask requires a [B,T,D] state")
+        mask = torch.as_tensor(raw, device=state.device)
+        if mask.dtype != torch.bool or mask.shape != state.shape[:2]:
+            raise ValueError("motion_generation_mask must be a [B,T] boolean tensor")
+        return mask[:, :, None]
 
     @staticmethod
     def _check_no_repaint(model_kwargs: Optional[Mapping[str, Any]]) -> None:
@@ -151,7 +183,16 @@ class FlowMatching:
                 "an optional loss_mask may further restrict the predicted task region."
             ) from exc
 
-        mask = torch.as_tensor(valid_frames, device=error.device)
+        mask = torch.as_tensor(valid_frames, device=error.device, dtype=torch.bool)
+        padding = conditioning.get("padding_mask")
+        if padding is not None:
+            padding = torch.as_tensor(padding, device=error.device, dtype=torch.bool)
+            if padding.shape != mask.shape:
+                raise ValueError("padding_mask and loss_mask/valid_frames must have identical shapes")
+            mask = mask & padding
+        generation_mask = self._generation_mask(error, conditioning)
+        if generation_mask is not None:
+            mask = mask & generation_mask.squeeze(-1)
         if mask.shape[0] != error.shape[0]:
             raise ValueError(
                 "valid_frames and the model output must have the same batch size, "
@@ -176,13 +217,15 @@ class FlowMatching:
         feature_mask = feature_mask_for(error, conditioning)
         if feature_mask is not None:
             mask = mask * feature_mask.to(dtype=torch.float32)
-        if self.global_feature_end > error.shape[-1]:
+        global_start, global_end = self._global_bounds(error.shape[-1])
+        if global_end > error.shape[-1]:
             raise ValueError("Global feature slice exceeds model output dimension")
         feature_weights = torch.ones(error.shape[-1], device=error.device, dtype=torch.float32)
-        feature_weights[self.global_feature_start:self.global_feature_end] = self.global_weight
+        feature_weights[global_start:global_end] = self.global_weight
         loss_weights = mask * feature_weights
 
-        squared_error = error.to(dtype=torch.float32).square() * loss_weights
+        safe_error = torch.where(mask.bool(), error.float(), torch.zeros_like(error, dtype=torch.float32))
+        squared_error = safe_error.square() * loss_weights
         reduce_dims = tuple(range(1, error.ndim))
         numerator = squared_error.sum(dim=reduce_dims)
         denominator = loss_weights.sum(dim=reduce_dims)
@@ -195,14 +238,14 @@ class FlowMatching:
             return weighted_mse
 
         feature_dim = error.shape[-1]
-        if self.global_feature_end > feature_dim:
+        if global_end > feature_dim:
             return weighted_mse, None, None
 
-        unweighted_squared_error = error.to(dtype=torch.float32).square() * mask
+        unweighted_squared_error = safe_error.square() * mask
         global_error = unweighted_squared_error[
-            ..., self.global_feature_start : self.global_feature_end
+            ..., global_start : global_end
         ]
-        global_mask = mask[..., self.global_feature_start : self.global_feature_end]
+        global_mask = mask[..., global_start : global_end]
         global_numerator = global_error.sum(dim=reduce_dims)
         global_denominator = global_mask.sum(dim=reduce_dims)
 
@@ -222,6 +265,44 @@ class FlowMatching:
             torch.zeros_like(global_numerator),
         )
         return weighted_mse, local_mse, global_mse
+
+    def _dense_group_metrics(self, error: Tensor, model_kwargs: Mapping[str, Any]) -> Dict[str, Tensor]:
+        """Unweighted component diagnostics, using the same label/time mask."""
+        if error.ndim != 3 or error.shape[-1] != 245:
+            return {}
+        layout = motion_layout(error.shape[-1])
+        conditioning = model_kwargs["y"]
+        frames = torch.as_tensor(conditioning.get("loss_mask", conditioning["valid_frames"]),
+                                 device=error.device, dtype=torch.bool)
+        if "padding_mask" in conditioning:
+            frames = frames & torch.as_tensor(conditioning["padding_mask"], device=error.device,
+                                               dtype=torch.bool)
+        generation_mask = self._generation_mask(error, conditioning)
+        if generation_mask is not None:
+            frames = frames & generation_mask.squeeze(-1)
+        mask = frames[:, :, None].expand_as(error)
+        feature_mask = feature_mask_for(error, conditioning)
+        if feature_mask is not None:
+            mask = mask & feature_mask
+        body_channels = torch.arange(layout.body_slice.start, layout.body_slice.stop, device=error.device)
+        groups = {
+            "body_rotation": body_channels[body_channels.remainder(9) < 6],
+            "body_position": body_channels[body_channels.remainder(9) >= 6],
+            "left_hand": torch.arange(layout.left_hand_slice.start, layout.left_hand_slice.stop, device=error.device),
+            "right_hand": torch.arange(layout.right_hand_slice.start, layout.right_hand_slice.stop, device=error.device),
+            "global_rotation": torch.arange(layout.global_slice.start, layout.global_slice.start+6, device=error.device),
+            "global_translation": torch.arange(layout.global_slice.start+6, layout.global_slice.stop, device=error.device),
+            "contacts": torch.arange(layout.contact_slice.start, layout.contact_slice.stop, device=error.device),
+        }
+        result = {}
+        for name, indices in groups.items():
+            group_mask = mask.index_select(-1, indices)
+            values = torch.where(group_mask, error.index_select(-1, indices).float(),
+                                 torch.zeros_like(group_mask, dtype=torch.float32))
+            count = group_mask.sum(dim=(1, 2))
+            result[f"{name}_mse"] = values.square().sum(dim=(1, 2)) / count.clamp_min(1)
+            result[f"{name}_valid_count"] = count
+        return result
 
     def training_losses(
         self,
@@ -245,6 +326,7 @@ class FlowMatching:
 
         batch_size = x_start.shape[0]
         conditioning = model_kwargs.get("y", {})
+        generation_mask = self._generation_mask(x_start, conditioning)
         x_start = apply_feature_mask(x_start, conditioning)
         if noise is None:
             noise = torch.randn_like(x_start)
@@ -254,7 +336,11 @@ class FlowMatching:
             )
         else:
             noise = noise.to(device=x_start.device, dtype=x_start.dtype)
+        raw_noise = noise
         noise = apply_feature_mask(noise, conditioning)
+        if generation_mask is not None:
+            # Context noise must not reveal whether history labels are missing.
+            noise = torch.where(generation_mask, noise, raw_noise)
 
         if t is None:
             t = self.sample_timesteps(batch_size, x_start.device)
@@ -263,6 +349,10 @@ class FlowMatching:
 
         x_t = self.interpolate(x_start, noise, t)
         target_velocity = noise - x_start
+        if generation_mask is not None:
+            x_t = torch.where(generation_mask, x_t, noise)
+            target_velocity = torch.where(generation_mask, target_velocity,
+                                          torch.zeros_like(target_velocity))
         model_output = model(x_t, t, **model_kwargs)
         if model_output.shape != x_start.shape:
             raise ValueError(
@@ -272,6 +362,9 @@ class FlowMatching:
 
         pred_xstart = model_output
         pred_velocity = self.target_to_velocity(x_t, t, pred_xstart)
+        if generation_mask is not None:
+            pred_velocity = torch.where(generation_mask, pred_velocity,
+                                        torch.zeros_like(pred_velocity))
         target = x_start
 
         mse, local_mse, global_mse = self._valid_frame_mse(
@@ -280,6 +373,7 @@ class FlowMatching:
             return_group_mse=True,
         )
         terms = {"loss": mse, "mse": mse, "t": t}
+        terms.update(self._dense_group_metrics(model_output - target, model_kwargs))
         if local_mse is not None and global_mse is not None:
             terms.update({"local_mse": local_mse, "global_mse": global_mse})
         if return_diagnostics:
@@ -337,13 +431,25 @@ class FlowMatching:
 
         device = self._infer_device(model, noise, device)
         if noise is None:
-            x = torch.randn(*shape, device=device)
+            try:
+                dtype = next(model.parameters()).dtype
+            except (AttributeError, StopIteration):
+                dtype = torch.float32
+            x = torch.randn(*shape, device=device, dtype=dtype)
         else:
             if tuple(noise.shape) != shape:
                 raise ValueError(f"noise must have shape {shape}, got {tuple(noise.shape)}.")
             x = noise.to(device=device)
+        # Label validity belongs to supervised loss, never to the generated
+        # state. Otherwise missing/future labels would oracle-clear sampling.
         conditioning = model_kwargs.get("y", {})
-        x = apply_feature_mask(x, conditioning)
+        generation_mask = self._generation_mask(x, conditioning)
+        context_noise = x.clone() if generation_mask is not None else None
+        if "feature_valid_mask" in conditioning:
+            feature_mask_for(x, conditioning)  # Reject stale widths, then discard.
+            model_kwargs = dict(model_kwargs)
+            model_kwargs["y"] = dict(conditioning)
+            model_kwargs["y"].pop("feature_valid_mask")
 
         times = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=torch.float32)
         indices: Any = range(steps)
@@ -372,12 +478,12 @@ class FlowMatching:
             else:
                 velocity, pred_xstart = prediction
                 hidden = None
-            pred_xstart = apply_feature_mask(pred_xstart, conditioning)
             dt = (next_t_scalar - t_scalar).to(dtype=x.dtype)
 
             next_x = x + dt * velocity
+            if generation_mask is not None:
+                next_x = torch.where(generation_mask, next_x, context_noise)
 
-            next_x = apply_feature_mask(next_x, conditioning)
             output = {
                 "sample": next_x,
                 "pred_xstart": pred_xstart,

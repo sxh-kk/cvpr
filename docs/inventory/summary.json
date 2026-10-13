@@ -3,11 +3,12 @@
     "MotionExpert": {
       "source_files": 1938,
       "source_bytes": 1653969857,
-      "uploaded_files": 51,
-      "uploaded_bytes": 364647,
-      "excluded_files": 1887,
-      "excluded_bytes": 1653605445,
-      "uploaded_source_bytes": 364412
+      "uploaded_files": 76,
+      "uploaded_bytes": 745944,
+      "excluded_files": 1892,
+      "excluded_bytes": 1653626633,
+      "uploaded_source_bytes": 364412,
+      "source_inventory_date": "2026-10-06"
     },
     "VLMExpert": {
       "source_files": 45722,
@@ -17,9 +18,30 @@
       "uploaded_files": 5926,
       "uploaded_bytes": 2450321572,
       "uploaded_source_bytes": 2450321180
+    },
+    "pipeline": {
+      "source_files": 116,
+      "source_bytes": 1756949,
+      "uploaded_source_bytes": 1756949,
+      "source_inventory_date": "2026-10-12",
+      "uploaded_files": 116,
+      "uploaded_bytes": 1756949,
+      "excluded_files": 0,
+      "excluded_bytes": 0
+    },
+    "datasets": {
+      "source_files": 12,
+      "source_bytes": 164428,
+      "uploaded_source_bytes": 164428,
+      "source_inventory_date": "2026-10-12",
+      "uploaded_files": 12,
+      "uploaded_bytes": 164428,
+      "excluded_files": 0,
+      "excluded_bytes": 0
     }
   },
   "excluded_reasons": {
+    "removed_text_branch_smplh_update": 5,
     "environment_cache_build_or_run": 41543,
     "checkpoint_or_model_weight": 13,
     "private_environment": 3,
@@ -40,6 +62,25 @@
     {
       "path": "VLMExpert/README.md",
       "change": "publication_documentation_notice"
+    },
+    {
+      "date": "2026-10-12",
+      "paths": [
+        "MotionExpert/",
+        "pipeline/",
+        "datasets/"
+      ],
+      "change": "smplh_unified_interface_update_2026_10_12",
+      "added_source_documentation_test_files": 158,
+      "refreshed_uploaded_files": 28,
+      "removed_text_branch_files": [
+        "MotionExpert/configs/e7_k12_400m_global_text.yaml",
+        "MotionExpert/configs/e7_k12_400m_text.yaml",
+        "MotionExpert/dataset/text_conditions.py",
+        "MotionExpert/precompute_text_features.py",
+        "MotionExpert/text_encoder.py"
+      ],
+      "original_source_sha256_preserved": true
     }
   ],
   "lfs_files": 368,
@@ -57,5 +98,17 @@
       "runtime": "Python 3.10, PyTorch 2.7.0, Transformers 4.57.0"
     },
     "scope": "CPU project regression tests using temporary data and small models; no full training or deployment"
+  },
+  "publication_inventory_update": {
+    "date": "2026-10-12",
+    "original_inventory_date": "2026-10-06",
+    "scope": "Current MotionExpert SMPL-H interfaces, pipeline, and allowlisted dataset download source/documentation/tests; no datasets, weights, runtime outputs, or .codex files added.",
+    "original_source_totals_note": "MotionExpert and VLMExpert source_files/source_bytes/uploaded_source_bytes retain the 2026-10-06 source audit totals; uploaded/excluded counters describe this current publication CSV. Newly added pipeline/datasets source totals are first audited on 2026-10-12.",
+    "uploaded_files": 6130,
+    "uploaded_bytes": 2452988893,
+    "original_excluded_rows_preserved": true,
+    "vlm_rows_unchanged": true,
+    "original_verification_results_retained": true,
+    "model_or_dataset_qa_rerun": false
   }
 }

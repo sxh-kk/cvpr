@@ -1,5 +1,7 @@
 # E7-K12-400M Global Token 训练与推理方案
 
+> 历史方案：本文描述旧SMPL/text版本。当前SMPL-H K12／245维、5Hz联合重建／预测、DINO5、无文本接口以 [README.md](README.md) 和 [validation_plan.md](validation_plan.md) 为准；旧维度和权重不兼容。
+
 状态：global 主干版本已实现并完成短流程验证；300 epoch 完整训练尚未运行。本文件记录正式训练和后续验收要求。
 
 ## 1. 确定的方案

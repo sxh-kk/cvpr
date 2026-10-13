@@ -1,6 +1,6 @@
 import numpy as np
 from .storage import read_arrays, read_json
-from .schema import ROTATION_SHAPES, SCHEMA_VERSION, dino_format
+from .schema import ROTATION_SHAPES, SCHEMA_VERSION, V4_SCHEMA_VERSION, dino_format
 
 
 def validate(archive, require_dino=False, strict=False, require_floor=False, require_head_reference=False,
@@ -9,6 +9,8 @@ def validate(archive, require_dino=False, strict=False, require_floor=False, req
     records = archive.records()
     if info["fps"] != 30 or info["features"] != archive.specs or info["codebase_version"] != "v3.0":
         raise ValueError("Archive info/schema mismatch")
+    if archive.schema_version == SCHEMA_VERSION and info.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("Physical v5 archive info does not declare its schema")
     if len(records) != info["total_episodes"] or not records:
         raise ValueError("Empty/inconsistent episode count")
     offset = 0
@@ -129,6 +131,24 @@ def validate(archive, require_dino=False, strict=False, require_floor=False, req
             raise ValueError("body_head_floor interpolation mask is inconsistent")
         if require_body_head_floor and not body_mask.all():
             raise ValueError(f"{record['source_key']}: body_head_floor has unavailable joints or camera/floor reference")
+        if archive.schema_version == SCHEMA_VERSION:
+            from .unified_dense22 import validate_unified_dense22, unified_metadata
+            from .numeric_fingerprint import numeric_hashes, motion_digest_from_hashes, NON_MOTION_COLUMNS
+            validate_unified_dense22(arrays, arrays, record)
+            declared = record["metadata"].get("unified_dense22")
+            expected = unified_metadata(record)
+            if not isinstance(declared, dict) or any(declared.get(key) != value for key, value in expected.items()):
+                raise ValueError("Unified dense22 encoding/axis/cache provenance differs from source")
+            representation = record.get("motion_representation", {})
+            if representation.get("schema_version") != SCHEMA_VERSION:
+                raise ValueError("Missing physical v5 motion representation provenance")
+            signature = representation.get("producer_signature", "")
+            if (not isinstance(signature, str) or len(signature) != 64
+                    or any(char not in "0123456789abcdef" for char in signature)):
+                raise ValueError("Invalid dense22 producer SHA256 signature")
+            motion_arrays = {key: value for key, value in arrays.items() if key not in NON_MOTION_COLUMNS}
+            if representation.get("motion_digest") != motion_digest_from_hashes(numeric_hashes(motion_arrays)):
+                raise ValueError("Physical v5 motion digest differs from stored columns")
         for requirement in ["coordinate_verified", "rotation_basis_verified"]:
             if not record["metadata"].get(requirement, False):
                 warnings.append(f"{record['source_key']}: {requirement}=false")
@@ -146,7 +166,7 @@ def validate(archive, require_dino=False, strict=False, require_floor=False, req
             raise ValueError(f"{record['source_key']}: DINO is pending or has missing frames")
         if ready:
             signature = record["dino"]
-            if archive.schema_version == SCHEMA_VERSION:
+            if archive.schema_version in {V4_SCHEMA_VERSION, SCHEMA_VERSION}:
                 expected = dino_format()
                 for key in ["shape", "flat_shape", "token_order", "flatten_order", "pooling", "storage_dtype"]:
                     if signature["encoder"].get(key) != expected[key]:

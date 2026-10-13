@@ -36,55 +36,78 @@ def _nearest_frames(iterator, targets, max_error_s):
         iterator.close()
 
 
-def _mp4_frames(path):
+def _mp4_frames(path, decoder_threads=0):
     if not Path(path).exists():
         raise FileNotFoundError(path)
     with av.open(str(path)) as container:
+        if decoder_threads:
+            stream = container.streams.video[0]
+            stream.codec_context.thread_count = decoder_threads
+            stream.thread_type = "AUTO"
         for frame in container.decode(video=0):
             if frame.pts is not None:
                 yield float(frame.pts*frame.time_base), frame.to_ndarray(format="rgb24")
 
 
-def nearest_video_frames(path, targets, max_error_s):
-    yield from _nearest_frames(_mp4_frames(path), targets, max_error_s)
+def nearest_video_frames(path, targets, max_error_s, *, decoder_threads=0):
+    yield from _nearest_frames(_mp4_frames(path, decoder_threads), targets, max_error_s)
 
 
-def _mcap_frames(video):
+def _mcap_frames(video, decoder_threads=0):
     from .egosuite_mcap import decoded_messages, timestamp_ns
     codecs = {"h264": "h264", "h265": "hevc", "vp9": "vp9", "av1": "av1"}
     codec, current_format, last_stamp = None, None, None
     origin = int(video["clock_origin_ns"])
+    packet_time_base = Fraction(1, 1_000_000_000)
     bad_ns = {round(t*1e9) for t in video.get("bad_timestamps_s", [])}
     def output(frames):
         for frame in frames:
-            if frame.pts is None or frame.time_base is None:
+            if frame.pts is None:
                 raise ValueError("MCAP decoder lost capture timestamps")
-            pts = float(frame.pts*frame.time_base)
+            # PyAV can omit time_base on delayed frames returned by flush().
+            # Every packet has the explicit capture-nanosecond time base below.
+            pts = float(frame.pts*(frame.time_base or packet_time_base))
             yield pts, None if round(pts*1e9) in bad_ns else frame.to_ndarray(format="rgb24")
-    for _, message, decoded in decoded_messages(video["path"], [video["topic"]]):
-        if decoded.format not in codecs:
-            raise ValueError(f"Unsupported MCAP CompressedVideo format: {decoded.format}")
-        if current_format is not None and current_format != decoded.format:
-            raise ValueError("MCAP video codec changes within an episode")
-        if codec is None:
-            current_format = decoded.format
-            codec = av.CodecContext.create(codecs[current_format], "r")
-        stamp, _ = timestamp_ns(decoded, message)
-        if last_stamp is not None and stamp <= last_stamp:
-            raise ValueError("MCAP video capture timestamps must be strictly increasing in file order")
-        last_stamp = stamp
-        # Each Foxglove message is a complete access unit, not an MP4 container.
-        # Keep codec state across delta frames and assign the message capture PTS.
-        packet = av.Packet(decoded.data)
-        packet.pts = packet.dts = stamp-origin
-        packet.time_base = Fraction(1, 1_000_000_000)
-        yield from output(codec.decode(packet))
-    if codec is not None:
-        yield from output(codec.decode(None))
+    messages = decoded_messages(video["path"], [video["topic"]])
+    drained = False
+    try:
+        for _, message, decoded in messages:
+            if decoded.format not in codecs:
+                raise ValueError(f"Unsupported MCAP CompressedVideo format: {decoded.format}")
+            if current_format is not None and current_format != decoded.format:
+                raise ValueError("MCAP video codec changes within an episode")
+            if codec is None:
+                current_format = decoded.format
+                codec = av.CodecContext.create(codecs[current_format], "r")
+                if decoder_threads:
+                    codec.thread_count = decoder_threads
+                    codec.thread_type = "AUTO"
+            stamp, _ = timestamp_ns(decoded, message)
+            if last_stamp is not None and stamp <= last_stamp:
+                raise ValueError("MCAP video capture timestamps must be strictly increasing in file order")
+            last_stamp = stamp
+            # Each Foxglove message is a complete access unit, not an MP4 container.
+            # Keep codec state across delta frames and assign the message capture PTS.
+            packet = av.Packet(decoded.data)
+            packet.pts = packet.dts = stamp-origin
+            packet.time_base = packet_time_base
+            yield from output(codec.decode(packet))
+        if codec is not None:
+            drained = True
+            yield from output(codec.decode(None))
+    finally:
+        # Closing a partial MCAP iterator can otherwise leave frame-threaded
+        # decoding in flight and deadlock avcodec_free_context on some streams.
+        if codec is not None and not drained:
+            try:
+                codec.decode(None)
+            except av.FFmpegError:
+                pass  # Cleanup must preserve the original exception/GeneratorExit.
+        messages.close()
 
 
-def nearest_mcap_video_frames(video, targets, max_error_s):
-    yield from _nearest_frames(_mcap_frames(video), targets, max_error_s)
+def nearest_mcap_video_frames(video, targets, max_error_s, *, decoder_threads=0):
+    yield from _nearest_frames(_mcap_frames(video, decoder_threads), targets, max_error_s)
 
 
 def image_preprocessor(config):

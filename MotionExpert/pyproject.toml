@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "motionexpert"
-version = "0.1.0"
-description = "E7 K12 400M motion expert training and inference"
+version = "0.2.0"
+description = "SMPL-H K12 motion expert with explicit hands21 supervision"
 requires-python = ">=3.10"
 dynamic = ["dependencies"]
 
@@ -13,8 +13,10 @@ dynamic = ["dependencies"]
 motionexpert-train = "MotionExpert.train:main"
 motionexpert-infer = "MotionExpert.infer:main"
 motionexpert-export = "MotionExpert.export_weights:main"
-motionexpert-text = "MotionExpert.precompute_text_features:main"
 motionexpert-check-data = "MotionExpert.check_data:main"
+motionexpert-split = "MotionExpert.split_manifest:main"
+motionexpert-stats = "MotionExpert.compute_joint_motion_stats:main"
+motionexpert-eval = "MotionExpert.evaluate:main"
 
 [tool.setuptools]
 packages = ["MotionExpert", "MotionExpert.dataset", "MotionExpert.model", "MotionExpert.module", "MotionExpert.mydiffusion", "MotionExpert.utils"]
@@ -24,4 +26,4 @@ package-dir = {MotionExpert = "."}
 dependencies = {file = "requirements.txt"}
 
 [tool.setuptools.package-data]
-MotionExpert = ["configs/*.yaml", "assets/*.pt"]
+MotionExpert = ["configs/*.yaml"]

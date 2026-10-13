@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from .schema import (SCHEMA_VERSION, LEGACY_SCHEMA_VERSION, DINO_FLAT_DIM,
-                     DINO_TOKEN_DIM, feature_specs)
+from .schema import (SCHEMA_VERSION, V4_SCHEMA_VERSION, LEGACY_SCHEMA_VERSION, DINO_FLAT_DIM,
+                     DINO_TOKEN_DIM, feature_specs_for_schema)
 from .storage import Archive, archive_provenance, atomic_json, read_json
 
 FEATURE = "observation.features.dino"
@@ -58,18 +58,21 @@ def _widen_pending_file(path):
 def upgrade_dino(root, progress=None):
     """Locked, resumable v3→v4 migration; completed features are never invented."""
     archive = Archive(root, _allow_upgrade=True)
+    dense_journal = archive.root/".pipeline/dense_v5_upgrade.json"
+    if dense_journal.exists() and read_json(dense_journal).get("state") != "complete":
+        raise ValueError("Resume the unfinished dense v5 integration before upgrade-dino")
     journal_path = archive.root/".pipeline/dino_upgrade.json"
     with archive.lock():
         provenance_path = archive.root/".pipeline/config.json"
         provenance = read_json(provenance_path)
         journal = read_json(journal_path) if journal_path.exists() else None
         version = provenance.get("schema_version")
-        if version == SCHEMA_VERSION and (not journal or journal["state"] == "complete"):
-            return {"state": "complete", "already_current": True, "schema_version": SCHEMA_VERSION}
-        if version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        if version in {V4_SCHEMA_VERSION, SCHEMA_VERSION} and (not journal or journal["state"] == "complete"):
+            return {"state": "complete", "already_current": True, "schema_version": version}
+        if version not in {LEGACY_SCHEMA_VERSION, V4_SCHEMA_VERSION}:
             raise ValueError("upgrade-dino requires a camera-floor v3 archive")
         if journal and (journal.get("source_schema") != LEGACY_SCHEMA_VERSION
-                        or journal.get("target_schema") != SCHEMA_VERSION):
+                        or journal.get("target_schema") != V4_SCHEMA_VERSION):
             raise ValueError("Unexpected DINO migration journal")
         records = archive.records()
         if not records:
@@ -81,7 +84,7 @@ def upgrade_dino(root, progress=None):
                 raise ValueError("Mixed/unrecognized DINO layout without an upgrade journal")
         if journal is None:
             journal = {"state": "in_progress", "source_schema": LEGACY_SCHEMA_VERSION,
-                       "target_schema": SCHEMA_VERSION, "started_at": datetime.now(timezone.utc).isoformat(),
+                       "target_schema": V4_SCHEMA_VERSION, "started_at": datetime.now(timezone.utc).isoformat(),
                        "original_provenance": provenance, "total_episodes": len(records)}
         journal["state"] = "in_progress"
         atomic_json(journal_path, journal)
@@ -94,14 +97,15 @@ def upgrade_dino(root, progress=None):
                 progress(dict(journal))
         # Readers are blocked by the journal until both shared metadata and
         # provenance agree with every file. A crash here can safely resume.
-        archive.schema_version = SCHEMA_VERSION
-        archive.specs = feature_specs()
+        archive.schema_version = V4_SCHEMA_VERSION
+        archive.specs = feature_specs_for_schema(V4_SCHEMA_VERSION)
         archive.finalize()
         updated = archive_provenance(journal["original_provenance"]["config"])
+        updated["schema_version"] = V4_SCHEMA_VERSION
         updated["motion_conversion_provenance"] = journal["original_provenance"]
         atomic_json(provenance_path, updated)
         journal.update({"state": "complete", "completed_at": datetime.now(timezone.utc).isoformat(),
                         "frames": sum(r["length"] for r in records)})
         atomic_json(journal_path, journal)
         return {"state": "complete", "episodes": len(records), "frames": journal["frames"],
-                "schema_version": SCHEMA_VERSION, "dino": "pending"}
+                "schema_version": V4_SCHEMA_VERSION, "dino": "pending"}

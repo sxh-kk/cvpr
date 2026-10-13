@@ -130,8 +130,27 @@ def main(argv=None):
     p = sub.add_parser("extract-features")
     p.add_argument("--dataset", required=True)
     p.add_argument("--config", required=True, help="Standalone DINO JSON config")
+    p.add_argument("--gpus", nargs="+", type=int,
+                   help="Physical GPU IDs; one worker per GPU and one archive writer")
     p = sub.add_parser("upgrade-dino", help="Upgrade pending CLS-only v3 archives to 5x1024; preserves motion")
     p.add_argument("--dataset", required=True)
+    p = sub.add_parser("upgrade-dense-v5", help="Integrate dense22 and explicit hands into one validated archive; preserve existing DINO")
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--native-root")
+    p.add_argument("--pilot-episodes", nargs="+", type=int)
+    p.add_argument("--no-commit", action="store_true")
+    p.add_argument("--job-dir")
+    p = sub.add_parser("export-native-dense22", help="Export EgoSuite native world/floor row-6D + XYZ sidecars without rewriting the archive")
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--limit", type=int, help="Limit episodes for a separate pilot output")
+    p.add_argument("--no-resume", action="store_true", help="Refuse previously exported episodes")
+    p = sub.add_parser("validate-native-dense22", help="Recheck every native dense22 sidecar against source motion columns")
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--workers", type=int, default=8)
     p = sub.add_parser("validate")
     p.add_argument("--dataset", required=True)
     p.add_argument("--strict", action="store_true")
@@ -157,12 +176,35 @@ def main(argv=None):
             archive = Archive(args.dataset)
             with archive.lock():
                 try:
-                    extract_features(archive, read_json(args.config))
+                    if args.gpus is not None:
+                        from .parallel_features import extract_features_parallel
+                        extract_features_parallel(archive, read_json(args.config), args.gpus)
+                    else:
+                        extract_features(archive, read_json(args.config))
                 finally:
                     archive.finalize()
         elif args.command == "upgrade-dino":
             from .migration import upgrade_dino
             print(json.dumps(upgrade_dino(args.dataset), indent=2, ensure_ascii=False))
+        elif args.command == "upgrade-dense-v5":
+            from .unified_migration import upgrade_dense_v5
+            result = upgrade_dense_v5(args.dataset, workers=args.workers, native_root=args.native_root,
+                                      pilot_indices=args.pilot_episodes, commit=not args.no_commit,
+                                      job_dir=args.job_dir)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        elif args.command == "export-native-dense22":
+            from .native_export import run_export
+            result = run_export(args.dataset, args.output, workers=args.workers,
+                                limit=args.limit, resume=not args.no_resume)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            if result.get("failures") or result.get("stage") == "failed":
+                return 1
+        elif args.command == "validate-native-dense22":
+            from .native_export import validate_export
+            result = validate_export(args.dataset, args.output, workers=args.workers)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            if result.get("failures") or result.get("stage") == "failed":
+                return 1
         else:
             from .validation import validate
             print(json.dumps(validate(Archive(args.dataset), args.require_dino, args.strict, args.require_floor,

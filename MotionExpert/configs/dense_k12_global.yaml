@@ -1,0 +1,38 @@
+# 5Hz image-only joint history reconstruction and future forecasting.
+DATA:
+  ARCHIVE_ROOT: /gaozt-test1/datasets/MixEgoMotion
+  SPLIT_MANIFEST: exp/dense_k12/splits.json
+  STATS_PATH: exp/dense_k12_fore_5hz_joint/stats.pt
+  ROTATION_BASIS_MODE: source_native
+  TARGET_JOINT_BASIS: egosuite_native_v1
+  ROTATION_BASIS_PATH: null
+  REQUIRE_VERIFIED_ROTATIONS: true
+  FPS: 5
+  FRAME_PHASE: 0
+  WINDOW: 11
+  FORECAST_PREFIX: 6
+  SEGMENT_STRIDE: 5
+  TRAIN_TASK: fore
+  MOTION_SUPERVISION: joint
+  REQUIRE_FULL_WINDOW: true
+  TRAJECTORY_CONDITION_PROB: 0.0
+  ROW_GROUP_CACHE_MB: 128
+  PARQUET_FILE_CACHE: 8
+  BATCH_SIZE: 8
+  NUM_WORKERS: 4
+  NORMALIZATION_CLIP: null
+  MIN_VALID_IMAGE_FRACTION: 0.5
+MODEL:
+  GLOBAL_TOKEN_COUNT: 1
+  INIT_CKPT_PATH: null
+  CKPT_PATH: null
+FLOW:
+  GLOBAL_WEIGHT: 8.0
+TRAIN:
+  EXP_PATH: exp/dense_k12_fore_5hz_joint
+  NUM_GPUS: 1
+  NUM_EPOCHS: 300
+  PRECISION: bf16-mixed
+  ACCUMULATE_GRAD_BATCHES: 1
+  SAMPLE_VAL_EVERY_N_EPOCHS: 5
+  SAMPLE_VAL_MAX_SAMPLES: 16

@@ -1,5 +1,7 @@
 # MotionExpert / VLMExpert 上传与迁移文档
 
+当前更新（2026-10-12）：第3节按现有SMPL-H参数归档和八卡训练配置更新；本次八卡训练尚未启动。MotionExpert与pipeline的当前接口以 [MotionExpert/README.md](../MotionExpert/README.md) 和 [pipeline/README.md](../pipeline/README.md) 为准。下文2026-10-06的文件数量、清单及测试结果保留为初次上传的历史快照，不代表当前代码的新验收结果。
+
 清点日期：2026-10-06。目标仓库：<https://github.com/sxh-kk/cvpr>，公开，默认分支 `main`。
 
 ## 1. 本次迁移范围
@@ -70,68 +72,65 @@ Git LFS 跟踪的是非 checkpoint 资源。GitHub 的 ZIP 下载可能不能直
 
 ## 3. MotionExpert 环境与路径
 
-MotionExpert 使用 Python >= 3.10，`requirements.txt` 固定 Transformers 4.53.2，并要求 `huggingface-hub >= 0.30.0, < 1.0`。
-建议为它建立独立环境；GPU 训练需按机器 CUDA 环境选择 PyTorch。
+MotionExpert使用Python >= 3.10、PyTorch >= 2.4和`pytorch-lightning >= 2.4, < 2.6`；完整依赖以 [requirements.txt](../MotionExpert/requirements.txt) 与 [pyproject.toml](../MotionExpert/pyproject.toml) 为准。建立独立环境，GPU训练按机器CUDA环境安装兼容的PyTorch。本模型读取预提取的DINO特征，不再使用文本分支、CLIP文本sidecar或`motionexpert-text`入口。
+
+以下命令均从仓库根目录执行，仅为迁移示例，本次文档更新不执行安装、统计或训练：
 
 ```bash
-cd MotionExpert
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-python -m unittest tests.test_pipeline tests.test_global -v
+python3.10 -m venv .venv-motion
+source .venv-motion/bin/activate
+python -m pip install -e ./MotionExpert
 ```
 
-本包安装后的入口为 `motionexpert-train`、`motionexpert-infer`、`motionexpert-export`、`motionexpert-text` 和 `motionexpert-check-data`。
-源码测试在 `MotionExpert/` 内运行，避免 `tests.fixtures` 被其他项目的 `tests` 包遮蔽。
+安装后的入口包括`motionexpert-train`、`motionexpert-infer`、`motionexpert-export`、`motionexpert-check-data`、`motionexpert-split`、`motionexpert-stats`和`motionexpert-eval`。
 
 ### 数据准备
 
-默认数据路径为项目相对路径 `../datasets/ee4d_motion_uniegomotion`，迁移后等价于 `cvpr/datasets/ee4d_motion_uniegomotion`。
-也可使用 `MOTIONEXPERT_DATA_DIR` 或 `--data-dir` 指向独立的数据盘。
+默认读取独立SMPL-H参数归档`/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1`。迁移时可用`MOTIONEXPERT_DATA_DIR`或`--data-dir`指定实际归档路径；reader随数据根目录读取自有`meta/splits.json`，不会重新随机切分。训练要求归档正式accepted且独立验收不再pending；隔离记录保留并排除出训练。
 
-每个 split 需要以下离线文件；验证同样需要自己的 motion / image / text / QC 文件，归一化统计使用训练集统计：
+归档包含自有运动／视觉Parquet、episode记录、模型、手部表示资源及验收证据。MotionExpert读取同一SMPL-H模型与真实16维beta进行FK，保留K12身体、左右各21点显式手、相机、地面、DINO和独立mask；不依赖pipeline Python包、旧dense22文件或旧EE4D／Nymeria的`.pt`数据包。模型权重和训练数据不随代码仓库提供。
 
-| 相对数据根目录的文件 | 用途 |
-| --- | --- |
-| `uniegomotion/ee_{split}.pt` | EE4D motion pack |
-| `uniegomotion/nymeria_{split}.pt` | NymeriaPlus motion pack |
-| `uniegomotion/egoview_dinov2_{split}.pt` | EE4D DINOv2 特征 |
-| `uniegomotion/egoview_dinov2_nymeria_{split}.pt` | NymeriaPlus DINOv2 特征 |
-| `uniegomotion/clip_text_{split}_16.pt` | 16-token CLIP 文本特征 |
-| `uniegomotion/motion_qc_{split}.json` | QC 序列清单 |
-| `uniegomotion/v4_beta_joint_masked_train_stats_clean.pt` | 训练集联合统计 |
+当前接口为245维运动＋18维相机轨迹；身体采用逐关节6D旋转＋XYZ，旋转／位置监督保留各自mask。时间协议为5Hz、11帧，历史6帧（含当前帧）＋未来5帧。DINO使用`dinov2-with-registers-large`的5×1024特征（CLS＋4 register），训练和推理只开放历史6帧图像；训练按现有0.5概率提供历史相机轨迹，验证与部署使用图像条件。
 
 ```bash
-export MOTIONEXPERT_DATA_DIR=/data/ee4d_motion_uniegomotion
-motionexpert-check-data --config configs/e7_k12_400m_global_text.yaml
+export MOTIONEXPERT_DATA_DIR=/data/MixEgoMotion/smplh-parameters-v1
+python -m MotionExpert.check_data --config MotionExpert/configs/smplh_k12_global.yaml
 ```
 
-数据不在仓库内。缺少 CLIP sidecar 或统计时，使用原 README 中的 `motionexpert-text`、`compute_joint_motion_stats`、`build_motion_qc_manifest` 等流程重建。
+归一化统计只使用全部train窗口，存放在归档外，默认`MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt`。已有同归档、同表示和同采样协议的完整统计可直接迁移；若改变统计存储位置，同步修改`DATA.STATS_PATH`。仅缺少兼容统计时才需要生成：
+
+```bash
+python -m MotionExpert.compute_joint_motion_stats \
+  --config MotionExpert/configs/smplh_k12_global.yaml \
+  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt
+```
+
+旧文本／原生轴统计或只取部分窗口的诊断统计不能用于当前正式训练；仅修改batch或GPU数不要求重算已有兼容统计。完整分片统计及合并流程见MotionExpert README。
 
 ### 训练与外部权重
 
-GLOBAL 配置默认随机初始化；数据备齐后可使用：
+当前`configs/smplh_k12_global.yaml`配置为每卡batch64、8卡、梯度累积1，即全局batch512；峰值LR为`1e-4`。其余参数保持：300 epoch、20 epoch warmup、EMA `0.992028`、BF16 mixed、每卡4个worker、`FUSED_ADAMW=False`及原保存周期。本次八卡训练尚未启动；以下仅为备齐数据、统计和GPU环境后的启动示例：
 
 ```bash
-motionexpert-train --config configs/e7_k12_400m_global_text.yaml \
-  --from-scratch --devices 8 --ddp-socket
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=8 \
+  --module MotionExpert.train --config MotionExpert/configs/smplh_k12_global.yaml \
+  --from-scratch --devices 8
 ```
 
-实际卡数由 `--devices` 调整。`--ddp-socket` 是原工程的单机通信兼容选项，正常通信环境可省略。
+`--devices`、`--batch-size`等CLI参数会覆盖配置，迁移时须保持预期有效batch。`--ddp-socket`仅在需要单机通信兼容选项时使用；默认通信环境不启用。
 
-需要继续旧 E7 训练时，另行准备 `e7_k12_400m_text_ema_fp32.pt`，放到 `MotionExpert/weights/` 或使用 `--init-weights` 指定路径。
-旧 E7 权重不含 GLOBAL token，不能当作 GLOBAL 检查点完整恢复。
-同阶段恢复使用完整 `.ckpt`；推理与特征提取使用明确的外部权重路径：
+同阶段恢复使用兼容的完整`.ckpt`；`--from-scratch`、`--init-weights`与`--resume`互斥。Checkpoint、统计和导出权重绑定表示、K12顺序、SMPL-H模型及5Hz联合协议，旧文本或原生轴E7权重不能直接作为当前模型初始化／恢复的兼容权重。
 
 ```bash
-motionexpert-train --resume /models/motion-global/last.ckpt --ddp-socket
-motionexpert-export /models/motion-global/last.ckpt /models/motion-global/export.pt
-motionexpert-infer --input /data/conditioning.pt \
-  --weights /models/motion-global/export.pt --features-only --output /data/features.pt
+python -m MotionExpert.train --resume /models/smplh-k12/last.ckpt
+python -m MotionExpert.export_weights \
+  /models/smplh-k12/last.ckpt /models/smplh-k12/export.pt
+python -m MotionExpert.infer --input /data/conditioning.pt \
+  --weights /models/smplh-k12/export.pt --features-only --output /data/features.pt
 ```
 
-`one_step_hidden` 为 `[B,T,768]`，GLOBAL 版本还输出 `[B,768]` 的 `one_step_global`。
-配套统计优先随训练检查点 / 导出文件迁移；不要把另一套数据统计与已有权重随意混用。
+`predict_future`的图像输入为`[B,6,5,1024]`，返回未来5帧`[B,5,245]`和完整11帧运动；隐藏特征为`[B,11,768]`，GLOBAL特征为`[B,768]`。解码得到K12身体和左右各21点手部，不输出未预测的完整SMPL-H参数。配套统计应与训练检查点／导出文件一起迁移；具体接口与mask约定见MotionExpert README。
 
 ## 4. VLMExpert 环境与路径
 

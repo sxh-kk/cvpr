@@ -1,226 +1,110 @@
 # MotionExpert
 
-本公开快照不包含 checkpoint 或模型权重。环境、数据与外部权重的迁移说明见
-[迁移文档](../docs/MIGRATION.md)；`assets/` 内的统计和表示资源继续保留。
+默认适配独立 SMPL-H 参数归档 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/`，**保留原有12稀疏身体关节及245维模型输入／输出**。读取时用归档自己的同一 SMPL-H 模型和实际16维beta计算完整身体FK，再选择既有K12；左右各21点使用显式手部标签。MotionExpert 独立读取参数与视觉 Parquet，不依赖 pipeline Python 包或旧 dense22 文件，也不修改归档。
 
-从 UniEgoMotion 独立迁移的 **E7-K12-400M 文本条件模型**，完整包含训练、验证、
-EMA 断点续训、权重导出和推理。当前正式训练版本在主干加入一个 `<GLOBAL>` token，
-序列为 `[time, global, motion...]`，输出全部运动 hidden 和一个全局 hidden。
-结构与训练依据见 [project.md](project.md)。
+时间协议保持 **5Hz，历史1秒＋当前帧的6张图像 → 联合重建历史6帧、预测未来1秒的5帧运动**。11个时刻为 `[-1,-0.8,-0.6,-0.4,-0.2,0,0.2,0.4,0.6,0.8,1]`，从原30Hz按零相位步长6选帧。真实身体和相机用于监督，训练中一半样本还开放历史相机轨迹；真实shape只在数据端FK与审计中使用，不作为模型条件或预测目标。部署只需要历史图像的 DINO 特征。
 
-模型为 12 层、768 hidden，每层 1 个 shared expert 和 11 个 routed experts，按 4 帧
-chunk 做 Top-2 路由；两个前缀使用有效运动帧的序列级路由，不占用帧 chunk。
-global 版本共 403,790,133 参数，保留 CLIP cross-attention、原 x0 Flow Matching
-和 MoE 均衡损失，不增加 global 辅助损失。全局运动 9 维损失权重仍为 8，推理用 10 步 Euler。
+## 表示与原 UniEgoMotion 的对应
 
-旧 E7 权重仍可严格加载，参数量为 403,789,365，没有 global 输出。原项目配套的旧 EMA 权重
-不包含新增 token；global 版本需要使用本项目训练产生的检查点或导出权重。
+参考官方 [v4_beta 编码／解码](https://github.com/chaitanya100100/UniEgoMotion/blob/580c92c6d70a91672c4106bab30ca82cdd80f379/dataset/representation_utils.py) 的旋转6D、相机地面参考和联合生成方式。原版包含22身体关节、手PCA与shape；当前模型沿用项目既有K12稀疏身体表示和显式手21点，不增加完整22关节或shape预测分支。
 
-已移除其他实验的双输出头、TaskFiLM、自适应任务采样、几何辅助损失、两阶段模型、
-DDPM 以及路由消融入口。本目录运行时不依赖 `../UniEgoMotion`。
+| 输出 | 通道切片（左闭右开） | 维数 |
+|---|---|---:|
+| 身体12稀疏关节，逐关节前两行6D＋XYZ | `[0:108]` | 108 |
+| 相机地面参考系的旋转6D＋平移3D增量 | `[108:117]` | 9 |
+| 左手21点XYZ | `[117:180]` | 63 |
+| 右手21点XYZ | `[180:243]` | 63 |
+| 双脚接触代理 | `[243:245]` | 2 |
+| 总计 | | **245** |
 
-## 安装
+身体索引保持 `[0,4,5,10,11,13,14,15,18,19,20,21]`：pelvis、左右knee、左右foot、左右collar、head、左右elbow、左右wrist。表示版本为 `smplh12_rot6d_hands21_contacts_v1`，与旧原生轴dense12版本明确区分。`SPARSE_JOINTS.ENABLED=true`、`MODEL.INPUT_FEATS=245`；配置拒绝切换成全22或351维。HM逐帧beta原值用于FK并保留在misc，不复制首帧或强制平均；没有beta预测头或beta损失。
 
-在本目录执行，Python >= 3.10，GPU 训练需要支持 CUDA 的 PyTorch：
+世界坐标为米、Z-up。窗口先将首帧实际相机的水平位置和朝向规范化，再以每帧相机的地面投影建立参考系；身体全局旋转与手点变换到此参考系。旋转编码取矩阵前两行。相邻参考增量在上一帧参考系中表达，首帧保存初始参考位姿；轨迹标签仍为18维（相机相对地面位姿9＋参考增量9），与运动重复增量共享统计。
 
-```bash
-python -m venv --system-site-packages .venv
-source .venv/bin/activate
-python -m pip install -e .
-```
+解码返回12个身体关节XYZ／全局旋转、双手21点与地面参考轨迹。稀疏12关节无法直接恢复完整SMPL-H局部pose、beta或trans，因此接口不输出这些未预测参数；不把缺失关节补成真实姿态。显式手点不需要手指PCA，也不转换为完整finger pose。身体XYZ和旋转保持独立预测，显式手腕与身体模型手腕的偏差在评估中单独报告。
 
-已有 `.venv` 时直接激活即可。命令行入口也可写成 `python -m MotionExpert.train`、
-`python -m MotionExpert.infer` 等；安装后可从任意工作目录调用。
-原来的 `python -m train` 不适用于包内相对导入。
+## 数据准入、mask与来源
 
-## 输入数据
+新归档目标为 EgoSuite 6,614段／26,841,893帧与 EgoExo4D-HM 2,649段／11,295,991帧。当前记录中9,216段满足 `training_eligible`，47条HM隔离记录保留但不进入训练。正式读取要求 `.pipeline/dataset-state.json` 为 `state=accepted`、`independent_acceptance_pending=false`。这两个条件满足前，转换完成不能视为正式训练数据已发布。
 
-默认数据根目录是 `../datasets/ee4d_motion_uniegomotion`，可通过 `--data-dir` 或
-`MOTIONEXPERT_DATA_DIR` 修改。数据路径相对于数据根目录，模型/输出配置路径相对于
-本包目录；命令行传入的路径相对于当前工作目录。绝对路径保持原样。
+读取使用归档原有 `meta/splits.json`，不重新随机切分：EgoSuite沿用人物／录制分组，HM沿用participant／capture连通分量。reader核对全部record、receipt、文件尺寸与时间身份、全局frame/index、split成员及分组；fingerprint绑定参数schema、模型SHA、全部record与归档索引。已有外置全量验收报告时继续核对其结果和binding；归档搬迁不要求保留旧数据或外置job目录。窗口读取再次检查文件稳定性，不在每个batch重算数百GB哈希。
 
-每个 split（`train`、`val`）需要以下文件，具体路径均可在 YAML 中配置：
+两来源共用归档的52关节、6890顶点、真实16维beta模型，SHA256为 `be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947`。旋转策略为 `smplh_model_defined / smplh_body22_axes_v1`：模型定义目标轴，原生轴认证和绝对旋转精度认证标记继续保留。EgoSuite身体是拟合估计；HM来自发布的优化参数，数值可用不等于捕获真值。
 
-| 文件 | 内容 |
-| --- | --- |
-| `uniegomotion/ee_{split}.pt` | EE4D motion pack，含 SMPL 参数、Aria 轨迹和 3D 关节 |
-| `uniegomotion/nymeria_{split}.pt` | NymeriaPlus motion pack，含有效特征 mask 与图像对齐索引 |
-| `uniegomotion/egoview_dinov2_{split}.pt` | EE4D 5 FPS DINOv2 特征 |
-| `uniegomotion/egoview_dinov2_nymeria_{split}.pt` | NymeriaPlus 5 FPS DINOv2 特征 |
-| `uniegomotion/clip_text_{split}_16.pt` | 按序列和窗口起点索引的 16-token CLIP 特征 |
-| `uniegomotion/motion_qc_{split}.json` | 通过质量检查的序列名单 |
-| `uniegomotion/v4_beta_joint_masked_train_stats_clean.pt` | 训练集联合归一化统计，验证集也使用它 |
+身体监督使用 `estimated.valid`，原观测、插值、完成标签、confidence与残差留在sample的misc中。不同来源confidence的含义不同，本轮没有直接改为confidence加权损失。双手每点XYZ使用各自mask，独立于身体和可选手指PCA；EgoSuite未拟合finger pose仍可正常参与显式手部监督。HM无效参数被有限零值存储时，mask仍保持无效。
 
-沿用原工程的预处理格式：运动 10 FPS、窗口 80 帧、步长 20 帧；DINO sidecar
-保存 `[N,5,1024]`，模型消费其中的 CLS token，并对齐到运动帧。
-NymeriaPlus 中未观测的手部 PCA 和体型参数不计入损失。DINO 特征不再做额外标准化。
-QC 清单可以设为 `null`，但默认的干净统计仍需与所使用的数据一致。
+归档地面无效时，只用所选历史前6帧的 `source.feet_world/valid` 估计脚高度均值再减2cm；不使用未来脚点或拟合补全脚点兜底。仍无法确定参考地面的窗口拒绝进入身体训练。脚接触由来源脚点在5Hz上重新计算，使用0.2m/s速度与0.1m高度阈值，保留独立mask。地面和接触均为代理标签，不是独立测量真值。
 
-```bash
-motionexpert-check-data --config configs/e7_k12_400m_global_text.yaml
-```
+DINO保持 `dinov2-with-registers-large` 的 `[5,1024]`（CLS＋4 register）。新reader只加载前6帧embedding，后5帧视觉值置零并隐藏；历史有效图像比例默认至少0.5。运动统计只读DINO有效性，不加载embedding。
 
-该命令检查文件、所有选中窗口的文本索引和每个来源的代表样本，并报告文本覆盖率。
-没有文字标注的窗口可以使用明确的 empty row；缺少窗口索引会报错。
-加载大包需要时间，运动、DINO 和文本张量尽可能使用 mmap。
+## 模型、训练与采样
 
-## 文本和统计
+保留12层、hidden768、每层1个shared＋11个routed experts、Top-2路由、4帧chunk和一个GLOBAL token。输入／输出投影保持245维。使用x0 Flow Matching、10步Euler、EMA与MoE均衡损失。
 
-已有 DINO 与 CLIP sidecar 时可直接训练。如果只有文本标注，先生成 CLIP sidecar：
+显式 `TRAIN_TASK=fore / MOTION_SUPERVISION=joint`：全部11帧的有效K12身体、手、参考增量和接触参与损失。历史真值属于待生成目标；推理从全部11帧高斯噪声开始，历史和未来共同更新。SMPL-H默认 `TRAJECTORY_CONDITION_PROB=0.5`，训练逐样本独立抽签，决定是否开放前6帧有效的18维相机轨迹；这是长期期望比例，不保证每个batch恰好一半。图像始终只开放前6帧，不再额外随机隐藏整段视频。
+
+| 阶段／样本类型 | 历史6帧DINO | 历史6帧真实相机轨迹 | 未来5帧图像／真实轨迹 |
+|---|---|---|---|
+| 训练，概率0.5 | 可见有效帧 | 可见有效通道 | 全部隐藏 |
+| 训练，概率0.5 | 可见有效帧 | 全部隐藏 | 全部隐藏 |
+| 验证、测试、部署 | 可见有效帧 | 全部隐藏 | 全部隐藏 |
+
+两类训练样本都联合监督11帧，不输入干净历史人体姿态。未来参考增量仍是运动预测目标，但从不作为条件输入。独立缺失mask继续生效；开放轨迹不把无效通道变为有效。这里的0.5是模态dropout概率，与采样CFG权重及损失权重分别配置。
+
+这样可以让共享网络在有／无轨迹时都学习，思路与 [ModDrop](https://arxiv.org/abs/1501.00102) 的缺失模态训练一致，但0.5只是起始实验值，没有证据表明最优。最相关的 [UniEgoMotion补充表3](https://arxiv.org/html/2508.01126v1#A3) 中，统一模型去掉轨迹的预测MPJPE为0.322m，单独仅图像训练为0.318m；其主要预测协议在推理时也提供历史轨迹。因此不能据有轨迹分支loss下降推断纯图像部署会改善，也不能将该论文的2–4秒指标直接当成我们的1秒K12结果。固定数据、步数和seed，对比概率0／0.25／0.5，以**仅图像验证的未来5帧**指标选择配置。
+
+若混合训练没有改善纯图像效果，可另行研究“图像＋历史轨迹教师→仅图像学生”。[第一视角多模态蒸馏](https://arxiv.org/abs/2307.07483) 在动作识别中验证了训练额外模态、部署仅RGB的路径；迁移到本运动预测任务仍需设计和消融。当前实现没有教师、学生或蒸馏损失。
+
+损失保留有效通道MSE与 `GLOBAL_WEIGHT=8`，增量权重仍作用于 `[108:117]`。分别报告身体6D／XYZ、左右手、增量旋转／平移、接触的有效计数和MSE。主验证只评价未来5帧：K12身体和手MPJPE、旋转角度、参考漂移、手腕偏差与脚部物理指标。world还原使用预测参考增量；真实最后观察参考位姿仅是坐标输出锚点，不是网络条件。纯图像部署无此锚点时，可输出相对参考坐标的运动。
+
+## 使用
+
+默认 SMPL-H 训练配置为8卡、每卡 batch64、梯度累积1，有效全局 batch512；峰值学习率 `1e-4`。其余参数保持：300 epoch、20 epoch warmup、EMA `0.992028`、每卡4个数据加载 worker、`FUSED_ADAMW=False`，采样仍为5Hz、历史6帧＋未来5帧。
 
 ```bash
-motionexpert-text \
-  --ee-pack /data/uniegomotion/ee_train.pt \
-  --nymeria-pack /data/uniegomotion/nymeria_train.pt \
-  --ee-text /data/uniegomotion/ee_text_train.pt \
-  --takes /data/takes.json \
-  --output /data/uniegomotion/clip_text_train_16.pt --device cuda:0
+python -m pip install -e ./MotionExpert
+# 默认即此配置
+python -m MotionExpert.compute_joint_motion_stats \
+  --config MotionExpert/configs/smplh_k12_global.yaml \
+  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt
+python -m MotionExpert.check_data --config MotionExpert/configs/smplh_k12_global.yaml
+python -m MotionExpert.train --config MotionExpert/configs/smplh_k12_global.yaml --from-scratch
 ```
 
-验证集同样生成一次。默认编码器为 `openai/clip-vit-large-patch14`，首次使用需下载，
-之后可用缓存或 `--model /local/clip`。`--ee-text`、`--takes` 可省略，省略时使用
-motion pack 内已有的文本标注。训练本身读取离线 CLIP 特征，不运行文本编码器。
+必须在归档正式accepted后计算全部train窗口的SMPL-H K12 245＋18统计。统计逐通道排除无效值，contacts保持mean0/std1，重复增量严格共享统计。维度相同不代表轴和标签分布相同：旧原生轴245统计不能复用，已撤回的351统计也不兼容。`--limit-windows`产生的部分统计标为diagnostic，不可启动正式训练；代码内部 `allow_unpublished=True` 仅供只读诊断，没有正式训练配置开关。
 
-更换数据后，可以用本包内的 `compute_joint_motion_stats`、`build_motion_qc_manifest`
-和 `merge_joint_motion_stats` 重建联合统计，具体参数见各模块 `--help`：
+全量统计可并行分片，每个 `I=0..15` 各运行一次（`III`为三位补零索引）：
 
 ```bash
 python -m MotionExpert.compute_joint_motion_stats \
-  --data-dir /data --ee-pack /data/uniegomotion/ee_train.pt \
-  --nymeria-pack /data/uniegomotion/nymeria_train.pt --output /data/pass1.pt
-python -m MotionExpert.build_motion_qc_manifest \
-  --stats /data/pass1.pt --output /data/uniegomotion/motion_qc_train.json
-python -m MotionExpert.compute_joint_motion_stats \
-  --data-dir /data --ee-pack /data/uniegomotion/ee_train.pt \
-  --nymeria-pack /data/uniegomotion/nymeria_train.pt \
-  --sequence-manifest /data/uniegomotion/motion_qc_train.json \
-  --max-nonfinite-values 0 --output /data/uniegomotion/v4_beta_joint_masked_train_stats_clean.pt
+  --config MotionExpert/configs/smplh_k12_global.yaml \
+  --num-shards 16 --shard-index I --shard-mode contiguous \
+  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/shards/stats.shard-III-of-016.pt
+python -m MotionExpert.merge_joint_motion_stats \
+  --input-dir MotionExpert/exp/smplh_k12_fore_5hz_joint/shards --stem stats --num-shards 16 \
+  --output MotionExpert/exp/smplh_k12_fore_5hz_joint/stats.pt
 ```
 
-验证集生成自己的 QC 清单（统计脚本加 `--split val`），训练/推理归一化仍使用训练统计。
-
-## 训练与恢复
+分片合并检查表示、模型、split、采样协议、区间无重叠及全覆盖。Parquet按列及row group读取，worker缓存受字节上限控制。统计和产物写在归档之外。
 
 ```bash
-# 全部有效参数从随机初始化训练，使用全部通过 QC 的训练窗口
-motionexpert-train --config configs/e7_k12_400m_global_text.yaml \
-  --from-scratch --devices 8 --ddp-socket
-
-# 运行一次真实数据训练/验证，检查通路，不保存检查点
-motionexpert-train --from-scratch --devices 1 --batch-size 2 --num-workers 0 \
-  --accumulate-grad-batches 1 --fast-dev-run
-
-# 完整恢复模型、AdamW、LR scheduler、EMA 和训练进度
-motionexpert-train --resume exp/e7_k12_400m_global_text/last.ckpt --ddp-socket
-
-# 继续使用旧 E7 架构；需另行准备配套权重
-motionexpert-train --config configs/e7_k12_400m_text.yaml --devices 8 --ddp-socket
+python -m MotionExpert.evaluate \
+  --checkpoint MotionExpert/exp/smplh_k12_fore_5hz_joint/last.ckpt \
+  --split val --max-samples 16 --output MotionExpert/exp/smplh_k12_fore_5hz_joint/val_metrics.json
+python -m MotionExpert.export_weights \
+  MotionExpert/exp/smplh_k12_fore_5hz_joint/last.ckpt MotionExpert/weights/smplh_k12_global_ema_fp32.pt
 ```
 
-`--from-scratch` 使用随机初始化；`--init-weights path.pt` 只加载权重并重新训练。
-省略 `--config` 时使用 global 正式配置，默认不加载初始化权重。恢复默认使用检查点中的
-配置，可显式提供 `--config` 调整设置。初始化及恢复均严格检查架构，不能将旧 E7
-检查点直接恢复为 global 版本。默认按 YAML 周期保存检查点；正常训练结束时始终
-保存 `final.ckpt` 并更新 `last.ckpt` 链接，即使未到周期也保留最后一步。
+推理API `expert.predict_future({"img_embs": img_embs})` 接受 `[B,6,5,1024]`，返回 `future_motion[_denormalized] [B,5,245]`；完整motion为 `[B,11,245]`，hidden为 `[B,11,768]`，GLOBAL hidden为 `[B,768]`。坐标解码输出 `[B,5,12,3]` 身体和左右各 `[B,5,21,3]` 手点；稀疏解码无需加载完整人体模型，数据端FK及checkpoint仍绑定模型SHA。
 
-支持 `--max-epochs`、`--max-steps`、`--output-dir`、`--limit-train-batches`、
-`--limit-val-batches` 和 `--devices 0`（CPU）。默认 8 卡、每卡 batch 16、累积 4 步；
-global 配置已将 `DATA.SOURCE_SUBSAMPLE.ENABLED` 设为 `false`，学习率为 `1e-4`，
-所有有效主干参数从 epoch 0 更新，global 参数也由原 motion loss 训练。
-验证会分别记录 EE4D/NymeriaPlus 的运动指标，并额外记录 `t=1` hidden/global 的
-范数和 global 的 batch 内标准差；这些诊断不参与训练损失，也不改变训练时间采样。
+恢复训练使用 `--resume`；`--from-scratch` 与 `--init-weights` 为明确的新运行入口，三者互斥。原生轴245权重虽投影尺寸相同，表示和轴不同，当前严格入口仍拒绝误恢复／直接初始化；旧153／text和已撤回351权重不兼容。Checkpoint、统计和导出权重绑定表示、K12顺序、模型SHA与5Hz联合协议。单独改变轨迹开放概率不改变物理标签、窗口或统计，因此无需重新处理归档／重算同表示统计；checkpoint的训练协议另绑定该概率，概率不同的checkpoint不能直接严格恢复或初始化。
 
-本机默认 NCCL 通信初始化出现过停滞，双卡使用 `--ddp-socket` 已验证通过。
-该选项只适用于单机，禁用 IB/P2P/SHM 并使用 loopback socket；通信环境正常的机器
-可省略此选项，以使用更快的默认 GPU 通信。
-
-## 推理与导出
+## 验证及旧实验
 
 ```bash
-# 使用新检查点和验证集第 0 个窗口的文本，执行完整 10 步采样
-motionexpert-infer --config configs/e7_k12_400m_global_text.yaml \
-  --weights exp/e7_k12_400m_global_text/last.ckpt \
-  --split val --index 0 --task recon --output exp/prediction.pt
-
-# 指定序列和原始文字，也支持 fore / gen
-motionexpert-infer --config configs/e7_k12_400m_global_text.yaml \
-  --weights exp/e7_k12_400m_global_text/last.ckpt \
-  --sequence SEQUENCE_NAME --start 0 --text "A person walks forward." \
-  --task fore --forecast-prefix 20 --output exp/forecast.pt
-
-# 导出 EMA 权重与配套归一化统计
-motionexpert-export exp/e7_k12_400m_global_text/last.ckpt weights/e7_k12_400m_global_text.pt
-
-# 直接读取 .ckpt（默认 EMA）或导出的 .pt
-motionexpert-infer --input conditioning.pt --weights weights/e7_k12_400m_global_text.pt \
-  --output exp/prediction.pt
-
-# 仅提取给下游的特征：无 CFG 时只执行一次模型前向，不运行 Euler
-motionexpert-infer --input conditioning.pt --weights weights/e7_k12_400m_global_text.pt \
-  --features-only --output exp/features.pt
+python -m pytest MotionExpert/tests -q
 ```
 
-`conditioning.pt` 是包含下列批量张量的字典（也可放在 `y` 键下）：
+本次验证与限制记录在 [review.md](review.md)，训练验收计划见 [validation_plan.md](validation_plan.md)。小样本结构验证不等于已完成新模型训练，也不等于全量上游拟合已验收。
 
-```python
-from MotionExpert import MotionExpert
-
-expert = MotionExpert(weights="weights/e7_k12_400m_global_text.pt", device="cuda:0", dtype="bfloat16")
-conditioning = {
-    "traj": traj,                 # [B,T,18]，canonical v4_beta 归一化轨迹
-    "img_embs": dino,             # [B,T,1024]，对齐后的 DINOv2 CLS 特征
-    "valid_frames": valid,        # [B,T]，可省略
-    "text_pooled": pooled,        # [B,768]
-    "text_tokens": tokens,        # [B,16,768]
-    "text_mask": text_mask,       # [B,16]，可省略
-}
-out = expert.sample(conditioning, seed=62, task="recon", denormalize=True)
-features = expert.extract_features(conditioning, seed=62, task="recon")
-hidden = features["one_step_hidden"]  # [B,T,768]
-global_hidden = features["one_step_global"]  # [B,768]
-```
-
-也可省略 CLIP 张量，传入 `text="A person walks forward."` 或长度为 B 的文本列表。
-空字符串表示无文本条件；`local_files_only=True` 禁止自动下载编码器。
-`valid_img_embs`、`text_valid`、`traj_mask`、`img_mask` 均支持显式传入。
-`recon` 使用全部条件，`fore` 使用前缀，`gen` 只保留首帧图像和文本条件。
-
-`traj` 已是 18 维 canonical 表示但未归一化时可用 `normalized=False`，CLI 对应
-`--unnormalized-traj`。原始世界坐标轨迹不能直接当作此输入；数据集入口会完成
-canonicalization。默认统计随包提供，训练检查点和导出文件会携带对应的统计。
-
-输出 `motion` 为归一化的 `[B,T,153]` K12 表示，`one_step_hidden` 为首次模型调用
-的 `[B,T,768]` hidden，global 权重还返回同次调用的 `one_step_global [B,768]`。
-两者都在 `t=1` 从最后一层提取，不包含 time 前缀；global 不参与 Euler 积分。
-`feature_mask [B,T]` 标记有效输出位置，`metadata` 记录任务、种子、架构、特征时刻和 CFG。
-`extract_features` 不返回 `motion`，其特征 Tensor 可以用于训练冻结专家之后的下游模块。
-如需同时训练专家，直接使用可微分的 `expert.model(..., return_features=True)`，返回
-`(motion_prediction, hidden, global_hidden)`；该选项与 `return_hidden=True` 互斥。
-
-默认 `cond_scale=None`，DINO/文本/轨迹条件仍然有效。启用 CFG 会计算条件与无条件
-两个分支，并对 motion、hidden 和 global 使用相同的线性组合。
-
-`denormalize=True` 额外返回 `motion_denormalized`；完整采样的 CLI 默认
-包含它，`--all-steps` 另存 10 步的 x0 估计。K12 顺序是
-`[0,4,5,10,11,13,14,15,18,19,20,21]`，每关节 9 维，另有 45 维辅助量。
-反归一化后的结果仍是 canonical 稀疏运动表示，不是全身 SMPL-X 网格。
-T 默认为 80，推理支持 1 至 5000 帧；超出训练窗口的质量未做保证。
-
-导出的 `.pt` 包含 `state_dict`、架构元数据和归一化统计；同时保留 `.stats.pt` 与
-`.json` sidecar。包装器自动识别新导出格式和旧裸 state_dict。不要将 global 模型仅保存为
-缺少架构元数据的裸 state_dict 后直接用于包装器，使用 `motionexpert-export` 完成导出。
-
-## 验证
-
-```bash
-python -m unittest tests.test_pipeline tests.test_global -v
-```
-
-回归测试覆盖两种来源的窗口读取、DINO 对齐、文本索引、无效特征损失屏蔽和归一化。
-global 版本通过 18 项回归测试、真实 EE4D/NymeriaPlus 单卡 BF16 训练/验证、双卡
-socket DDP、短流程 EMA 续训/导出，以及完整采样和单次特征提取。两种特征接口在
-相同 seed 下的首次 hidden/global 逐位一致；导出的 EMA 权重也已逐位复核。
-这些是通路验证，不代表已完成 300 epoch 训练。旧 E7 权重的 motion 和 hidden 在兼容
-路径下仍保持固定输入逐位一致。
-原项目配套权重的路径为 `weights/e7_k12_400m_text_ema_fp32.pt`；本公开快照不上传
-这个 1.6 GB 权重。迁移时另行准备 `weights/` 或通过 `--weights` 指定外部路径。
+旧 `configs/dense_k12_global.yaml` 保留245维EgoSuite原生轴实验；其历史验证仍在 `exp/dense_k12_fore_5hz_joint/`。`motion_expert_config()` 为旧程序的明确兼容factory，`smplh_motion_expert_config()` 为SMPL-H K12配置factory，`load_config()` 默认选择SMPL-H K12。`exp/smplh22_fore_5hz_joint/` 是已撤回351方案的历史诊断，不能用于当前模型准入。所有结构诊断均不代表已完成全量训练。

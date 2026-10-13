@@ -1,338 +1,218 @@
-"""E7 K12 400M with shared/top-2 routed experts and CLIP cross-attention."""
+"""Versioned body rotations/positions, explicit hands and image-conditioned MoE."""
 
 import math
 import numpy as np
 import torch
 import torch.nn as nn
 from ..config import validate_architecture
+from ..dataset.motion_layout import motion_layout
 from .core import MoEDecoderBlock
 
 
-class TextCrossAttention(nn.Module):
-    """A shared MotionLab-style text cross-attention adapter.
-
-    The residual projection is zero initialized, so adding this module does
-    not perturb a loaded E7 checkpoint before text-specific learning begins.
-    """
-
-    def __init__(self, dim, heads, dropout):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
-        self.to_out = nn.Linear(dim, dim)
-        nn.init.zeros_(self.to_out.weight)
-        nn.init.zeros_(self.to_out.bias)
-
-    def forward(self, x, text_tokens, text_mask, text_valid):
-        if text_tokens is None:
-            return torch.zeros_like(x)
-        query = self.norm(x)
-        text_mask = text_mask.bool()
-        text_valid = text_valid.bool().view(-1)
-        # An all-masked row produces NaNs in MultiheadAttention.  Invalid
-        # samples instead attend to zero tokens and are removed after the
-        # zero-initialized output projection.
-        safe_mask = text_mask.clone()
-        safe_mask[~text_valid] = True
-        safe_mask[~text_valid, 0] = False
-        safe_mask[text_valid, 0] = True
-        tokens = text_tokens.to(dtype=query.dtype)
-        tokens = tokens * text_valid[:, None, None].to(dtype=tokens.dtype)
-        key_padding_mask = ~safe_mask
-        attended = self.attn(
-            query,
-            tokens,
-            tokens,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
-        )[0]
-        output = self.to_out(attended)
-        return output * text_valid[:, None, None].to(dtype=output.dtype)
-
-
 def mask_it(mask, cond, replace_token):
-    # mask: B bool
-    # cond: B x ... x D
-    # replace_token: D
-    expand_dims = [1] * (len(cond.shape) - len(mask.shape))
-    mask = mask.view(*mask.shape, *expand_dims).to(dtype=cond.dtype)  # B x ... x 1
-
-    expand_dims = [1] * (len(cond.shape) - 1)
-    mask_token = replace_token.view(*expand_dims, -1)  # 1 x ... x D
-    cond = cond * (1.0 - mask) + mask * mask_token
-    return cond
+    """Replace conditions without retaining NaNs from an unavailable value."""
+    mask = mask.reshape(*mask.shape, *([1] * (cond.ndim - mask.ndim))).bool()
+    token = replace_token.view(*([1] * (cond.ndim - 1)), -1)
+    return torch.where(mask, token.to(dtype=cond.dtype), cond)
 
 
 class UniEgoMotion(nn.Module):
-    """Checkpoint-compatible E7 K12 400M text-conditioned Motion Expert."""
+    """The retained 768-dimensional E7 MoE with a versioned dense state."""
 
     def __init__(self, cfg, dropout=0.1):
         super().__init__()
         validate_architecture(cfg)
         self.cfg = cfg
         self.latent_dim = 768
-        self.input_feats = 153
+        self.layout = motion_layout(cfg.DATA.REPRE_TYPE)
+        self.input_feats = self.layout.motion_dim
         self.num_layers = self.num_heads = 12
-        self.text_feature_dim = 768
-        self.text_token_count = 16
-        self.text_dropout = float(cfg.DATA.TEXT_DROPOUT)
-        self.text_condition_enabled = self.motion_expert_enabled = True
-        self.text_global_proj = self.text_router_proj = None
+        self.image_tokens = 5
+        self.motion_expert_enabled = True
         self.sparse_joint_indices = tuple(cfg.SPARSE_JOINTS.INDICES)
-        self.global_feature_start, self.global_feature_end = 108, 117
+        self.global_feature_start = self.layout.global_slice.start
+        self.global_feature_end = self.layout.global_slice.stop
         self.cond_mask_prob = {"traj": 0.5, "clip": 0.1, "subseq_frames": 0.5}
-        self.input_process = nn.Linear(153, 768)
-        self.pos_enc = PositionalEncoding(768, dropout)
-        self.embed_timestep = TimestepEmbedder(768, self.pos_enc)
-        self.embed_traj_cond = nn.Linear(18, 768)
-        self.embed_clip_cond = nn.Linear(1024, 768)
-        # Unused tensors stay frozen for strict compatibility with original E7 weights.
-        self.embed_text_cond = nn.Linear(768, 768).requires_grad_(False)
-        self.text_token_proj = nn.Sequential(nn.LayerNorm(768), nn.Linear(768, 768))
-        nn.init.eye_(self.text_token_proj[-1].weight)
-        nn.init.zeros_(self.text_token_proj[-1].bias)
+        self.input_process = nn.Linear(self.input_feats, self.latent_dim)
+        self.pos_enc = PositionalEncoding(self.latent_dim, dropout)
+        self.embed_timestep = TimestepEmbedder(self.latent_dim, self.pos_enc)
+        self.embed_traj_cond = nn.Linear(18, self.latent_dim)
+        # A missing scalar and a valid zero must remain distinguishable.
+        self.embed_traj_valid = nn.Linear(18, self.latent_dim, bias=False)
+        self.embed_clip_cond = nn.Linear(1024, self.latent_dim)
         self.mask_tokens = nn.ParameterDict({
-            name: nn.Parameter(torch.randn(768) * 0.05) for name in ("traj", "clip", "text")
+            name: nn.Parameter(torch.randn(self.latent_dim) * 0.05)
+            for name in ("traj", "clip")
         })
-        self.mask_tokens["text"].requires_grad_(False)
         expert = cfg.MODEL.MOTION_EXPERT
         self.tsfm = nn.ModuleList([
-            MoEDecoderBlock(768, 12, dropout, 2, num_experts=11, top_k=2,
+            MoEDecoderBlock(self.latent_dim, self.num_heads, dropout, 2,
+                            num_experts=11, top_k=2,
                             router_jitter=float(expert.ROUTER_JITTER), shared_expert=True,
                             chunk_size=4, router_conditioned=True,
                             routed_gate_init=float(expert.ROUTED_GATE_INIT))
-            for _ in range(12)
+            for _ in range(self.num_layers)
         ])
-        self.text_cross_attention = TextCrossAttention(768, 12, dropout)
-        self.text_cross_gates = nn.Parameter(torch.ones(12))
-        self.output_process = nn.Linear(768, 153)
+        self.output_process = nn.Linear(self.latent_dim, self.input_feats)
         self._last_moe_aux_loss = None
         self.num_prefix_tokens = 1 + cfg.MODEL.GLOBAL_TOKEN_COUNT
         if cfg.MODEL.GLOBAL_TOKEN_COUNT:
-            # Store one token as [1,D]; the leading token axis is added when
-            # expanding over a batch. This keeps the DDP gradient contiguous.
-            # Store the single token as a vector so DDP receives a contiguous gradient.
-            self.global_token = nn.Parameter(torch.randn(768) * 0.02)
+            self.global_token = nn.Parameter(torch.randn(self.latent_dim) * 0.02)
         else:
             self.register_parameter("global_token", None)
 
     def get_moe_auxiliary_loss(self):
         return self._last_moe_aux_loss
 
-    def mask_cond(self, cond, cond_type, cond_mask=None):
-        # cond: B x T x ... x D
-        # for inference of recon, fore and gen, masks are already provided.
+    def _condition_mask(self, batch, frames, device, cond_type, cond_mask=None,
+                        explicit_task=False):
+        mask = torch.zeros(batch, frames, device=device, dtype=torch.bool)
         if cond_mask is not None:
-            cond = mask_it(cond_mask, cond, self.mask_tokens[cond_type])
-            return cond
+            supplied = torch.as_tensor(cond_mask, device=device, dtype=torch.bool)
+            if supplied.shape == (batch,):
+                supplied = supplied[:, None].expand(-1, frames)
+            if supplied.shape != mask.shape:
+                raise ValueError(f"{cond_type} mask must be [B,T], got {tuple(supplied.shape)}")
+            mask = mask | supplied
+        # Missing-data masks compose with the original training dropout.
+        # A task helper explicitly disables random dropout for its task masks.
+        explicit = torch.as_tensor(explicit_task, device=device, dtype=torch.bool)
+        if explicit.ndim == 0:
+            explicit = explicit.expand(batch)
+        if explicit.shape != (batch,):
+            raise ValueError("task_conditioning must be a bool or one bool per batch item")
+        if self.training and not bool(explicit.all()):
+            whole = torch.rand(batch, device=device) < self.cond_mask_prob[cond_type]
+            subsequent = torch.rand(batch, device=device) < self.cond_mask_prob["subseq_frames"]
+            whole = whole & ~explicit
+            subsequent = subsequent & ~explicit
+            mask = mask | whole[:, None]
+            if cond_type == "traj":
+                mask = mask | subsequent[:, None]
+            else:
+                mask[:, 1:] = mask[:, 1:] | subsequent[:, None]
+        return mask
 
-        if not self.training:
-            # technically, this should never happen because we always do inference with cond_mask.
-            return cond
-        inp_shape = cond.shape
+    def mask_cond(self, cond, cond_type, cond_mask=None, explicit_task=False):
+        mask = self._condition_mask(cond.shape[0], cond.shape[1], cond.device,
+                                    cond_type, cond_mask, explicit_task)
+        return mask_it(mask, cond, self.mask_tokens[cond_type])
 
-        # During training, mask whole condition randomly based on probability.
-        # To simulate generation, we additionally mask subsequent frames (after first frame) with some probability.
-        # Overall, this will simulate recon and gen tasks with some probability.
+    @staticmethod
+    def _frame_mask(raw, batch, frames, device, name):
+        mask = torch.as_tensor(raw, device=device, dtype=torch.bool)
+        if mask.shape != (batch, frames):
+            raise ValueError(f"{name} must have shape {(batch, frames)}, got {tuple(mask.shape)}")
+        return mask
 
-        mask = torch.rand(cond.shape[0], device=cond.device) < self.cond_mask_prob[cond_type]  # B
-        cond = mask_it(mask, cond, self.mask_tokens[cond_type])
-
-        assert cond_type in ["traj", "clip"]
-
-        # Mask condition of subsequent frames using probability. For trajectory, we also mask the first frame.
-        mask = torch.rand(cond.shape[0], device=cond.device) < self.cond_mask_prob["subseq_frames"]  # B
-        if cond_type == "traj":
-            cond = mask_it(mask, cond, self.mask_tokens[cond_type])
-        else:
-            subsequent_cond = mask_it(mask, cond[:, 1:], self.mask_tokens[cond_type])
-            cond = torch.cat((cond[:, :1], subsequent_cond), axis=1)
-
-        assert cond.shape == inp_shape
-        return cond
-
-    def _prepare_text_condition(self, y, batch_size, dtype, device):
-        if not self.text_condition_enabled or "text_pooled" not in y or "text_tokens" not in y:
-            return None
-        pooled = torch.as_tensor(y["text_pooled"], device=device).to(dtype=dtype)
-        tokens = torch.as_tensor(y["text_tokens"], device=device).to(dtype=dtype)
-        text_mask = torch.as_tensor(
-            y.get("text_mask", torch.ones(tokens.shape[:2], device=device)),
-            device=device,
-            dtype=torch.bool,
-        )
-        text_valid = torch.as_tensor(
-            y.get("text_valid", torch.ones(batch_size, device=device)),
-            device=device,
-            dtype=torch.bool,
-        ).view(-1)
-        if pooled.shape != (batch_size, self.text_feature_dim):
-            raise ValueError(
-                f"text_pooled must have shape ({batch_size}, {self.text_feature_dim}), "
-                f"got {tuple(pooled.shape)}"
-            )
-        if tokens.ndim != 3 or tokens.shape[0] != batch_size or tokens.shape[2] != self.text_feature_dim:
-            raise ValueError(
-                "text_tokens must have shape [B,L,text_feature_dim], "
-                f"got {tuple(tokens.shape)}"
-            )
-        if text_mask.shape != tokens.shape[:2] or text_valid.shape != (batch_size,):
-            raise ValueError(
-                f"text mask/valid shapes are incompatible: mask={tuple(text_mask.shape)}, "
-                f"valid={tuple(text_valid.shape)}, tokens={tuple(tokens.shape)}"
-            )
-        if self.training and self.text_dropout > 0:
-            keep = torch.rand(batch_size, device=device) >= self.text_dropout
-            text_valid = text_valid & keep
-        pooled = pooled * text_valid[:, None].to(dtype=pooled.dtype)
-        tokens = tokens * text_valid[:, None, None].to(dtype=tokens.dtype)
-        text_mask = text_mask & text_valid[:, None]
-        # Guarantee at least one safe key for every row in the attention
-        # adapter, including rows whose sidecar has no annotation.
-        text_mask[:, 0] = text_mask[:, 0] | text_valid
-        return pooled, tokens, text_mask, text_valid
-
-    def forward(self, x, timesteps, y, cond_scale=None, return_hidden=False, return_features=False):
-        """
-        x_t: B x T x F
-        timesteps: B
-        y: dict
-        """
+    def forward(self, x, timesteps, y, cond_scale=None, return_hidden=False,
+                return_features=False):
         if return_hidden and return_features:
             raise ValueError("return_hidden and return_features are mutually exclusive")
         if return_features and self.global_token is None:
-            raise ValueError("Global features require a model with GLOBAL_TOKEN_COUNT=1")
+            raise ValueError("Global features require GLOBAL_TOKEN_COUNT=1")
+        if x.ndim != 3 or x.shape[-1] != self.input_feats:
+            raise ValueError(f"Motion must be [B,T,{self.input_feats}], got {tuple(x.shape)}")
+        batch, frames, _ = x.shape
+        valid_frames = self._frame_mask(y["valid_frames"], batch, frames, x.device,
+                                        "valid_frames")
         if cond_scale is not None:
             if not math.isfinite(cond_scale):
                 raise ValueError("cond_scale must be finite")
-            x_cond = self.forward(x, timesteps, y, return_hidden=return_hidden,
-                                  return_features=return_features)
-            uncond_y = {"valid_frames": y["valid_frames"]}
-            if "feature_valid_mask" in y:
-                uncond_y["feature_valid_mask"] = y["feature_valid_mask"]
-            x_uncond = self.forward(x, timesteps, uncond_y, return_hidden=return_hidden,
-                                    return_features=return_features)
-
-            # Apply classifier-free guidance to predictions and hidden tokens.
+            conditional = self.forward(x, timesteps, y, return_hidden=return_hidden,
+                                       return_features=return_features)
+            # Label validity is not an inference condition and must not leak
+            # future availability into the unconditional branch.
+            unconditional = self.forward(x, timesteps, {"valid_frames": valid_frames},
+                                         return_hidden=return_hidden,
+                                         return_features=return_features)
             if return_hidden or return_features:
-                return tuple(uncond + (cond - uncond) * cond_scale
-                             for cond, uncond in zip(x_cond, x_uncond))
-            return x_uncond + (x_cond - x_uncond) * cond_scale
+                return tuple(u + (c - u) * cond_scale
+                             for c, u in zip(conditional, unconditional))
+            return unconditional + (conditional - unconditional) * cond_scale
 
-        B, T, F = x.shape
-        x = self.input_process(x)  # B x T x D
-        x = self.pos_enc(x)  # B x T x D
-
-        traj_mask = y["traj_mask"] if "traj_mask" in y else None
-        img_mask = y["img_mask"] if "img_mask" in y else None
-
-        enc_time = self.embed_timestep(timesteps)  # B x D
-        text_condition = self._prepare_text_condition(y, B, x.dtype, x.device)
-        text_global = None
-        text_tokens = None
-        text_mask = None
-        text_valid = None
-        router_text = None
-        if text_condition is not None:
-            text_pooled, text_tokens_raw, text_mask, text_valid = text_condition
-            if self.text_global_proj is not None:
-                text_global = self.text_global_proj(text_pooled)
-            if self.text_token_proj is not None:
-                text_tokens = self.text_token_proj(text_tokens_raw)
-            if self.text_router_proj is not None:
-                router_text = self.text_router_proj(text_pooled)
-
+        explicit_task = y.get("task_conditioning", False)
+        x = self.pos_enc(self.input_process(x))
         pose_router_cond = x
-        if "traj" in y:  # B x T x F
-            enc_traj = self.embed_traj_cond(y["traj"])  # B x T x D
-            enc_traj = self.mask_cond(enc_traj, "traj", traj_mask)
-            x = x + enc_traj
+        enc_time = self.embed_timestep(timesteps).to(dtype=x.dtype)
+        if "traj" in y:
+            traj = torch.as_tensor(y["traj"], device=x.device, dtype=x.dtype)
+            if traj.shape != (batch, frames, 18):
+                raise ValueError(f"traj must be [B,T,18], got {tuple(traj.shape)}")
+            raw_valid = y.get("trajectory_valid", y.get("traj_valid"))
+            trajectory_valid = (torch.ones_like(traj, dtype=torch.bool) if raw_valid is None
+                                else torch.as_tensor(raw_valid, device=x.device, dtype=torch.bool))
+            if trajectory_valid.shape != traj.shape:
+                raise ValueError("trajectory_valid must match the [B,T,18] trajectory")
+            traj_mask = self._condition_mask(batch, frames, x.device, "traj",
+                                             y.get("traj_mask"), explicit_task)
+            traj_mask = traj_mask | ~trajectory_valid.any(dim=-1)
+            visible_valid = trajectory_valid & ~traj_mask[:, :, None]
+            clean_traj = torch.where(visible_valid, traj, torch.zeros_like(traj))
+            enc_traj = (self.embed_traj_cond(clean_traj) +
+                        self.embed_traj_valid(visible_valid.to(dtype=x.dtype)))
+            x = x + mask_it(traj_mask, enc_traj, self.mask_tokens["traj"])
         else:
             x = x + self.mask_tokens["traj"]
 
-        all_cond = [enc_time[:, None]]  # B x 1 x D
-        all_cond_mask = [torch.ones(B, 1, dtype=torch.long, device=x.device)]  # B x 1
         if "img_embs" in y:
-            enc_imgs = self.embed_clip_cond(y["img_embs"])
-            enc_imgs = self.mask_cond(enc_imgs, "clip", img_mask)
+            images = torch.as_tensor(y["img_embs"], device=x.device, dtype=x.dtype)
+            if images.shape != (batch, frames, self.image_tokens, 1024):
+                raise ValueError(f"img_embs must be [B,T,5,1024], got {tuple(images.shape)}")
+            image_valid = self._frame_mask(y.get("valid_img_embs", valid_frames),
+                                           batch, frames, x.device, "valid_img_embs")
+            image_valid = image_valid & valid_frames
+            img_mask = self._condition_mask(batch, frames, x.device, "clip",
+                                            y.get("img_mask"), explicit_task)
+            img_mask = img_mask | ~image_valid
+            visible_images = image_valid & ~img_mask
+            images = torch.where(visible_images[:, :, None, None], images, torch.zeros_like(images))
+            enc_imgs = self.embed_clip_cond(images)
+            enc_imgs = mask_it(img_mask, enc_imgs, self.mask_tokens["clip"])
+            # Every token of a frame gets the same temporal position.
             enc_imgs = self.pos_enc(enc_imgs)
-
-            enc_img_mask = y["valid_img_embs"]  # B x C
-
-            # Keep a frame-aligned egovideo condition for the chunk router
-            # before flattening DINO register tokens into the attention context.
-            router_ego_cond = enc_imgs.mean(dim=2) if enc_imgs.ndim == 4 else enc_imgs
-            if router_ego_cond.shape[1] != T:
-                router_ego_cond = router_ego_cond.mean(dim=1, keepdim=True).expand(-1, T, -1)
-
-            all_cond.append(enc_imgs)
-            all_cond_mask.append(enc_img_mask)
-        else:  # if self.cond_img_feat:  # Model was trained with img feats. Use mask tokens here.
-            enc_imgs = self.mask_tokens["clip"].view(1, 1, -1).repeat(B, T, 1)
+            router_ego_valid = image_valid & ~img_mask
+            router_ego_cond = torch.where(router_ego_valid[:, :, None], enc_imgs.mean(dim=2),
+                                          torch.zeros_like(enc_imgs[:, :, 0]))
+        else:
+            # Preserve the register-token rank during CFG and missing image input.
+            enc_imgs = self.mask_tokens["clip"].view(1, 1, 1, -1).expand(
+                batch, frames, self.image_tokens, -1)
             enc_imgs = self.pos_enc(enc_imgs)
-            enc_img_mask = y["valid_frames"]
-            router_ego_cond = enc_imgs
+            image_valid = torch.zeros_like(valid_frames)
+            visible_images = image_valid
+            router_ego_valid = image_valid
+            router_ego_cond = torch.zeros(batch, frames, self.latent_dim,
+                                          device=x.device, dtype=x.dtype)
 
-            all_cond.append(enc_imgs)
-            all_cond_mask.append(enc_img_mask)
-
+        # A time token always provides one valid key, including fully missing video.
+        context = torch.cat((enc_time[:, None], enc_imgs.flatten(1, 2)), dim=1)
+        context_valid = torch.cat((valid_frames.new_ones(batch, 1),
+                                   visible_images.repeat_interleave(self.image_tokens, dim=1)), dim=1)
         prefixes = [enc_time[:, None]]
         if self.global_token is not None:
-            prefixes.append(self.global_token.to(dtype=x.dtype).view(1, 1, -1).expand(B, -1, -1).contiguous())
+            prefixes.append(self.global_token.to(dtype=x.dtype).view(1, 1, -1).expand(
+                batch, -1, -1).contiguous())
         x = torch.cat((*prefixes, x), dim=1)
-        mask = y["valid_frames"]  # B x T where valid are 1
-        mask = torch.cat((mask.new_ones((B, self.num_prefix_tokens)), mask), dim=1)
-        mask = mask[:, None, None, :]
-
-        context_mask = torch.cat(all_cond_mask, dim=1)  # B x C
-        context_mask = context_mask[:, None, None, :]  # B x 1 x 1 x C
-        context = torch.cat(all_cond, dim=1)  # B x C x D
-
-        router_conditions = None
-        if self.motion_expert_enabled:
-            router_conditions = {
-                "pose": pose_router_cond,
-                "ego": router_ego_cond,
-                "timestep": enc_time,
-                "valid_frames": y["valid_frames"].bool(),
-            }
-            if router_text is not None:
-                router_conditions["text"] = router_text
-
-        for layer_index, dec in enumerate(self.tsfm):
-            decoder_kwargs = {
-                "x": x,
-                "context": context,
-                "mask": mask,
-                "context_mask": context_mask,
-                "num_prefix_tokens": self.num_prefix_tokens,
-            }
-            if self.motion_expert_enabled:
-                decoder_kwargs["router_conditions"] = router_conditions
-            x = dec(**decoder_kwargs)
-            if self.text_cross_attention is not None and text_tokens is not None:
-                text_delta = self.text_cross_attention(x, text_tokens, text_mask, text_valid)
-                x = x + self.text_cross_gates[layer_index] * text_delta
-
-        if self.motion_expert_enabled:
-            aux_losses = [
-                block.ff.last_aux_loss
-                for block in self.tsfm
-                if hasattr(block.ff, "last_aux_loss") and block.ff.last_aux_loss is not None
-            ]
-            self._last_moe_aux_loss = torch.stack(aux_losses).mean() if aux_losses else None
-
-        global_hidden = x[:, 1, :].contiguous() if return_features else None
-        hidden = x[:, self.num_prefix_tokens : self.num_prefix_tokens + T].contiguous()
-        x = hidden
-        x = self.output_process(x)
-        x = x.view(B, T, F)
-
+        token_valid = torch.cat((valid_frames.new_ones(batch, self.num_prefix_tokens), valid_frames), dim=1)
+        router_conditions = {"pose": pose_router_cond, "ego": router_ego_cond,
+                             "ego_valid_frames": router_ego_valid, "timestep": enc_time,
+                             "valid_frames": valid_frames}
+        for decoder in self.tsfm:
+            x = decoder(x=x, context=context, mask=token_valid[:, None, None],
+                        context_mask=context_valid[:, None, None],
+                        num_prefix_tokens=self.num_prefix_tokens,
+                        router_conditions=router_conditions)
+        aux_losses = [block.ff.last_aux_loss for block in self.tsfm
+                      if block.ff.last_aux_loss is not None]
+        self._last_moe_aux_loss = torch.stack(aux_losses).mean() if aux_losses else None
+        hidden = x[:, self.num_prefix_tokens:self.num_prefix_tokens + frames].contiguous()
+        prediction = self.output_process(hidden)
         if return_features:
-            return x, hidden, global_hidden
+            return prediction, hidden, x[:, 1].contiguous()
         if return_hidden:
-            return x, hidden
-        return x
+            return prediction, hidden
+        return prediction
 
 
 class PositionalEncoding(nn.Module):
@@ -349,10 +229,15 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pe[None])  # 1 x Tmax x D
 
     def forward(self, x):
-        # x is B x T x D
+        # Time is axis 1 for both [B,T,D] and [B,T,5,D].
+        if x.ndim not in (3, 4) or x.shape[-1] != self.pe.shape[-1]:
+            raise ValueError("Positional encoding requires [B,T,D] or [B,T,5,D]")
         if x.shape[1] > self.pe.shape[1]:
             raise ValueError("Sequence exceeds positional embedding length")
-        x = x + self.pe[:, : x.shape[1], :]
+        encoding = self.pe[:, : x.shape[1], :]
+        if x.ndim == 4:
+            encoding = encoding.unsqueeze(2)
+        x = x + encoding.to(dtype=x.dtype)
         return self.dropout(x)
 
 

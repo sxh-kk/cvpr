@@ -2,7 +2,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 LEGACY_SCHEMA_VERSION = "egomotion-body22-camera-floor-v3"
-SCHEMA_VERSION = "egomotion-body22-camera-floor-dino5-v4"
+V4_SCHEMA_VERSION = "egomotion-body22-camera-floor-dino5-v4"
+SCHEMA_VERSION = "egomotion-dense22-hands21-camera-floor-dino5-v5"
+SUPPORTED_SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, V4_SCHEMA_VERSION, SCHEMA_VERSION)
 DINO_CHECKPOINT = "facebook/dinov2-with-registers-large"
 DINO_TOKEN_NAMES = ["cls", "register_0", "register_1", "register_2", "register_3"]
 DINO_TOKEN_DIM = 1024
@@ -71,7 +73,7 @@ class Episode:
         return self
 
 
-def feature_specs(dino_dim=DINO_FLAT_DIM):
+def _base_feature_specs(dino_dim):
     result = {"timestamp": {"dtype": "float32", "shape": [1], "names": None}}
     for key in ["index", "frame_index", "episode_index", "task_index"]:
         result[key] = {"dtype": "int64", "shape": [1], "names": None}
@@ -110,3 +112,26 @@ def feature_specs(dino_dim=DINO_FLAT_DIM):
         result[f"observation.{suffix}.body_head_floor_position"] = {
             "dtype": "bool", "shape": [22], "names": BODY_NAMES}
     return result
+
+
+def feature_specs_for_schema(version):
+    """Return the exact physical column contract for each supported archive."""
+    if version == LEGACY_SCHEMA_VERSION:
+        return _base_feature_specs(DINO_TOKEN_DIM)
+    if version == V4_SCHEMA_VERSION:
+        return _base_feature_specs(DINO_FLAT_DIM)
+    if version == SCHEMA_VERSION:
+        from .unified_dense22 import unified_specs
+        result = _base_feature_specs(DINO_FLAT_DIM)
+        result.update(unified_specs())
+        return result
+    raise ValueError(f"Unsupported archive schema: {version}")
+
+
+def feature_specs(dino_dim=DINO_FLAT_DIM):
+    """Current v5 features; the historical 1024-width call selects v3."""
+    if dino_dim == DINO_TOKEN_DIM:
+        return feature_specs_for_schema(LEGACY_SCHEMA_VERSION)
+    if dino_dim != DINO_FLAT_DIM:
+        raise ValueError("DINO width must be legacy 1024 or five-token 5120")
+    return feature_specs_for_schema(SCHEMA_VERSION)

@@ -1,0 +1,37 @@
+# SMPL-H FK -> original K12/245D network, with explicit hands21.
+# Actual beta16 stays in source FK/provenance, without a shape prediction head.
+# 5Hz: jointly reconstruct historical 6 frames and predict future 5 frames.
+DATA:
+  ARCHIVE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1
+  SPLIT_MANIFEST: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/meta/splits.json
+  STATS_PATH: exp/smplh_k12_fore_5hz_joint/stats.pt
+  REPRE_TYPE: smplh12_rot6d_hands21_contacts_v1
+  ROTATION_BASIS_MODE: smplh_model_defined
+  TARGET_JOINT_BASIS: smplh_body22_axes_v1
+  MODEL_SHA256: be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947
+  FPS: 5
+  FRAME_PHASE: 0
+  WINDOW: 11
+  FORECAST_PREFIX: 6
+  SEGMENT_STRIDE: 5
+  TRAIN_TASK: fore
+  MOTION_SUPERVISION: joint
+  REQUIRE_FULL_WINDOW: true
+  # Per-sample probability of showing only the historical six trajectory frames.
+  # Future trajectories stay hidden; validation and inference are image-only.
+  TRAJECTORY_CONDITION_PROB: 0.5
+  MIN_VALID_IMAGE_FRACTION: 0.5
+  BATCH_SIZE: 64  # per GPU; 8 GPUs and accumulation 1 => global batch 512
+  NUM_WORKERS: 4
+MODEL:
+  GLOBAL_TOKEN_COUNT: 1
+  INIT_CKPT_PATH: null
+  CKPT_PATH: null
+FLOW:
+  GLOBAL_WEIGHT: 8.0
+TRAIN:
+  EXP_PATH: exp/smplh_k12_fore_5hz_joint
+  NUM_GPUS: 8
+  LR: 1.0e-4
+  NUM_EPOCHS: 300
+  PRECISION: bf16-mixed

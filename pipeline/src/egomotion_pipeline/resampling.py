@@ -82,4 +82,7 @@ def resample(episode, fps=30, max_gap_s=.075, snap_tolerance_s=1e-5):
     # Derive projected heading from the resampled full rotation; interpolating
     # an already projected heading is different when pitch/roll change.
     from .head_reference import derive_ground_features
-    return derive_ground_features(arrays, ground, verified)
+    derive_ground_features(arrays, ground, verified)
+    from .unified_dense22 import encode_unified_dense22
+    arrays.update(encode_unified_dense22(arrays, {"source": episode.source, "metadata": episode.metadata}))
+    return arrays

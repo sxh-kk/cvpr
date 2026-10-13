@@ -8,17 +8,16 @@ import torch
 
 
 def feature_mask_for(error: torch.Tensor, conditioning: Mapping) -> torch.Tensor | None:
-    """Return a broadcastable ``B x ... x F`` mask when feature widths match.
-
-    Trajectory prediction has a different feature width from v4_beta motion;
-    in that case the motion mask is intentionally ignored.
-    """
+    """Return a broadcastable label mask; incompatible widths are errors."""
     raw = conditioning.get("feature_valid_mask")
     if raw is None:
         return None
     mask = torch.as_tensor(raw, device=error.device, dtype=torch.bool)
-    if mask.shape[0] != error.shape[0] or mask.shape[-1] != error.shape[-1]:
-        return None
+    if mask.ndim < 2 or mask.shape[0] != error.shape[0] or mask.shape[-1] != error.shape[-1]:
+        raise ValueError(
+            f"feature_valid_mask must match batch and feature widths of {tuple(error.shape)}, "
+            f"got {tuple(mask.shape)}"
+        )
     if mask.ndim == 2 and error.ndim >= 3:
         mask = mask[:, None, :]
     if mask.ndim > error.ndim:

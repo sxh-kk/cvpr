@@ -7,7 +7,7 @@ from pathlib import Path
 from egomotion_pipeline import migration
 from egomotion_pipeline.cli import convert, main
 from egomotion_pipeline.features import extract_features
-from egomotion_pipeline.schema import LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, feature_specs
+from egomotion_pipeline.schema import LEGACY_SCHEMA_VERSION, V4_SCHEMA_VERSION, feature_specs
 from egomotion_pipeline.storage import Archive, atomic_json, read_arrays, read_json, write_arrays
 from egomotion_pipeline.validation import validate
 from test_archive_and_video import source_config, FakeEncoder
@@ -46,7 +46,7 @@ def test_upgrade_preserves_every_motion_column_and_window(tmp_path):
         extract_features(old, {}, FakeEncoder())
     assert main(['upgrade-dino', '--dataset', str(old.root)]) == 0
     new = Archive(old.root)
-    assert new.schema_version == SCHEMA_VERSION and new.specs['observation.features.dino']['shape'] == [5120]
+    assert new.schema_version == V4_SCHEMA_VERSION and new.specs['observation.features.dino']['shape'] == [5120]
     assert validate(new)['frames'] == 10
     for index, table in enumerate(before):
         after = pq.read_table(new.data_path(index))
@@ -81,6 +81,7 @@ def test_upgrade_preflights_all_episodes_and_rejects_cached_cls(tmp_path):
 
 def test_upgrade_resumes_after_partial_atomic_replacement(tmp_path, monkeypatch):
     archive = legacy_archive(tmp_path)
+    paths = [archive.data_path(0), archive.data_path(1)]
     widen = migration._widen_pending_file
     calls = []
     def fail_second(path):
@@ -93,12 +94,12 @@ def test_upgrade_resumes_after_partial_atomic_replacement(tmp_path, monkeypatch)
         migration.upgrade_dino(archive.root)
     with pytest.raises(ValueError, match='unfinished'):
         Archive(archive.root)
-    assert pq.read_schema(archive.data_path(0)).field(migration.FEATURE).type.list_size == 5120
-    assert pq.read_schema(archive.data_path(1)).field(migration.FEATURE).type.list_size == 1024
+    assert pq.read_schema(paths[0]).field(migration.FEATURE).type.list_size == 5120
+    assert pq.read_schema(paths[1]).field(migration.FEATURE).type.list_size == 1024
     calls.clear()
     monkeypatch.setattr(migration, '_widen_pending_file', lambda path: (calls.append(path), widen(path)))
     result = migration.upgrade_dino(archive.root)
-    assert result['episodes'] == 2 and calls == [archive.data_path(1)]
+    assert result['episodes'] == 2 and calls == [paths[1]]
     assert validate(Archive(archive.root))['frames'] == 10
 
 
@@ -145,7 +146,7 @@ def test_upgrade_runner_propagates_conversion_errors(tmp_path, stage):
     else:
         assert result == 0 and status['stage'] == 'completed'
         assert read_json(job/'validation.json')['frames'] == 10
-        assert Archive(archive.root).schema_version == SCHEMA_VERSION
+        assert Archive(archive.root).schema_version == V4_SCHEMA_VERSION
 
 
 def test_upgrade_runner_waits_without_touching_archive(tmp_path, monkeypatch):
@@ -165,4 +166,4 @@ def test_upgrade_runner_waits_without_touching_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(runner.time, 'sleep', finish_conversion)
     assert runner.main(['--dataset',str(archive.root), '--job-dir',str(tmp_path/'upgrade'),
                         '--wait-for-job',str(conversion)]) == 0
-    assert waits == [15] and Archive(archive.root).schema_version == SCHEMA_VERSION
+    assert waits == [15] and Archive(archive.root).schema_version == V4_SCHEMA_VERSION

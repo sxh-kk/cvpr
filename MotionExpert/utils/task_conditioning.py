@@ -32,23 +32,39 @@ def apply_task_conditioning(
     task: Union[str, torch.Tensor],
     *,
     forecast_prefix: int,
+    trajectory_condition: Union[bool, torch.Tensor] = True,
+    noise_only_history: bool = False,
+    supervise_history: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Return task-specific conditioning without mutating the input mapping.
 
     ``valid_frames`` remains the sequence-attention mask.  ``loss_mask`` keeps
     the original padding information and additionally removes the observed
-    forecasting prefix from the training target.  Generation and forecasting
+    forecasting prefix from the training target unless ``supervise_history``
+    requests joint historical reconstruction and future prediction. Generation and forecasting
     attend over the complete output window, while padded ground-truth frames
-    still contribute no loss.
+    still contribute no loss. ``trajectory_condition=False`` hides all head
+    trajectory values, including the observed prefix, for image-only deployment.
+    ``noise_only_history`` additionally marks forecasting history as Gaussian
+    context rather than a supervised motion state. This generation mask is a
+    task definition and never depends on label validity.
     """
 
     if forecast_prefix <= 0:
         raise ValueError(f"forecast_prefix must be positive, got {forecast_prefix}.")
+    if type(supervise_history) is not bool:
+        raise ValueError("supervise_history must be a bool")
+    if type(noise_only_history) is not bool:
+        raise ValueError("noise_only_history must be a bool")
+    if supervise_history and noise_only_history:
+        raise ValueError("Historical supervision requires generated motion, not fixed noise context")
     if "valid_frames" not in conditioning:
         raise KeyError("Task conditioning requires a valid_frames mask.")
 
     result = dict(conditioning)
-    padding_mask, was_batched = _as_batched_frames(conditioning["valid_frames"])
+    padding_mask, was_batched = _as_batched_frames(
+        conditioning.get("padding_mask", conditioning["valid_frames"])
+    )
     padding_mask = padding_mask.to(dtype=torch.bool)
     batch_size, window = padding_mask.shape
     device = padding_mask.device
@@ -70,9 +86,13 @@ def apply_task_conditioning(
         if bool(torch.any((task_ids < 0) | (task_ids >= len(TASKS)))):
             raise ValueError(f"task IDs must lie in [0, {len(TASKS) - 1}].")
 
+    if bool(torch.any(task_ids == TASK_TO_ID["fore"])) and forecast_prefix >= window:
+        raise ValueError("Forecasting requires forecast_prefix smaller than the output window")
+
     frame_indices = torch.arange(window, device=device).unsqueeze(0)
-    observed_counts = padding_mask.sum(dim=1).clamp(max=min(forecast_prefix, window))
-    observed_prefix = frame_indices < observed_counts.unsqueeze(1)
+    # Observation is a time interval, not a count of valid observations. A
+    # missing image/head frame inside the prefix cannot move the cutoff.
+    observed_prefix = (frame_indices < forecast_prefix).expand(batch_size, -1)
 
     recon_rows = task_ids == TASK_TO_ID["recon"]
     fore_rows = task_ids == TASK_TO_ID["fore"]
@@ -84,12 +104,34 @@ def apply_task_conditioning(
     attention_mask = padding_mask.clone()
     attention_mask[fore_rows | gen_rows] = True
     loss_mask = padding_mask.clone()
-    loss_mask[fore_rows] &= ~observed_prefix[fore_rows]
+    if not supervise_history:
+        loss_mask[fore_rows] &= ~observed_prefix[fore_rows]
 
-    traj_mask = condition_mask
+    traj_mask = condition_mask.clone()
     img_mask = condition_mask.clone()
     if window > 0:
         img_mask[gen_rows, 0] = False
+
+    def original_mask(name):
+        if name not in conditioning:
+            return torch.zeros_like(padding_mask)
+        value, existing_batched = _as_batched_frames(conditioning[name])
+        if value.shape != padding_mask.shape or existing_batched != was_batched:
+            raise ValueError(f"{name} must match the shape of valid_frames")
+        return value.to(device=device, dtype=torch.bool)
+
+    # Preserve missing-data masks and any stricter mask supplied by callers.
+    traj_mask = traj_mask | original_mask("traj_mask") | ~padding_mask
+    img_mask = img_mask | original_mask("img_mask") | ~padding_mask
+
+    if isinstance(trajectory_condition, bool):
+        trajectory_visible = torch.full((batch_size,), trajectory_condition,
+                                        device=device, dtype=torch.bool)
+    else:
+        trajectory_visible = torch.as_tensor(trajectory_condition, device=device)
+        if trajectory_visible.dtype != torch.bool or trajectory_visible.shape != (batch_size,):
+            raise ValueError("trajectory_condition must be a bool or a [B] boolean tensor")
+    traj_mask |= ~trajectory_visible[:, None]
 
     def restore_batch_shape(value: torch.Tensor) -> torch.Tensor:
         return value if was_batched else value[0]
@@ -103,6 +145,15 @@ def apply_task_conditioning(
     result["loss_mask"] = restore_batch_shape(loss_mask.to(dtype=torch.long))
     result["padding_mask"] = restore_batch_shape(padding_mask.to(dtype=torch.long))
     result["task_id"] = task_ids if was_batched else task_ids[0]
+    result["task_conditioning"] = True
+    if noise_only_history:
+        generation_mask = torch.ones_like(padding_mask)
+        generation_mask[fore_rows] = ~observed_prefix[fore_rows]
+        result["motion_generation_mask"] = restore_batch_shape(generation_mask)
+    else:
+        # Reapplying a task must not retain a previous future-only experiment's
+        # fixed-history state when the caller switches to joint generation.
+        result.pop("motion_generation_mask", None)
     return result
 
 

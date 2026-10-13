@@ -1,4 +1,4 @@
-"""Train or resume the text-conditioned E7 K12 400M Motion Expert."""
+"""Train or resume sparse K12 motion with explicit hand supervision."""
 
 import argparse
 import os
@@ -13,10 +13,10 @@ from pytorch_lightning.strategies import DDPStrategy
 
 from .config import load_config, as_dict, validate_architecture
 from .check_data import validate_paths
-from .checkpoints import read_checkpoint, model_state, checkpoint_config, validate_checkpoint_architecture
+from .checkpoints import read_checkpoint, model_state, checkpoint_config, validate_checkpoint_architecture, validate_checkpoint_statistics
 from .dataset.ee4d_motion_dataset import EE4D_Motion_DataModule
 from .ema import EMA
-from .module.uem_module import UEM_Module
+from .module.uem_module import UEM_Module, restore_training_phase
 
 
 class PeriodicModelCheckpoint(ModelCheckpoint):
@@ -24,6 +24,25 @@ class PeriodicModelCheckpoint(ModelCheckpoint):
         # Avoid serializing the 400M model on epochs without a periodic save.
         if self.every_n_epochs and (trainer.current_epoch + 1) % self.every_n_epochs == 0:
             super()._save_last_checkpoint(trainer, monitor_candidates)
+
+
+def configure_initialization(cfg, *, resume=None, init_weights=None, from_scratch=False):
+    """Explicit CLI initialization takes priority over configured checkpoints."""
+    if sum((resume is not None, init_weights is not None, bool(from_scratch))) > 1:
+        raise ValueError("Choose one of resume, init_weights and from_scratch")
+    if from_scratch or init_weights is not None:
+        cfg.MODEL.CKPT_PATH = None
+        cfg.MODEL.INIT_CKPT_PATH = str(Path(init_weights).resolve()) if init_weights is not None else None
+    else:
+        resume = resume or cfg.MODEL.CKPT_PATH
+        cfg.MODEL.CKPT_PATH = str(Path(resume).resolve()) if resume else None
+        if resume:
+            cfg.MODEL.INIT_CKPT_PATH = None
+    # A new run must infer its own origin; resume restores the original below.
+    for name in ("TRAINING_ORIGIN", "EFFECTIVE_SHARED_UNFREEZE_EPOCH"):
+        if hasattr(cfg.MODEL, name):
+            delattr(cfg.MODEL, name)
+    return cfg.MODEL.CKPT_PATH
 
 
 def main():
@@ -36,6 +55,7 @@ def main():
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--global-weight", type=float, help="Global delta loss weight for controlled ablations")
     parser.add_argument("--accumulate-grad-batches", type=int)
     parser.add_argument("--output-dir", type=Path)
     init = parser.add_mutually_exclusive_group()
@@ -68,16 +88,15 @@ def main():
             setattr(section, key, value)
     if args.output_dir:
         cfg.TRAIN.EXP_PATH = str(args.output_dir.resolve())
-    resume = args.resume or cfg.MODEL.CKPT_PATH
-    cfg.MODEL.CKPT_PATH = str(Path(resume).resolve()) if resume else None
-    if resume or args.from_scratch:
-        cfg.MODEL.INIT_CKPT_PATH = None
-    elif args.init_weights:
-        cfg.MODEL.INIT_CKPT_PATH = str(args.init_weights.resolve())
+    if args.global_weight is not None:
+        cfg.FLOW.GLOBAL_WEIGHT = args.global_weight
+    resume = configure_initialization(cfg, resume=args.resume, init_weights=args.init_weights,
+                                      from_scratch=args.from_scratch)
     validate_architecture(cfg)
     if resume:
         checkpoint = read_checkpoint(cfg.MODEL.CKPT_PATH)
         validate_checkpoint_architecture(cfg, checkpoint)
+        restore_training_phase(cfg, checkpoint)
         del checkpoint
     validate_paths(cfg)
     pl.seed_everything(int(getattr(cfg.TRAIN, "SEED", 62)), workers=True)
@@ -86,9 +105,14 @@ def main():
     output = Path(cfg.TRAIN.EXP_PATH)
     output.mkdir(parents=True, exist_ok=True)
     dm = EE4D_Motion_DataModule(cfg)
+    # Validate the archive/splits/statistics and real DINO availability before
+    # allocating the 400M-parameter model or optimizer.
+    dm.setup("fit")
     model = UEM_Module(cfg)
     if cfg.MODEL.INIT_CKPT_PATH:
         checkpoint = read_checkpoint(cfg.MODEL.INIT_CKPT_PATH)
+        validate_checkpoint_architecture(cfg, checkpoint)
+        validate_checkpoint_statistics(cfg, checkpoint, model.normalizer)
         model.model.load_state_dict(model_state(model.model, checkpoint), strict=True)
         del checkpoint
     gpu_count = int(cfg.TRAIN.NUM_GPUS)

@@ -1,4 +1,4 @@
-"""Export strict E7 model weights, using checkpoint EMA weights by default."""
+"""Export motion weights with their representation, model identity and training statistics."""
 
 import argparse
 import json
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from .checkpoints import read_checkpoint, model_state, checkpoint_config
+from .checkpoints import read_checkpoint, model_state, checkpoint_config, validate_checkpoint_statistics
 from .config import architecture_metadata, as_dict
 from .dataset.normalization import MotionNormalizer
 from .model import UniEgoMotion
@@ -27,14 +27,15 @@ def export(checkpoint_path, output_path, *, use_ema=True):
     output.parent.mkdir(parents=True, exist_ok=True)
     stats = checkpoint.get("motionexpert_normalization")
     if stats is not None:
-        stats = dict(stats, normalization_clip=checkpoint.get("motionexpert_normalization_clip", 8.0))
+        stats = dict(stats, normalization_clip=checkpoint.get("motionexpert_normalization_clip", stats.get("normalization_clip", None)))
     elif Path(checkpoint_path).with_suffix(".stats.pt").is_file():
         stats = torch.load(Path(checkpoint_path).with_suffix(".stats.pt"), weights_only=True)
     normalizer = MotionNormalizer(stats)
-    weights_kind = "ema" if use_ema and "ema_state_format" in checkpoint else checkpoint.get("weights", "model")
+    validate_checkpoint_statistics(cfg, checkpoint, normalizer)
+    weights_kind = "ema" if use_ema and checkpoint.get("ema_state_format") == "original_model_with_ema_optimizer_v1" else checkpoint.get("weights", "model")
     architecture = architecture_metadata(cfg)
     torch.save({
-        "format": "motionexpert_weights_v2",
+        "format": "motionexpert_weights_dense_v1",
         "state_dict": state,
         "hyper_parameters": as_dict(cfg),
         "motionexpert_architecture": architecture,

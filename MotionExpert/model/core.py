@@ -135,13 +135,28 @@ class MoEFeedForward(nn.Module):
                     f"got {tuple(feature.shape)}."
                 )
             features.append(feature)
-        condition = torch.cat(features, dim=-1)
-        chunk_condition = self._chunk_mean(condition, frame_mask)
+        # Video pooling uses visible observations independently of generated
+        # future motion, so hidden frames neither leak nor dilute that summary.
+        ego_mask = router_conditions.get("ego_valid_frames", frame_mask)
+        if ego_mask is not None:
+            if ego_mask.shape != expected:
+                raise ValueError("ego_valid_frames must be [B,T] aligned to the router")
+            if frame_mask is not None:
+                ego_mask = ego_mask.bool() & frame_mask.bool()
+        feature_masks = (frame_mask, frame_mask, ego_mask, frame_mask)
+        chunk_condition = torch.cat([
+            self._chunk_mean(feature, feature_mask)
+            for feature, feature_mask in zip(features, feature_masks)
+        ], dim=-1)
         chunk_logits = self.router(chunk_condition)
         frame_logits = chunk_logits.repeat_interleave(self.chunk_size, dim=1)[:, : frame_x.shape[1]]
 
         # Prefixes share sequence-level routing without occupying frame chunks.
-        prefix_logits = self.router(self._masked_mean(condition, frame_mask).unsqueeze(1))
+        prefix_condition = torch.cat([
+            self._masked_mean(feature, feature_mask)
+            for feature, feature_mask in zip(features, feature_masks)
+        ], dim=-1)
+        prefix_logits = self.router(prefix_condition.unsqueeze(1))
         if num_prefix_tokens:
             return torch.cat((prefix_logits.expand(-1, num_prefix_tokens, -1), frame_logits), dim=1)
         return frame_logits
@@ -172,7 +187,10 @@ class MoEFeedForward(nn.Module):
                 continue
             expert_output = expert(flat_x.index_select(0, token_index))
             expert_weight = flat_top_weights[token_index, slot_index].unsqueeze(-1)
-            flat_output.index_add_(0, token_index, expert_output * expert_weight)
+            # AMP can keep router weights in float32 with BF16 activations.
+            # Cast at accumulation without detaching the routing gradients.
+            weighted_output = (expert_output * expert_weight).to(dtype=flat_output.dtype)
+            flat_output.index_add_(0, token_index, weighted_output)
 
         # Switch-style load-balancing loss.  The loss is exposed to the outer
         # UEM module and added there, so it is not mixed into the motion output.

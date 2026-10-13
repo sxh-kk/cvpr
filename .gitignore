@@ -18,6 +18,7 @@ __pycache__/
 .ruff_cache/
 .cache/
 .direnv/
+/.codex/
 build/
 dist/
 logs/
@@ -32,6 +33,20 @@ wandb/
 
 # Training datasets and model checkpoints
 datasets/
+!/datasets/
+/datasets/*
+!/datasets/download_egoexo4d_hm.py
+!/datasets/requirements-download.txt
+!/datasets/test_download_egoexo4d_hm.py
+!/datasets/monitor_egoexo4d_hm.py
+!/datasets/test_monitor_egoexo4d_hm.py
+!/datasets/egoexo4d_routes.py
+!/datasets/test_egoexo4d_routes.py
+!/datasets/download_egosuite.py
+!/datasets/monitor_egosuite.py
+!/datasets/requirements-egosuite.txt
+!/datasets/test_download_egosuite.py
+!/datasets/test_monitor_egosuite.py
 /data/
 weights/
 checkpoints/

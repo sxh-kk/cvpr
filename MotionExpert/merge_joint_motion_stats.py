@@ -12,27 +12,22 @@ from .compute_joint_motion_stats import (
     STATS_SCHEMA_VERSION,
     _finalize_accumulators,
     _validate_accumulator,
+    shard_partition,
 )
+from .dataset.normalization import validate_statistics_profile, statistics_motion_supervision
+from .dataset.motion_layout import motion_layout, SMPLH_REPRE_TYPE
 
 
-def _load(path: Path, *, allow_legacy=False) -> dict:
-    value = torch.load(path, weights_only=False)
+def _load(path: Path) -> dict:
+    value = torch.load(path, weights_only=True)
     if not isinstance(value, dict) or value.get("kind") != "joint_masked_partial":
-        raise ValueError(f"not a joint-masked partial stats file: {path}")
-    if int(value.get("stats_schema_version", -1)) != STATS_SCHEMA_VERSION and not allow_legacy:
-        raise ValueError(
-            f"stats schema mismatch in {path}: expected {STATS_SCHEMA_VERSION}, "
-            f"got {value.get('stats_schema_version')}"
-        )
-    if int(value.get("stats_schema_version", -1)) != STATS_SCHEMA_VERSION:
-        # Legacy shards predate finite-value accounting.  They are accepted
-        # only through the explicit recovery flag, never by the normal
-        # pipeline, and are treated as having observed zero non-finite values.
-        for key in ("motion_acc", "traj_acc"):
-            value[key].setdefault("nonfinite_count", torch.zeros_like(value[key]["count"]))
-        value.setdefault("sequence_qc", {})
-        value["stats_schema_version"] = STATS_SCHEMA_VERSION
-    for key in ("motion_acc", "traj_acc"):
+        raise ValueError(f"not a dense train partial stats file: {path}")
+    if type(value.get("stats_schema_version")) is not int or value["stats_schema_version"] not in (3, STATS_SCHEMA_VERSION):
+        raise ValueError(f"Dense stats schema mismatch in {path}; legacy153/SMPL shards cannot be reused")
+    validate_statistics_profile(value)
+    for key,dim in (("motion_acc",motion_layout(value["representation"]).motion_dim),("traj_acc",18)):
+        if any(tuple(tensor.shape)!=(dim,) for tensor in value[key].values()):
+            raise ValueError(f"Invalid {key} feature shape in {path}")
         _validate_accumulator(value[key], context=str(path))
     return value
 
@@ -66,39 +61,46 @@ def _merge_sequence_qc(target: dict, source: dict) -> None:
         current["discard_terrain"] = bool(current["discard_terrain"] or value["discard_terrain"])
 
 
+def _validate_partition(shard, *, expected_index, num_shards, path):
+    """Validate new coverage metadata while accepting legacy round-robin sets."""
+    if type(shard.get("shard_index")) is not int or shard["shard_index"] != expected_index:
+        raise ValueError(f"shard index mismatch in {path}: expected {expected_index}")
+    if type(shard.get("num_shards")) is not int or shard["num_shards"] != num_shards:
+        raise ValueError(f"shard count mismatch in {path}")
+    count = shard.get("num_windows")
+    if type(count) is not int or count < 0:
+        raise ValueError(f"Invalid num_windows in {path}")
+    fields = ("window_index_start", "window_index_stop", "total_index_windows")
+    if "shard_mode" not in shard and not any(key in shard for key in fields):
+        if shard.get("representation") == SMPLH_REPRE_TYPE:
+            raise ValueError(f"SMPL-H statistics require explicit complete partition coverage in {path}")
+        return {"shard_mode": "round_robin", "total_index_windows": None, "legacy": True}
+    if any(type(shard.get(key)) is not int for key in fields):
+        raise ValueError(f"Incomplete statistics partition metadata in {path}")
+    mode, total = shard.get("shard_mode"), shard["total_index_windows"]
+    indices, expected = shard_partition(total, num_shards, expected_index, mode)
+    if any(shard.get(key) != value for key, value in expected.items()):
+        raise ValueError(f"Statistics shard interval does not match its index in {path}")
+    if count != len(indices):
+        raise ValueError(f"Statistics shard num_windows does not match its interval in {path}")
+    return {"shard_mode": mode, "total_index_windows": total, "legacy": False}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--split", choices=("train", "val"), required=True)
+    parser.add_argument("--split", choices=("train",), default="train")
     parser.add_argument("--num-shards", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stem", default=None, help="stats shard stem without .shard-XXX-of-YYY.pt")
-    parser.add_argument(
-        "--allow-legacy-shards",
-        action="store_true",
-        help="explicit recovery mode for pre-schema-2 finite shards",
-    )
-    parser.add_argument(
-        "--exclude-shard-index",
-        type=int,
-        action="append",
-        default=[],
-        help="omit a known-bad shard during explicit recovery",
-    )
     args = parser.parse_args()
     if args.num_shards <= 0:
         raise ValueError("num-shards must be positive")
 
-    stem = args.stem or f"v4_beta_joint_masked_{args.split}_stats"
-    excluded = set(args.exclude_shard_index)
-    if excluded and not args.allow_legacy_shards:
-        raise ValueError("--exclude-shard-index requires --allow-legacy-shards recovery mode")
-    if any(index < 0 or index >= args.num_shards for index in excluded):
-        raise ValueError(f"invalid excluded shard index: {sorted(excluded)}")
+    stem = args.stem or f"dense245_joint_masked_{args.split}_stats"
     paths = [
         args.input_dir / f"{stem}.shard-{index:03d}-of-{args.num_shards:03d}.pt"
         for index in range(args.num_shards)
-        if index not in excluded
     ]
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
@@ -108,17 +110,34 @@ def main() -> None:
     source_frames: defaultdict[str, int] = defaultdict(int)
     num_windows = 0
     layout = None
+    provenance = None
+    partition_provenance = None
+    previous_stop = 0
+    metadata_keys = ("format", "representation", "split", "fps", "window", "forecast_prefix", "segment_stride",
+                     "split_fingerprint", "archive_fingerprint", "archive_root", "target_joint_basis", "rotation_basis_mode",
+                     "basis_mapping_fingerprint", "contact_speed_m_s", "contact_height_m", "normalization_clip",
+                     "stats_schema_version", "sampling_step", "train_task", "label_task", "complete_windows_only",
+                     "ground_estimation_scope", "image_validity_scope", "min_valid_image_fraction", "statistics_scope",
+                     "motion_supervision", "model_sha256", "archive_schema_version", "diagnostic", "joint_indices")
     sequence_qc = {}
     for path in paths:
-        shard = _load(path, allow_legacy=args.allow_legacy_shards)
+        shard = _load(path)
+        current_metadata = {key:shard.get(key) for key in metadata_keys}
+        current_metadata["motion_supervision"] = statistics_motion_supervision(shard)
+        if current_metadata["split"] != "train": raise ValueError("Only train normalization shards may be merged")
+        if provenance is None: provenance = current_metadata
+        elif provenance != current_metadata: raise ValueError(f"Statistics provenance differs across shards: {path}")
         expected_index = int(path.name.split(".shard-")[1].split("-")[0])
-        if int(shard.get("shard_index", -1)) != expected_index:
-            raise ValueError(
-                f"shard index mismatch in {path}: expected {expected_index}, "
-                f"got {shard.get('shard_index')}"
-            )
-        if int(shard.get("num_shards", -1)) != args.num_shards:
-            raise ValueError(f"shard count mismatch in {path}")
+        partition = _validate_partition(shard, expected_index=expected_index,
+                                        num_shards=args.num_shards, path=path)
+        if partition_provenance is None:
+            partition_provenance = partition
+        elif partition != partition_provenance:
+            raise ValueError(f"Statistics shard partition mode/total differs across shards: {path}")
+        if partition["shard_mode"] == "contiguous":
+            if shard["window_index_start"] != previous_stop:
+                raise ValueError(f"Statistics intervals have gaps or overlap: {path}")
+            previous_stop = shard["window_index_stop"]
         if layout is None:
             layout = shard.get("feature_layout")
         elif layout != shard.get("feature_layout"):
@@ -129,17 +148,32 @@ def main() -> None:
             source_frames[source] += int(count)
         _merge_sequence_qc(sequence_qc, shard.get("sequence_qc", {}))
 
+    total = partition_provenance["total_index_windows"]
+    if total is not None and num_windows != total:
+        raise ValueError("Statistics shards do not cover all indexed training windows")
+    if partition_provenance["shard_mode"] == "contiguous" and previous_stop != total:
+        raise ValueError("Statistics contiguous coverage does not reach the final indexed window")
+
+    archive_root = Path(provenance["archive_root"]).resolve()
+    output = args.output.resolve()
+    if output == archive_root or archive_root in output.parents:
+        raise ValueError("Statistics must be stored outside the immutable archive")
     raw = {
+        **provenance,
         **merged_acc,
         "num_windows": num_windows,
         "source_valid_frames": dict(source_frames),
-        "feature_layout": layout or "v4_beta",
+        "feature_layout": layout or "dense12_rot6d_hands21_contacts_v1",
         "sequence_qc": sequence_qc,
-        "stats_schema_version": STATS_SCHEMA_VERSION,
+        "stats_schema_version": provenance["stats_schema_version"],
     }
     stats = _finalize_accumulators(raw)
     stats["num_shards"] = args.num_shards
-    stats["excluded_shards"] = sorted(excluded)
+    stats["shard_mode"] = partition_provenance["shard_mode"]
+    if total is not None:
+        stats["window_index_start"] = 0
+        stats["window_index_stop"] = total
+        stats["total_index_windows"] = total
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(args.output.name + ".tmp")
     torch.save(stats, temporary)

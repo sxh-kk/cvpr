@@ -20,7 +20,10 @@ MotionExpert、共享图像处理和 DINO 特征提取代码。VLMExpert 保留�
 MotionExpert 的当前帧与 Ψ₀ 当前帧相同，MotionExpert 额外读取前5帧历史。
 两路共享几何和增强结果，各自使用编码器归一化。
 
-全量30Hz DINO提取已启动；完成后再从头训练MotionExpert，MotionExpert训练尚未启动。
+全量30Hz DINO提取完成后，可用 `python -m MotionExpert.watch_dino --background`
+自动启动八卡从头训练；完成计数、mask约定、提取进程退出和缓存锁释放均满足才交接。
+守护固定配置快照，记录状态／日志，拒绝重复启动及覆写已有训练目录；
+完整命令与监控方式见 [MotionExpert README](MotionExpert/README.md#dino完成后自动启动八卡训练)。
 训练保留8卡、每卡batch256、每卡24workers、LR1e-4、BF16、200轮、每20轮保存。
 
 环境迁移见 [MIGRATION.md](docs/MIGRATION.md)。数据、预训练权重、训练 checkpoint 和运行环境不随 Git 仓库分发。

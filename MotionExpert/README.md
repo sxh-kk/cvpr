@@ -98,10 +98,48 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 Lightning按配置启动8卡DDP，无需另套torchrun。输出为
 `/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_from_scratch`。
 不使用旧MotionExpert checkpoint；保留的DINO预训练权重仍用于特征提取。
-全量DINO已使用BF16、每进程batch128、每卡2进程启动；MotionExpert训练尚未启动。
+全量DINO使用BF16、每进程batch128、每卡2进程；可使用下面的守护入口自动转入正式训练。
 这些是DINO提取参数，MotionExpert每卡训练batch仍为256。DINO命令见 [pipeline README](../pipeline/README.md)。
 续训默认沿用checkpoint学习率；如设置 `TRAIN.USE_CKPT_LR: false`，新学习率会在当前调度阶段生效，
 并同步更新scheduler基准，保留已完成的epoch与step。
+
+### DINO完成后自动启动八卡训练
+
+从仓库根目录启动一次守护进程；`--background` 返回后关闭终端不影响守护：
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python \
+  -m MotionExpert.watch_dino \
+  --config MotionExpert/configs/smplh_k12_psi0_pretrain.yaml \
+  --gpus 0 1 2 3 4 5 6 7 \
+  --background
+```
+
+默认每60秒读取DINO manifest；仅在 `complete/all`、全episode／帧数完成、源mask保持一致、
+提取PID身份已退出且提取锁释放后，检查视觉profile、数据路径、全量统计及8张可见GPU。
+随后使用保存到外部job目录的完整配置快照执行 `MotionExpert.train --from-scratch`，
+训练入口继续检查逐episode receipt、split和统计兼容性，然后创建模型。
+配置中的batch、workers、学习率、精度、200轮和保存间隔保持原样，不另套torchrun。
+
+状态指针：`/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_dino_to_motion.json`。
+其中 `watcher.pid` 为守护PID，`pid` 在训练启动后为训练主PID；
+`daemon_log` 记录等待／交接，`log` 是训练日志，`output` 是checkpoint目录。
+完整状态、日志和快照保存在 `.pipeline/jobs/dino-to-motion-<时间>/`，
+`training/current_run.json` 同步记录本次流程状态。
+
+```bash
+cat /gaozt-test1/datasets/MixEgoMotion/.pipeline/current_dino_to_motion.json
+JOB_DIR=$(python -c 'import json; print(json.load(open("/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_dino_to_motion.json"))["job_dir"])')
+tail -F "$JOB_DIR/daemon.log" "$JOB_DIR/training.log"
+```
+
+训练日志在交接时创建，`tail -F` 会持续等待该文件。
+DINO失败、提前退出、缓存不完整或启动检查失败时，守护报告错误并退出，不启动训练。
+全局锁和输出目录的持久启动标记防止重复启动；已有非空训练目录会拒绝被覆盖。
+训练失败不会自动重试或恢复。`SIGTERM`／`SIGINT` 只停止守护：等待时不影响DINO；
+交接后已启动的训练保持运行，并继续持有运行锁和缓存读锁。
+停止后再次等待可使用新的job目录；已启动过的训练需按实际checkpoint选择续训，不能重复从头覆盖。
 
 ## 一步hidden与在线共享图像
 

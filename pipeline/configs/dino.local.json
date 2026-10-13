@@ -1,0 +1,7 @@
+{
+  "checkpoint": "/gaozt-test1/datasets/MixEgoMotion/weights/dinov2-with-registers-large/e4c89a4e05589de9b3e188688a303d0f3c04d0f3",
+  "revision": "local",
+  "device": "cuda",
+  "batch_size": 32,
+  "max_video_error_s": 0.0176666667
+}

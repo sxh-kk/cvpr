@@ -1,0 +1,44 @@
+{
+  "fps": 30,
+  "max_gap_s": 0.075,
+  "snap_tolerance_s": 0.00001,
+  "sources": [
+    {
+      "type": "egoexo4d_hm",
+      "name": "egoexo4d_hm",
+      "root": "/data/egoexo4d_hm_npz",
+      "model_path": "/data/body_models/smplh/male/model.npz",
+      "pad_shape_coefficients": true,
+      "trajectory_root": "/data/aria_aligned",
+      "egoexo_root": "/data/egoexo4d",
+      "require_camera": true,
+      "world_from_source": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+      "position_scale": 1.0,
+      "coordinate_verified": false,
+      "rotation_basis_verified": false,
+      "body_basis_correction": null,
+      "ground": {"mode": "estimate", "static_speed_m_s": 0.15, "cluster_eps_m": 0.005, "cluster_min_samples": 3, "toe_offset_m": 0.01},
+      "head_reference": {"mode": "ee4d"},
+      "revision": "SET_TO_DOWNLOADED_HM_REVISION",
+      "max_pose_error_s": 0.02,
+      "video_preprocessing": {"mode": "raw", "rotate_ccw_quarters": 0}
+    },
+    {
+      "type": "egosuite_mcap",
+      "name": "egosuite",
+      "root": "/gaozt-test1/datasets/EgoSuite/EgoStandard-body/mcap",
+      "camera": "head_left",
+      "require_camera": true,
+      "max_pose_error_s": 0.002,
+      "world_from_source": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+      "position_scale": 1.0,
+      "coordinate_verified": true,
+      "rotation_basis_verified": false,
+      "body_basis_correction": null,
+      "ground": {"mode": "estimate", "static_speed_m_s": 0.15, "cluster_eps_m": 0.005, "cluster_min_samples": 3, "toe_offset_m": 0.01},
+      "head_reference": {"mode": "ee4d"},
+      "revision": "SET_TO_DOWNLOADED_EGOSUITE_BATCH",
+      "video_preprocessing": {"mode": "preundistorted", "rotate_ccw_quarters": 0}
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+torch>=2.4
+numpy
+einops
+loguru
+PyYAML
+pytorch-lightning>=2.4,<2.6
+transformers==4.53.2
+huggingface-hub>=0.30.0,<1.0
+tensorboard
+tqdm

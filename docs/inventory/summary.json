@@ -1,0 +1,61 @@
+{
+  "projects": {
+    "MotionExpert": {
+      "source_files": 1938,
+      "source_bytes": 1653969857,
+      "uploaded_files": 51,
+      "uploaded_bytes": 364647,
+      "excluded_files": 1887,
+      "excluded_bytes": 1653605445,
+      "uploaded_source_bytes": 364412
+    },
+    "VLMExpert": {
+      "source_files": 45722,
+      "source_bytes": 8868761450,
+      "excluded_files": 39796,
+      "excluded_bytes": 6418440270,
+      "uploaded_files": 5926,
+      "uploaded_bytes": 2450321572,
+      "uploaded_source_bytes": 2450321180
+    }
+  },
+  "excluded_reasons": {
+    "environment_cache_build_or_run": 41543,
+    "checkpoint_or_model_weight": 13,
+    "private_environment": 3,
+    "git_checkout_metadata": 19,
+    "checkpoint_or_tensor_artifact": 105
+  },
+  "findings": [],
+  "publication_changes": [
+    {
+      "path": "VLMExpert/src/psi/utils/utils.py",
+      "line": 209,
+      "change": "removed_commented_huggingface_token"
+    },
+    {
+      "path": "MotionExpert/README.md",
+      "change": "publication_documentation_notice"
+    },
+    {
+      "path": "VLMExpert/README.md",
+      "change": "publication_documentation_notice"
+    }
+  ],
+  "lfs_files": 368,
+  "lfs_bytes": 2056986372,
+  "verification": {
+    "date": "2026-10-06",
+    "motionexpert": {
+      "passed": 18,
+      "failed": 0,
+      "runtime": "Python 3.10, Transformers 4.53.2"
+    },
+    "vlmexpert": {
+      "passed": 26,
+      "failed": 0,
+      "runtime": "Python 3.10, PyTorch 2.7.0, Transformers 4.57.0"
+    },
+    "scope": "CPU project regression tests using temporary data and small models; no full training or deployment"
+  }
+}

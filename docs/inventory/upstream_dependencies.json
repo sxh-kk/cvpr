@@ -1,0 +1,52 @@
+[
+  {
+    "directory": "VLMExpert/third_party/SIMPLE",
+    "url": "https://github.com/physical-superintelligence-lab/SIMPLE.git",
+    "branch": "main"
+  },
+  {
+    "directory": "VLMExpert/third_party/GR00T-WholeBodyControl",
+    "url": "https://github.com/physical-superintelligence-lab/GR00T-WholeBodyControl.git",
+    "branch": "main"
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/curobo",
+    "url": "https://github.com/songlin/curobo.git",
+    "branch": "bodex-support"
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/gsnet",
+    "url": "https://github.com/graspnet/graspnet-baseline.git",
+    "branch": ""
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/AMO",
+    "url": "https://github.com/songlin/amo.git",
+    "branch": "main"
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/openpi-client",
+    "url": "https://github.com/songlin/openpi-client.git",
+    "branch": ""
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/gear_sonic",
+    "url": "https://github.com/songlin/gear_sonic.git",
+    "branch": ""
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/unitree_sdk2_python",
+    "url": "https://github.com/songlin/unitree_sdk2_python.git",
+    "branch": ""
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64",
+    "url": "https://github.com/songlin/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64.git",
+    "branch": ""
+  },
+  {
+    "directory": "VLMExpert/third_party/SIMPLE/third_party/decoupled_wbc",
+    "url": "https://github.com/songlin/decoupled_wbc.git",
+    "branch": ""
+  }
+]

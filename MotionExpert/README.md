@@ -59,7 +59,15 @@ DINO保持 `dinov2-with-registers-large` 的 `[5,1024]`（CLS＋4 register）。
 
 ## 使用
 
-默认 SMPL-H 训练配置为8卡、每卡 batch64、梯度累积1，有效全局 batch512；峰值学习率 `1e-4`。其余参数保持：300 epoch、20 epoch warmup、EMA `0.992028`、每卡4个数据加载 worker、`FUSED_ADAMW=False`，采样仍为5Hz、历史6帧＋未来5帧。
+默认 SMPL-H 训练配置为8卡、每卡 batch256、梯度累积1，有效全局 batch2048；训练200 epoch，学习率调度总周期也为200 epoch，峰值学习率 `1e-4`。前20 epoch线性warmup，随后余弦衰减，在第200 epoch达到最低学习率 `1e-5`（`MIN_LR_RATIO=0.1`）。每20 epoch保存checkpoint，每5 epoch验证，训练结束额外保存 `final.ckpt`。其余参数保持：EMA `0.992028`、每卡24个数据加载 worker（8卡共192个）、BF16及原有注意力实现，采样仍为5Hz、历史6帧＋未来5帧。正式训练使用普通AdamW和原有逐指标日志同步，`FUSED_ADAMW=False`、`BATCHED_METRIC_SYNC=False`。
+
+保存间隔与学习率曲线在训练启动时确定；修改YAML后需要启动或恢复训练才会生效，正在运行的进程不会自动重新读取该配置。本次运行将在第20 epoch完整保存后，以200 epoch调度周期及20 epoch保存间隔恢复；两条学习率曲线在该位置均为 `1e-4`，优化器、EMA与调度计数继续保留。
+
+两项可选优化保留在代码中：启用 `BATCHED_METRIC_SYNC` 时，训练step指标在原有每10个优化器步的日志周期内合并为一次跨卡归约，保留 `train/*_step` 标签；epoch指标累计全部batch（包括尾部batch），按样本数加权后统一归约，保留 `train/*_epoch` 标签。验证日志仍沿用原路径。同时使用BF16与fused优化器时，无GradScaler的专用precision插件使Lightning 2.5仍执行原有1.0范数梯度裁剪；当前正式配置使用原precision路径。
+
+八卡实数据对照每组预热32步、测量64步，并重复原配置基线：原配置678.9／690.4窗口/秒，仅fused为689.1，仅日志优化为690.9，两项合用为689.2。组合的训练调用平均耗时比两次基线均值减少约18%，测量区间每卡Python层all-reduce由1216次降到6次（不包含C++层DDP梯度通信）；整体吞吐差异仍在基线运行波动内，本轮未确认明显的端到端提速。按当前200 epoch估算纯训练约3.4天，不包括验证、checkpoint写入与启动开销，也不代表已验证长期收敛。
+
+测速报告位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-speed-optimizations-20261012T163539Z/summary.json`。各组loss、参数、最终梯度、Adam状态和EMA均通过有限值检查；42项相关测试及20个子测试通过。每卡32 workers的实测吞吐更低；每卡batch512出现非有限数值，暂不采用。正式训练状态与日志、输出目录见 `/gaozt-test1/datasets/MixEgoMotion/training/current_run.json`；统计直接复用已验收的全量train统计。
 
 ```bash
 python -m pip install -e ./MotionExpert

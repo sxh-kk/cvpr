@@ -150,6 +150,55 @@ class UEM_Module(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self._set_motion_expert_train_phase(int(self.current_epoch))
+        self._train_metric_names = None
+        self._train_metric_totals = None
+
+    @staticmethod
+    def _reduce_training_metrics(packed):
+        """Reduce detached metric sums and their sample count in one collective."""
+        result = packed.clone()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(result, op=torch.distributed.ReduceOp.SUM)
+        return result[:-1] / result[-1].clamp_min(1)
+
+    def _log_training_metrics(self, metrics, batch_size):
+        names = tuple(metrics)
+        values = torch.stack([value.detach().float().mean() for value in metrics.values()]).double()
+        packed = torch.cat((values * batch_size, values.new_tensor([batch_size])))
+        if getattr(self, "_train_metric_totals", None) is None:
+            self._train_metric_names = names
+            self._train_metric_totals = packed.clone()
+        else:
+            if names != self._train_metric_names:
+                raise ValueError("Training metric names changed within an epoch")
+            self._train_metric_totals.add_(packed)
+        # Match Lightning's optimizer-step logging cadence, also across epochs
+        # and resumed runs. All epoch batches are retained above, including the
+        # tail after the last logged step. With accumulation, log the last
+        # microbatch only, as the original step metrics did.
+        trainer = getattr(self, "_trainer", None)
+        if trainer is None:
+            return
+        interval = max(1, int(self.cfg.TRAIN.LOG_EVERY_N_STEPS))
+        if (int(trainer.global_step) + 1) % interval:
+            return
+        if trainer.fit_loop._should_accumulate():
+            return
+        reduced = self._reduce_training_metrics(packed)
+        for name, value in zip(names, reduced):
+            self.log(f"train/{name}_step", value.float(), on_step=True,
+                     on_epoch=False, sync_dist=False, batch_size=batch_size)
+
+    def on_train_epoch_end(self):
+        totals = getattr(self, "_train_metric_totals", None)
+        if totals is None:
+            return
+        reduced = self._reduce_training_metrics(totals)
+        for name, value in zip(self._train_metric_names, reduced):
+            self.log(f"train/{name}_epoch", value.float(), on_step=False,
+                     on_epoch=True, sync_dist=False, batch_size=1)
+        self._train_metric_names = None
+        self._train_metric_totals = None
 
     def configure_optimizers(self):
         fused = getattr(self.cfg.TRAIN, "FUSED_ADAMW", False) and torch.cuda.is_available()
@@ -297,9 +346,12 @@ class UEM_Module(pl.LightningModule):
         for name, value in losses.items():
             if name.endswith("_mse") or name.endswith("_valid_count"):
                 metrics[name] = value.float()
-        for name, value in metrics.items():
-            self.log(f"{mode}/{name}", value.mean(), on_step=mode == "train",
-                     on_epoch=True, sync_dist=True, batch_size=x.shape[0])
+        if mode == "train" and getattr(self.cfg.TRAIN, "BATCHED_METRIC_SYNC", False):
+            self._log_training_metrics(metrics, x.shape[0])
+        else:
+            for name, value in metrics.items():
+                self.log(f"{mode}/{name}", value.mean(), on_step=mode == "train",
+                         on_epoch=True, sync_dist=True, batch_size=x.shape[0])
         if mode == "val":
             sources = batch["misc"].get("source", ["egosuite"] * x.shape[0])
             if isinstance(sources, str):

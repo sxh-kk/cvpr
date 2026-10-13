@@ -65,7 +65,7 @@ def motion_expert_config(*, global_token=True):
     )
     train = _ns(
         EXP_PATH=str(ROOT / "exp/dense_k12_fore_5hz_joint"), LR=1e-4, SEED=62,
-        USE_CKPT_LR=True, FUSED_ADAMW=False, WEIGHT_DECAY=0.01,
+        USE_CKPT_LR=True, FUSED_ADAMW=False, BATCHED_METRIC_SYNC=False, WEIGHT_DECAY=0.01,
         NUM_EPOCHS=300, NUM_GPUS=1, PRECISION="bf16-mixed",
         ACCUMULATE_GRAD_BATCHES=1, GRADIENT_CLIP_VAL=1.0, EMA_DECAY=0.992028,
         SCHEDULER="cosine_warmup", SCHEDULER_TOTAL_EPOCHS=300,

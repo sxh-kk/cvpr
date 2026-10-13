@@ -17,6 +17,7 @@ from .checkpoints import read_checkpoint, model_state, checkpoint_config, valida
 from .dataset.ee4d_motion_dataset import EE4D_Motion_DataModule
 from .ema import EMA
 from .module.uem_module import UEM_Module, restore_training_phase
+from .precision import trainer_precision_options
 
 
 class PeriodicModelCheckpoint(ModelCheckpoint):
@@ -132,7 +133,7 @@ def main():
         default_root_dir=str(output),
         logger=TensorBoardLogger(str(output), name="", version="", default_hp_metric=False),
         accelerator="gpu" if use_gpu else "cpu", devices=devices, strategy=strategy,
-        precision=cfg.TRAIN.PRECISION if use_gpu else "32-true",
+        **trainer_precision_options(cfg, use_gpu=use_gpu),
         max_epochs=int(cfg.TRAIN.NUM_EPOCHS), max_steps=int(cfg.TRAIN.MAX_STEPS),
         accumulate_grad_batches=int(cfg.TRAIN.ACCUMULATE_GRAD_BATCHES),
         gradient_clip_val=float(cfg.TRAIN.GRADIENT_CLIP_VAL),

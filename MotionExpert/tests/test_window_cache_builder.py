@@ -170,4 +170,3 @@ def test_worker_control_rejects_unreadable_json(tmp_path):
     control.write_text('{"active_workers":')
     with pytest.raises(ValueError, match="Cannot read"):
         builder._active_workers(control, 8)
-

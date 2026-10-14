@@ -204,6 +204,9 @@ WORKER_CONTROL=/gaozt-test1/datasets/MixEgoMotion/.pipeline/window-cache-workers
 降低并行度时，已有任务自然完成后再收缩。控制值必须为1至 `--workers` 的整数；
 不提供控制文件时，保持原有有界任务队列。多worker的实际收益受共享存储限制，
 应比较未复用episode的稳定窗口吞吐，而不是把已完成shard的跳过速度当作生成速度。
+本次生产任务已按8-worker配置恢复，实际控制文件路径记录在 `.pipeline/current_window_cache_job.json`
+的 `worker_control` 中。初始化和重新规划期间，旧 `progress.json` 会保留最后完成计数；
+进入恢复检查后该计数可能暂时从本次已处理任务开始累计，已提交的episode文件仍完整保留。
 全量生成及三个split打包结束后才发布 `manifest.json` 的 `complete/all`。
 `--diagnostic-episodes` 只生成诊断子集，不能用于正式训练或自动切换。
 验收支持 `--wait --builder-pid PID`，可与构建并行等待；构建提前退出会报告失败。

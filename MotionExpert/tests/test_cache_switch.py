@@ -1,4 +1,4 @@
-"""Stop at a fixed natural save, then resume after cache acceptance; CPU only."""
+"""Accept the cache before a fresh natural save handoff; harmless CPU processes."""
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -63,7 +63,7 @@ def setup(tmp_path):
             "cache_root": str(cache), "acceptance": str(cache / "acceptance.json"),
             "source_config": str(source), "source_config_sha256": switch.file_hash(source),
             "resume_config": str(snapshot), "resume_config_sha256": switch.file_hash(snapshot),
-            "job_dir": str(job), "created_at": switch.now(), "completed_epochs": 40}
+            "job_dir": str(job), "created_at": switch.now()}
     switch.atomic_json(cache / "manifest.json", {"contract": switch.CACHE_CONTRACT, "state": "complete",
         "scope": "all", "diagnostic": False, "splits": ["train", "val", "test"]})
     switch.atomic_json(plan["acceptance"], {"format": switch.ACCEPTANCE_FORMAT, "passed": True,
@@ -110,20 +110,26 @@ def _launch(plan, old, children, calls=None, after=None):
     return launch
 
 
-def test_cache_ready_before40_waits_for_the_published_symlink_without_reading_contents(setup, monkeypatch):
+def _publish_boundary(plan, completed, *, epoch=None, batch=0):
+    epoch = completed - 1 if epoch is None else epoch
+    Path(plan["old_log"]).write_text(f"Epoch {epoch}: 1%| | {batch}/488\r")
+    return _checkpoint(Path(plan["output"]), completed)
+
+
+def test_cache_ready_waits_for_last_publication_without_reading_checkpoint(setup, monkeypatch):
     plan, old, children = setup
     path = _checkpoint(Path(plan["output"]), 40, link=False)
     calls, waiting = [], []
     original_open = Path.open
     def no_checkpoint_reads(self, *args, **kwargs):
-        if self.suffix == ".ckpt":
-            raise AssertionError("Supervisor attempted to open checkpoint contents")
+        if self.suffix == ".ckpt": raise AssertionError("Supervisor opened checkpoint contents")
         return original_open(self, *args, **kwargs)
     monkeypatch.setattr(Path, "open", no_checkpoint_reads)
     monkeypatch.setenv("MOTIONEXPERT_DATA_DIR", "/incorrect")
     monkeypatch.setenv("LOCAL_RANK", "3")
     def published():
         waiting.append(old.poll() is None)
+        Path(plan["old_log"]).write_text("Epoch 39: 100%| | 488/488\r")
         temp = Path(plan["output"]) / ".last.tmp"
         temp.symlink_to(path.name); temp.replace(Path(plan["output"]) / "last.ckpt")
     timer = threading.Timer(.1, published); timer.start()
@@ -144,108 +150,122 @@ def test_cache_ready_before40_waits_for_the_published_symlink_without_reading_co
     assert state["checkpoint_inspection"] == "natural_last_symlink_and_filename_only"
 
 
-def test_40_stops_while_cache_builds_then_resumes_exactly_that_saved_path(setup):
+def test_cache_pending_keeps_old_running_until_accepted_at_current_boundary(setup):
     plan, old, children = setup
     _cache_pending(plan)
-    checkpoint = _checkpoint(Path(plan["output"]), 40)
-    observed, errors = [], []
-    def accept_later():
-        try:
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                state = switch.read_json(plan["current_run"])
-                if state.get("state") == "waiting_cache_after_stop": break
-                time.sleep(.01)
-            assert old.poll() is not None
-            assert state["training_running"] is False and state["checkpoint"] == str(checkpoint)
-            with pytest.raises(BlockingIOError):
-                with switch.locked(Path(plan["root"]) / "training/.dino-to-motion.lock"): pass
-            # Other cooperating watchers take the gate, then fail the held run lock.
-            with switch.locked(Path(plan["root"]) / "training/.launcher-reservation.lock"):
-                with pytest.raises(BlockingIOError):
-                    with switch.locked(Path(plan["root"]) / "training/.dino-to-motion.lock"): pass
-            observed.append(state)
-            _cache_ready(plan)
-        except Exception as error:
-            errors.append(error)
-    timer = threading.Timer(.1, accept_later); timer.start()
-    watchdog = threading.Timer(4, lambda: stop.set()); stop = threading.Event(); watchdog.start()
+    path = _publish_boundary(plan, 40)
+    observations = []
+    def ready():
+        observations.append(old.poll() is None)
+        observations.append(switch.read_json(Path(plan["job_dir"]) / "state.json")["state"] == "waiting_cache")
+        _cache_ready(plan)
+    timer = threading.Timer(.1, ready); timer.start()
     try:
-        assert switch.run_switch(plan, poll_seconds=.01, stop=stop,
-                                 launch=_launch(plan, old, children)) == 0
-    finally:
-        timer.cancel(); watchdog.cancel()
-    assert not errors and len(observed) == 1
-    assert switch.read_json(plan["current_run"])["checkpoint"] == str(checkpoint)
-
-
-def test_40_without_cache_remains_stopped_if_supervisor_is_cancelled(setup):
-    plan, old, _ = setup
-    _cache_pending(plan)
-    _checkpoint(Path(plan["output"]), 40)
-    stop = threading.Event()
-    timer = threading.Timer(.3, stop.set); timer.start()
-    calls = []
-    try:
-        assert switch.run_switch(plan, poll_seconds=.01, stop=stop, launch=lambda *a, **k: calls.append(a)) == 0
+        assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children)) == 0
     finally:
         timer.cancel()
-    assert old.poll() is not None and calls == []
-    state = switch.read_json(plan["current_run"])
-    assert state["state"] == "supervisor_stopped" and state["training_running"] is False
-    assert state["cache_acceptance_pending"] is True and state["saved_checkpoint"]["completed_epochs"] == 40
+    assert observations == [True, True]
+    assert switch.read_json(plan["current_run"])["checkpoint"] == str(path)
 
 
-def test_existing40_is_used_even_if_the_next_epoch_log_has_started(setup):
-    plan, old, children = setup
-    checkpoint = _checkpoint(Path(plan["output"]), 40)
-    Path(plan["old_log"]).write_text("Epoch 40: 1%| | 5/488\r")
-    calls = []
-    assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children, calls)) == 0
-    assert calls[0][0][calls[0][0].index("--resume") + 1] == str(checkpoint)
-    assert switch.read_json(plan["current_run"])["boundary"] == 40
-
-
-@pytest.mark.parametrize("failure", ["partial", "failed_with_building", "manifest_hash"])
-def test_failed_acceptance_after40_keeps_training_stopped_without_launch(setup, failure):
+def test_cancelling_pending_cache_does_not_stop_training_even_with40_saved(setup):
     plan, old, _ = setup
-    _checkpoint(Path(plan["output"]), 40)
-    if failure == "partial":
-        path = Path(plan["cache_root"]) / "manifest.json"
-        data = switch.read_json(path); data.update(diagnostic=True, scope="selected_episodes")
-    else:
-        path = Path(plan["acceptance"])
-        data = switch.read_json(path)
-        if failure == "failed_with_building":
-            _cache_pending(plan)
-            data.update(passed=False, state="failed", error="builder exited", finished_at=switch.now())
-        else:
-            data["cache_manifest_sha256"] = "0" * 64
-    switch.atomic_json(path, data)
-    calls = []
-    with pytest.raises(ValueError):
-        switch.run_switch(plan, poll_seconds=.01, launch=lambda *a, **k: calls.append(a))
-    assert old.poll() is not None and calls == []
-    state = switch.read_json(plan["current_run"])
-    assert state["state"] == "failed" and state["training_running"] is False
-    assert (Path(plan["output"]) / "window_cache_launch.json").is_file()
-
-
-def test_cancellation_before40_preserves_the_running_old_session(setup):
-    plan, old, _ = setup
-    _cache_pending(plan)
-    stop = threading.Event(); timer = threading.Timer(.08, stop.set); timer.start()
+    _cache_pending(plan); _publish_boundary(plan, 40)
+    stop = threading.Event(); timer = threading.Timer(.1, stop.set); timer.start()
     try:
         assert switch.run_switch(plan, poll_seconds=.01, stop=stop) == 0
     finally:
         timer.cancel()
     assert old.poll() is None
     assert switch.read_json(plan["current_run"])["trainer"] == plan["trainer"]
+    assert not (Path(plan["output"]) / "window_cache_launch.json").exists()
+
+
+def test_acceptance_after_next_epoch_started_waits60_then_accepts_epoch60_zero_batch(setup):
+    plan, old, children = setup
+    _publish_boundary(plan, 40, epoch=40, batch=8)
+    observations = []
+    def published():
+        state = switch.read_json(Path(plan["job_dir"]) / "state.json")
+        observations.extend([old.poll() is None, state["boundary"] == 60])
+        _publish_boundary(plan, 60, epoch=60, batch=0)
+    timer = threading.Timer(.1, published); timer.start()
+    try:
+        assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children)) == 0
+    finally:
+        timer.cancel()
+    state = switch.read_json(plan["current_run"])
+    assert observations == [True, True] and state["saved_checkpoint"]["completed_epochs"] == 60
+    assert state["unsaved_progress"] == {"epoch": 60, "batch": 0, "steps_per_epoch": 488}
+
+
+def test_stale_current_save_waits_for_next_fresh_natural_boundary(setup):
+    plan, old, children = setup
+    path = _publish_boundary(plan, 40)
+    previous = time.time() - 180; os.utime(path, (previous, previous))
+    observations = []
+    def next_save():
+        observations.extend([old.poll() is None,
+            switch.read_json(Path(plan["job_dir"]) / "state.json")["boundary"] == 60])
+        _publish_boundary(plan, 60, epoch=60, batch=1)
+    timer = threading.Timer(.1, next_save); timer.start()
+    try:
+        assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children)) == 0
+    finally:
+        timer.cancel()
+    assert observations == [True, True]
+    assert switch.read_json(plan["current_run"])["boundary"] == 60
+
+
+def test_later_completed_epoch_during_preparation_defers_without_signalling_old(setup, monkeypatch):
+    plan, old, children = setup
+    _publish_boundary(plan, 40)
+    checks, signals, observations = [], [], []
+    original_validate, original_signal = switch.validate_acceptance, os.killpg
+    def validate(plan):
+        result = original_validate(plan); checks.append(True)
+        if len(checks) == 2:
+            Path(plan["old_log"]).write_text("Epoch 41: 1%| | 1/488\r")
+        return result
+    def signal_group(group, signum):
+        signals.append((group, signum)); original_signal(group, signum)
+    monkeypatch.setattr(switch, "validate_acceptance", validate)
+    monkeypatch.setattr(os, "killpg", signal_group)
+    def published():
+        observations.extend([old.poll() is None, signals == []])
+        _publish_boundary(plan, 60, epoch=60, batch=0)
+    timer = threading.Timer(.15, published); timer.start()
+    try:
+        assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children)) == 0
+    finally:
+        timer.cancel()
+    assert observations == [True, True]
+    assert switch.read_json(plan["current_run"])["boundary"] == 60
+
+
+@pytest.mark.parametrize("failure", ["partial", "failed_with_building", "manifest_hash"])
+def test_cache_acceptance_failure_preserves_running_training(setup, failure):
+    plan, old, _ = setup
+    _publish_boundary(plan, 40)
+    if failure == "partial":
+        path = Path(plan["cache_root"]) / "manifest.json"
+        data = switch.read_json(path); data.update(diagnostic=True, scope="selected_episodes")
+    else:
+        path = Path(plan["acceptance"]); data = switch.read_json(path)
+        if failure == "failed_with_building":
+            _cache_pending(plan)
+            data.update(passed=False, state="failed", error="builder exited", finished_at=switch.now())
+        else: data["cache_manifest_sha256"] = "0" * 64
+    switch.atomic_json(path, data)
+    with pytest.raises(ValueError): switch.run_switch(plan, poll_seconds=.01)
+    assert old.poll() is None
+    assert not (Path(plan["output"]) / "window_cache_launch.json").exists()
+    assert switch.read_json(plan["current_run"])["trainer"] == plan["trainer"]
 
 
 def test_identity_change_during_marker_is_checked_before_sigstop(setup, monkeypatch):
     plan, old, _ = setup
-    _checkpoint(Path(plan["output"]), 40)
+    _publish_boundary(plan, 40)
     signals = []; original_signal, original_fsync = os.killpg, os.fsync
     def signal_group(group, signum):
         signals.append((group, signum)); original_signal(group, signum)
@@ -255,8 +275,7 @@ def test_identity_change_during_marker_is_checked_before_sigstop(setup, monkeypa
             current = switch.read_json(plan["current_run"])
             current["trainer"] = {**current["trainer"], "start_ticks": "new identity"}
             switch.atomic_json(plan["current_run"], current)
-    monkeypatch.setattr(os, "killpg", signal_group)
-    monkeypatch.setattr(os, "fsync", replace_pointer)
+    monkeypatch.setattr(os, "killpg", signal_group); monkeypatch.setattr(os, "fsync", replace_pointer)
     with pytest.raises(RuntimeError, match="Current run was replaced"):
         switch.run_switch(plan, poll_seconds=.01)
     assert old.poll() is None and signals == []
@@ -264,7 +283,7 @@ def test_identity_change_during_marker_is_checked_before_sigstop(setup, monkeypa
 
 def test_busy_launcher_gate_cannot_stop_old_training(setup, monkeypatch):
     plan, old, _ = setup
-    _checkpoint(Path(plan["output"]), 40)
+    _publish_boundary(plan, 40)
     signals = []; original_signal = os.killpg
     def signal_group(group, signum):
         signals.append((group, signum)); original_signal(group, signum)
@@ -272,29 +291,18 @@ def test_busy_launcher_gate_cannot_stop_old_training(setup, monkeypatch):
     with switch.locked(Path(plan["root"]) / "training/.launcher-reservation.lock"), pytest.raises(BlockingIOError):
         switch.run_switch(plan, poll_seconds=.01)
     assert old.poll() is None and signals == []
-    assert not (Path(plan["output"]) / "window_cache_launch.json").exists()
 
 
 def test_failed_launch_is_attempted_once_after_stop(setup):
     plan, old, _ = setup
-    _checkpoint(Path(plan["output"]), 40)
+    _publish_boundary(plan, 40)
     calls = []
     def fail(command, **options):
         calls.append(command); raise OSError("launch failed")
     with pytest.raises(OSError, match="launch failed"):
         switch.run_switch(plan, poll_seconds=.01, launch=fail)
     assert old.poll() is not None and len(calls) == 1
-    assert switch.read_json(plan["current_run"])["training_running"] is False
     assert (Path(plan["output"]) / "window_cache_launch.json").is_file()
-
-
-def test_configurable_completed_boundary_is_frozen(setup):
-    plan, old, children = setup
-    plan["completed_epochs"] = 60
-    checkpoint = _checkpoint(Path(plan["output"]), 60)
-    calls = []
-    assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children, calls)) == 0
-    assert calls[0][0][calls[0][0].index("--resume") + 1] == str(checkpoint)
 
 
 def test_snapshot_reuses_config_bytes_and_changes_only_cache_root(setup, monkeypatch):
@@ -308,6 +316,48 @@ def test_snapshot_reuses_config_bytes_and_changes_only_cache_root(setup, monkeyp
     monkeypatch.setattr(switch, "training_ranks", lambda _: plan["ranks"])
     job = Path(plan["job_dir"]).parent / "frozen-plan"; job.mkdir()
     frozen = switch.prepare_plan(plan["current_run"], plan["cache_root"], plan["acceptance"], job,
-                                 resume_config=plan["resume_config"], completed_epochs=40)
+                                 resume_config=plan["resume_config"])
     assert Path(frozen["resume_config"]).read_bytes() == Path(plan["resume_config"]).read_bytes()
-    assert frozen["completed_epochs"] == 40
+    assert "completed_epochs" not in frozen
+
+
+@pytest.mark.parametrize("epoch,completed,expected", [(31,20,40),(39,40,40),(40,40,60),(59,40,60),(60,60,80)])
+def test_acceptance_boundary_selection(epoch, completed, expected):
+    assert switch.next_boundary({"epoch": epoch}, {"completed_epochs": completed}) == expected
+
+
+def test_acceptance_after_next_epoch_race_reads_latest_progress(setup, monkeypatch):
+    plan, old, children = setup
+    _publish_boundary(plan, 40)
+    original, reads, observed = switch.completed_checkpoint, [], []
+    def read_last(output):
+        result = original(output)
+        reads.append(True)
+        if len(reads) == 1:
+            # Lightning enters its next epoch between the link/progress reads.
+            Path(plan["old_log"]).write_text("Epoch 40: 0%| | 0/488\r")
+        return result
+    monkeypatch.setattr(switch, "completed_checkpoint", read_last)
+    def saved_next():
+        observed.extend([old.poll() is None,
+            switch.read_json(Path(plan["job_dir"]) / "state.json")["boundary"] == 60])
+        _publish_boundary(plan, 60, epoch=60, batch=0)
+    timer = threading.Timer(.1, saved_next); timer.start()
+    try:
+        assert switch.run_switch(plan, poll_seconds=.01, launch=_launch(plan, old, children)) == 0
+    finally:
+        timer.cancel()
+    assert observed == [True, True]
+    assert switch.read_json(plan["current_run"])["boundary"] == 60
+
+
+def test_completed_unsaved_epoch_is_not_allowed_as_microsteps(setup):
+    plan, _, _ = setup
+    _publish_boundary(plan, 40)
+    checkpoint = switch.completed_checkpoint(plan["output"])
+    progress = {"epoch": 40, "batch": 488, "steps_per_epoch": 488}
+    assert not switch.recent_boundary(checkpoint, 40, progress)
+    progress["batch"] = 0
+    assert switch.recent_boundary(checkpoint, 40, progress)
+    progress.update(epoch=39, batch=488)
+    assert switch.recent_boundary(checkpoint, 40, progress)

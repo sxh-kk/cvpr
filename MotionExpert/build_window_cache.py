@@ -42,18 +42,64 @@ def _archive(cfg, allow_unpublished):
         vision_profile_root=data.VISION_PROFILE_ROOT, image_profile=data.IMAGE_PROFILE)
 
 
-def _init_worker(cfg, root, binding, protocol, block_frames, allow_unpublished):
+def _init_worker(archive, root, binding, protocol, block_frames):
     global _WORKER_ARCHIVE, _WORKER_ROOT, _WORKER_BINDING, _WORKER_PROTOCOL, _BLOCK_FRAMES
     import torch
     import pyarrow as pa
     torch.set_num_threads(1)
     pa.set_cpu_count(1)
     pa.set_io_thread_count(1)
-    _WORKER_ARCHIVE = _archive(cfg, allow_unpublished)
+    # Spawn serializes the already validated archive. Its Parquet/vision
+    # __getstate__ methods discard open files and cached arrays, so each worker
+    # opens only the episode artifacts it uses instead of repeating a complete
+    # source-publication scan. Per-episode and final parent checks remain below.
+    _WORKER_ARCHIVE = archive
     if cache_binding(_WORKER_ARCHIVE, protocol) != binding:
         raise ValueError("Window-cache worker source binding differs from the planning archive")
     _WORKER_ROOT, _WORKER_BINDING, _WORKER_PROTOCOL = Path(root), binding, protocol
     _BLOCK_FRAMES = block_frames
+
+
+def _active_workers(control, maximum):
+    """Read an explicitly supplied scheduling limit; never silently ignore it."""
+    if control is None:
+        return maximum
+    try:
+        value = json.loads(Path(control).read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Cannot read window-cache worker control: {control}") from error
+    if (not isinstance(value, dict) or set(value) != {"active_workers"}
+            or type(value["active_workers"]) is not int
+            or not 1 <= value["active_workers"] <= maximum):
+        raise ValueError(f"Worker control requires integer active_workers in [1, {maximum}]")
+    return value["active_workers"]
+
+
+def _execute_episode_tasks(pool, tasks, *, max_workers, worker_control, progress):
+    """Use public Future APIs to adjust task admission without restarting workers."""
+    iterator, pending, exhausted = iter(tasks), set(), False
+    previous_active = None
+    while pending or not exhausted:
+        active = _active_workers(worker_control, max_workers)
+        if worker_control is not None and active != previous_active:
+            log(f"Worker control active_workers={active}, max_workers={max_workers}")
+        previous_active = active
+        # The original no-control mode retains its small prefetch queue. With
+        # control, pending Futures directly bound active episode tasks; a lower
+        # limit drains existing work naturally before any further submission.
+        limit = active if worker_control is not None else max_workers * 2
+        while not exhausted and len(pending) < limit:
+            task = next(iterator, None)
+            if task is None:
+                exhausted = True
+                break
+            pending.add(pool.submit(_write_episode, task))
+        if not pending:
+            break
+        done, pending = wait(pending, return_when=FIRST_COMPLETED,
+                             timeout=1 if worker_control is not None else None)
+        for future in done:
+            progress(future.result(), active)
 
 
 def _index_episode(archive, record, protocol):
@@ -287,12 +333,18 @@ def _pack_split(root, split, binding, index, descriptors):
 
 
 def build_window_cache(cfg, output_root, *, workers=2, selected_episodes=None,
-                       diagnostic=False, block_frames=4096, allow_unpublished=False):
+                       diagnostic=False, block_frames=4096, allow_unpublished=False,
+                       worker_control=None):
     """Build all splits, or an explicitly diagnostic subset; never publish QA acceptance."""
     if type(workers) is not int or workers < 0 or type(block_frames) is not int or block_frames < 11:
         raise ValueError("Invalid window-cache worker/block limits")
     if selected_episodes is not None and not diagnostic:
         raise ValueError("Selected-episode builds must be explicitly diagnostic")
+    if worker_control is not None:
+        if workers == 0:
+            raise ValueError("Worker control requires a multiprocessing builder")
+        worker_control = Path(worker_control).resolve()
+        _active_workers(worker_control, workers)
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".build.lock").open("a+") as lock:
@@ -378,13 +430,14 @@ def build_window_cache(cfg, output_root, *, workers=2, selected_episodes=None,
         log(f"Building {len(tasks)} episodes with {workers or 1} CPU processes")
         completed, windows, resumed = 0, 0, 0
         last_build_log = time.monotonic()
-        def progress(result):
+        def progress(result, active_workers):
             nonlocal completed, windows, resumed, last_build_log
             completed += 1
             windows += result["windows"]
             resumed += int(result["resumed"])
             atomic_json(root / "progress.json", {"state": "building", "completed_episodes": completed,
                         "total_episodes": len(tasks), "completed_windows": windows, "resumed_episodes": resumed,
+                        "active_workers": active_workers, "max_workers": workers or 1,
                         "updated_at_unix": time.time()})
             if time.monotonic() - last_build_log >= 30 or completed == len(tasks):
                 log(f"Built {completed}/{len(tasks)} episodes, {windows} windows ({resumed} resumed)")
@@ -399,24 +452,15 @@ def build_window_cache(cfg, output_root, *, workers=2, selected_episodes=None,
             _WORKER_ARCHIVE, _WORKER_ROOT, _WORKER_BINDING = archive, root, binding
             _WORKER_PROTOCOL, _BLOCK_FRAMES = protocol, block_frames
             for task in tasks:
-                progress(_write_episode(task))
+                progress(_write_episode(task), 1)
         else:
-            # Spawn avoids inheriting open Arrow/BLAS state. At most 2*workers
-            # episode tasks are in flight; every process opens the archive once.
+            # Spawn drops live Arrow/vision caches through archive serialization;
+            # it does not rerun the source constructor in every worker. At most
+            # 2*workers episode tasks are in flight.
             with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
-                    initializer=_init_worker, initargs=(cfg, str(root), binding, protocol, block_frames, allow_unpublished)) as pool:
-                iterator, pending = iter(tasks), set()
-                for _ in range(workers * 2):
-                    task = next(iterator, None)
-                    if task is not None:
-                        pending.add(pool.submit(_write_episode, task))
-                while pending:
-                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    for future in done:
-                        progress(future.result())
-                        task = next(iterator, None)
-                        if task is not None:
-                            pending.add(pool.submit(_write_episode, task))
+                    initializer=_init_worker, initargs=(archive, str(root), binding, protocol, block_frames)) as pool:
+                _execute_episode_tasks(pool, tasks, max_workers=workers,
+                                       worker_control=worker_control, progress=progress)
         archive.assert_current()
         descriptors, indices, records_by_split = [], {}, {}
         for record, starts in tasks:
@@ -459,6 +503,8 @@ def main():
     parser.add_argument("--output-root", type=Path,
                         default=Path("/gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_v1"))
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--worker-control", type=Path,
+                        help='Optional JSON {"active_workers": N}; change N without restarting (1..--workers)')
     parser.add_argument("--block-frames", type=int, default=4096)
     parser.add_argument("--diagnostic-episodes", type=int, nargs="+")
     args = parser.parse_args()
@@ -469,7 +515,7 @@ def main():
     cfg = load_config(args.config)
     manifest = build_window_cache(cfg, args.output_root, workers=args.workers,
                 selected_episodes=args.diagnostic_episodes, diagnostic=args.diagnostic_episodes is not None,
-                block_frames=args.block_frames)
+                block_frames=args.block_frames, worker_control=args.worker_control)
     print(json.dumps({key: manifest[key] for key in ("state", "scope", "completed_episodes", "completed_windows")}))
 
 

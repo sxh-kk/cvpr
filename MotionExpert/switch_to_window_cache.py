@@ -1,8 +1,8 @@
-"""Stop at the authorized natural epoch boundary, then await the window cache.
+"""Wait for accepted windows, then switch at the nearest natural saved boundary.
 
-Only last.ckpt publication and its target filename are inspected. Checkpoint
-contents are never loaded here. The stopped run resumes exactly once from that
-same saved path after full independent cache acceptance.
+The original trainer continues until both cache acceptance and a recent natural
+checkpoint are available. Checkpoint contents are never preloaded here; only
+last.ckpt publication, its filename and file stat are inspected.
 """
 from __future__ import annotations
 
@@ -143,9 +143,27 @@ def completed_checkpoint(output):
             "completed_epochs": epoch + 1}
 
 
-def validate_boundary(value):
-    if type(value) is not int or not 0 < value < 200 or value % 20:
-        raise ValueError("--completed-epochs must name a natural twenty-epoch save before epoch200")
+MAX_CHECKPOINT_AGE_SECONDS = 120.
+
+
+def next_boundary(progress, checkpoint=None, interval=20):
+    """At acceptance, an already-started next epoch waits for its next save."""
+    boundary = (progress["epoch"] // interval + 1) * interval
+    if checkpoint is not None:
+        boundary = max(boundary, checkpoint["completed_epochs"])
+    return boundary
+
+
+def recent_boundary(checkpoint, boundary, progress, *, now_seconds=None):
+    """Permit only a fresh selected save, with at most its next unsaved epoch."""
+    if checkpoint is None or checkpoint["completed_epochs"] != boundary:
+        return False
+    age = (time.time() if now_seconds is None else now_seconds) - Path(checkpoint["path"]).stat().st_mtime
+    next_epoch_completed = (progress["epoch"] == boundary
+                            and progress["batch"] >= progress["steps_per_epoch"])
+    return (age <= MAX_CHECKPOINT_AGE_SECONDS
+            and checkpoint["epoch"] <= progress["epoch"] <= boundary
+            and not next_epoch_completed)
 
 
 def validate_acceptance(plan):
@@ -237,8 +255,7 @@ def stop_original(plan, timeout=180):
         time.sleep(.1)
 
 
-def prepare_plan(pointer, cache_root, acceptance, job_dir, resume_config=None, completed_epochs=40):
-    validate_boundary(completed_epochs)
+def prepare_plan(pointer, cache_root, acceptance, job_dir, resume_config=None):
     current = read_json(pointer)
     if current.get("training_running") is not True:
         raise ValueError("Current run is not an active training session")
@@ -286,8 +303,7 @@ def prepare_plan(pointer, cache_root, acceptance, job_dir, resume_config=None, c
             "cache_root": str(Path(cache_root).resolve()), "acceptance": str(Path(acceptance).resolve()),
             "source_config": str(source), "source_config_sha256": file_hash(source),
             "resume_config": str(snapshot.resolve()), "resume_config_sha256": file_hash(snapshot),
-            "job_dir": str(Path(job_dir).resolve()), "created_at": now(),
-            "completed_epochs": completed_epochs}
+            "job_dir": str(Path(job_dir).resolve()), "created_at": now()}
     log_progress(plan["old_log"])
     assert_original(plan)
     atomic_json(Path(job_dir) / "plan.json", plan)
@@ -298,11 +314,9 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
                shutdown=stop_original):
     stop = stop or threading.Event()
     root, job = Path(plan["root"]), Path(plan["job_dir"])
-    boundary = plan.get("completed_epochs", 40)
-    validate_boundary(boundary)
     state = {**deepcopy(plan), "watcher": process_identity(os.getpid()), "state": "armed",
              "automatic_restart_enabled": False, "training_running": True,
-             "checkpoint": None, "pid": plan["trainer"]["pid"], "boundary": boundary,
+             "checkpoint": None, "pid": plan["trainer"]["pid"], "boundary": None,
              "log": str(job / "training.log"), "daemon_log": str(job / "daemon.log"),
              "checkpoint_inspection": "natural_last_symlink_and_filename_only"}
     last_publish = 0.
@@ -344,9 +358,12 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
             raise ValueError("Frozen training configuration changed before the transition")
 
     def checkpoint_identity(path):
-        # stat only: never open or deserialize checkpoint contents.
-        value = Path(path).stat()
+        value = Path(path).stat()  # Never open or deserialize checkpoint contents.
         return value.st_ino, value.st_size, value.st_mtime_ns
+
+    def cancelled():
+        publish("cancelled", reason="Transition cancelled before handoff; original training continues")
+        return 0
 
     try:
         check_configuration()
@@ -355,113 +372,132 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
         log = job / "training.log"
         if log.exists() or (job / "launch-marker.json").exists():
             raise FileExistsError("A previous transition launch must never be retried")
-        publish("waiting_checkpoint", reason=f"Stop after {boundary} completed epochs regardless of cache readiness")
+        publish("waiting_cache", reason="Original training continues until the full cache is independently accepted")
         while not stop.is_set():
             assert_original(plan)
-            checkpoint = completed_checkpoint(plan["output"])
-            if checkpoint is not None and checkpoint["completed_epochs"] >= boundary:
-                if checkpoint["completed_epochs"] != boundary:
-                    raise RuntimeError(f"The fixed {boundary}-epoch last checkpoint was already superseded")
+            acceptance = accepted()
+            if acceptance is not None:
+                baseline = completed_checkpoint(plan["output"])
+                # Observe progress after the last link, so a boundary crossed
+                # during this pair of reads cannot select the older epoch.
+                progress = log_progress(plan["old_log"])
+                boundary = next_boundary(progress, baseline)
+                state.update(acceptance_binding=acceptance, ready_progress=progress, baseline_checkpoint=baseline)
                 break
             if time.monotonic() - last_publish > 30:
-                publish("waiting_checkpoint")
+                publish("waiting_cache")
             stop.wait(poll_seconds)
         if stop.is_set():
-            publish("cancelled", reason="Transition cancelled before the boundary; original training continues")
-            return 0
-        command = [plan["python"], "-u", "-m", "MotionExpert.train", "--config", plan["resume_config"],
-                   "--resume", checkpoint["path"], "--output-dir", plan["output"]]
-        env = os.environ.copy()
-        env.pop("MOTIONEXPERT_DATA_DIR", None)
-        for name in ("LOCAL_RANK", "RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
-            env.pop(name, None)
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, plan["gpus"]))
-        env["PYTHONUNBUFFERED"] = "1"
-        saved_identity = checkpoint_identity(checkpoint["path"])
-        state.update(checkpoint=checkpoint["path"], command=command,
-                     saved_checkpoint=checkpoint, checkpoint_file_identity=list(saved_identity))
-        # Keep the visual read lease, and reserve the cooperating launchers'
-        # handoff while the original guardian releases its existing run lock.
-        with ExitStack() as resume_locks, locked(Path(vision) / ".extraction.lock", shared=True) as vision_lock:
-            with locked(root / "training/.launcher-reservation.lock"):
-                check_configuration()
-                assert_original(plan)
-                if completed_checkpoint(plan["output"]) != checkpoint:
-                    raise ValueError("Natural last checkpoint changed before stopping")
-                marker = {"contract": CONTRACT, "created_at": now(), "checkpoint": checkpoint,
-                          "command": command, "cache_acceptance_pending": True,
-                          "checkpoint_inspection": state["checkpoint_inspection"],
-                          "automatic_restart_enabled": False}
-                for path in (job / "launch-marker.json", Path(plan["output"]) / "window_cache_launch.json"):
-                    with path.open("x") as stream:
-                        json.dump(marker, stream, indent=2)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                if stop.is_set():
-                    publish("cancelled", reason="Transition cancelled before handoff; original training continues")
-                    return 0
-                assert_original(plan)
-                os.killpg(plan["pgid"], signal.SIGSTOP)
-                frozen = True
-                assert_original(plan)
-                if stop.is_set():
-                    os.killpg(plan["pgid"], signal.SIGCONT)
-                    frozen = False
-                    publish("cancelled", reason="Original training continues without switching")
-                    return 0
-                publish("stopping_original", reason=f"Natural {boundary}-epoch last symlink published; stopping the owned session")
-                shutdown(plan)
-                old_stopped, frozen = True, False
-                atomic_json(job / "previous-run-final.json", read_json(plan["current_run"]))
-                run_lock = resume_locks.enter_context(locked(root / "training/.dino-to-motion.lock"))
-            # The run lock now covers the complete stopped waiting period.
-            # No alive-original checks are meaningful after this handoff.
-            owns_pointer = True
-            state["original_trainer"] = state["trainer"]
-            state["original_ranks"] = state.pop("ranks")
-            publish("waiting_cache_after_stop", pid=None, trainer=None, pgid=None,
-                    config=plan["resume_config"], training_running=False, stopped_at=now(),
-                    cache_acceptance_pending=True,
-                    reason=f"Training stopped at the saved {boundary}-epoch boundary; cache is not yet accepted")
+            return cancelled()
+        while not stop.is_set():
+            if boundary >= 200:
+                publish("not_needed", boundary=boundary,
+                        reason="Only the final training boundary remains; original training continues")
+                return 0
+            publish("waiting_checkpoint", boundary=boundary, checkpoint=None,
+                    reason=f"Cache accepted; waiting for a recent natural {boundary}-epoch save")
+            checkpoint = None
             while not stop.is_set():
-                acceptance = accepted()
-                if acceptance is not None:
+                assert_original(plan)
+                if accepted() != acceptance:
+                    raise ValueError("Full cache acceptance changed while waiting for its natural save")
+                checkpoint = completed_checkpoint(plan["output"])
+                if checkpoint is not None and checkpoint["completed_epochs"] >= boundary:
+                    progress = log_progress(plan["old_log"])
+                    observed_boundary = checkpoint["completed_epochs"]
+                    if recent_boundary(checkpoint, observed_boundary, progress):
+                        boundary = observed_boundary
+                        break
+                    # A later completed epoch or a stale saved point would
+                    # discard substantial unsaved work. Wait for the next save.
+                    boundary = max(observed_boundary + 20, next_boundary(progress, checkpoint))
                     break
                 if time.monotonic() - last_publish > 30:
-                    publish("waiting_cache_after_stop", training_running=False)
+                    publish("waiting_checkpoint", boundary=boundary)
                 stop.wait(poll_seconds)
             if stop.is_set():
-                publish("supervisor_stopped", training_running=False,
-                        reason=f"Supervisor stopped; training remains stopped at the saved {boundary}-epoch checkpoint")
-                return 0
-            check_configuration()
-            if accepted(force=True) != acceptance:
-                raise ValueError("Window cache acceptance changed before the saved-run resume")
-            if checkpoint_identity(checkpoint["path"]) != saved_identity:
-                raise ValueError("The frozen natural checkpoint file was replaced before resume")
-            # No checkpoint contents are inspected; train.py performs its
-            # ordinary --resume loading only when launching the actual resume.
-            state["acceptance_binding"] = acceptance
-            with log.open("x") as stream:
-                publish("starting_resume", training_running=False, cache_acceptance_pending=False,
-                        reason=f"Cache accepted; launching once from the saved {boundary}-epoch checkpoint")
-                child = launch(command, cwd=REPO_ROOT, env=env, stdin=subprocess.DEVNULL,
-                               stdout=stream, stderr=subprocess.STDOUT, start_new_session=True,
-                               pass_fds=(run_lock.fileno(), vision_lock.fileno()))
-            publish("training", pid=child.pid, trainer=process_identity(child.pid), pgid=child.pid,
-                    training_running=True, resumed_at=now(), initialization="resume",
-                    automatic_start_enabled=False, reason="Window-cache resume launched; no automatic retries")
-            while child.poll() is None and not stop.wait(poll_seconds):
-                if time.monotonic() - last_publish > 30:
-                    publish("training", training_running=True)
-            if child.poll() is None:
-                publish("supervisor_stopped", training_running=True,
-                        reason="Supervisor stopped; resumed training continues independently")
-                return 0
-            code = child.returncode
-            publish("completed" if code == 0 else "failed", training_running=False,
-                    exit_code=code, finished_at=now(), reason="Resume ended; automatic retry remains disabled")
-            return 0 if code == 0 else 1
+                return cancelled()
+            if not recent_boundary(checkpoint, boundary, progress):
+                continue
+            command = [plan["python"], "-u", "-m", "MotionExpert.train", "--config", plan["resume_config"],
+                       "--resume", checkpoint["path"], "--output-dir", plan["output"]]
+            env = os.environ.copy()
+            env.pop("MOTIONEXPERT_DATA_DIR", None)
+            for name in ("LOCAL_RANK", "RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+                env.pop(name, None)
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, plan["gpus"]))
+            env["PYTHONUNBUFFERED"] = "1"
+            saved_identity = checkpoint_identity(checkpoint["path"])
+            # Cooperating launchers take the gate before the run lock. Reserve
+            # the old guardian's exit through the new child's lock inheritance.
+            with ExitStack() as resume_locks, locked(Path(vision) / ".extraction.lock", shared=True) as vision_lock:
+                with locked(root / "training/.launcher-reservation.lock"):
+                    check_configuration()
+                    assert_original(plan)
+                    if accepted(force=True) != acceptance:
+                        raise ValueError("Cache acceptance changed before the natural checkpoint handoff")
+                    progress = log_progress(plan["old_log"])
+                    if (completed_checkpoint(plan["output"]) != checkpoint
+                            or not recent_boundary(checkpoint, boundary, progress)):
+                        latest = completed_checkpoint(plan["output"])
+                        boundary = max(boundary + 20, next_boundary(progress, latest))
+                        continue
+                    state.update(checkpoint=checkpoint["path"], command=command, boundary=boundary,
+                                 saved_checkpoint=checkpoint, checkpoint_file_identity=list(saved_identity),
+                                 unsaved_progress=progress, checkpoint_age_seconds=max(
+                                     0., time.time() - Path(checkpoint["path"]).stat().st_mtime))
+                    marker = {"contract": CONTRACT, "created_at": now(), "checkpoint": checkpoint,
+                              "command": command, "acceptance_binding": acceptance,
+                              "checkpoint_inspection": state["checkpoint_inspection"],
+                              "automatic_restart_enabled": False}
+                    for path in (job / "launch-marker.json", Path(plan["output"]) / "window_cache_launch.json"):
+                        with path.open("x") as stream:
+                            json.dump(marker, stream, indent=2)
+                            stream.flush(); os.fsync(stream.fileno())
+                    if stop.is_set():
+                        return cancelled()
+                    assert_original(plan)
+                    progress = log_progress(plan["old_log"])
+                    if (completed_checkpoint(plan["output"]) != checkpoint
+                            or checkpoint_identity(checkpoint["path"]) != saved_identity
+                            or not recent_boundary(checkpoint, boundary, progress)):
+                        raise ValueError("Natural checkpoint handoff became stale before signalling the original session")
+                    state["unsaved_progress"] = progress
+                    os.killpg(plan["pgid"], signal.SIGSTOP)
+                    frozen = True
+                    assert_original(plan)
+                    if stop.is_set():
+                        os.killpg(plan["pgid"], signal.SIGCONT); frozen = False
+                        return cancelled()
+                    publish("stopping_original", reason=f"Accepted cache and recent natural {boundary}-epoch save are ready")
+                    shutdown(plan)
+                    old_stopped, frozen = True, False
+                    atomic_json(job / "previous-run-final.json", read_json(plan["current_run"]))
+                    run_lock = resume_locks.enter_context(locked(root / "training/.dino-to-motion.lock"))
+                    with log.open("x") as stream:
+                        publish("starting_resume", training_running=False,
+                                reason=f"Launching once from the saved {boundary}-epoch checkpoint")
+                        child = launch(command, cwd=REPO_ROOT, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=stream, stderr=subprocess.STDOUT, start_new_session=True,
+                                       pass_fds=(run_lock.fileno(), vision_lock.fileno()))
+                owns_pointer = True
+                state["original_trainer"] = state["trainer"]
+                state["original_ranks"] = state.pop("ranks")
+                publish("training", pid=child.pid, trainer=process_identity(child.pid), pgid=child.pid,
+                        config=plan["resume_config"], training_running=True, resumed_at=now(), initialization="resume",
+                        automatic_start_enabled=False, reason="Window-cache resume launched; no automatic retries")
+                while child.poll() is None and not stop.wait(poll_seconds):
+                    if time.monotonic() - last_publish > 30:
+                        publish("training", training_running=True)
+                if child.poll() is None:
+                    publish("supervisor_stopped", training_running=True,
+                            reason="Supervisor stopped; resumed training continues independently")
+                    return 0
+                code = child.returncode
+                publish("completed" if code == 0 else "failed", training_running=False,
+                        exit_code=code, finished_at=now(), reason="Resume ended; automatic retry remains disabled")
+                return 0 if code == 0 else 1
+        return cancelled()
     except Exception as error:
         if frozen and any(process_alive(identity) for identity in plan["ranks"].values()):
             try:
@@ -471,8 +507,8 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
         publish("failed", error=f"{type(error).__name__}: {error}",
                 training_running=(child is not None and child.poll() is None) or
                                  (not old_stopped and process_alive(plan["trainer"])),
-                reason=("Transition failed; training remains stopped at its saved boundary" if old_stopped
-                        else "Transition failed before stopping; original training remains independent"))
+                reason=("Transition failed after the saved boundary; no automatic retry" if old_stopped
+                        else "Transition failed before stopping; original training continues"))
         raise
 
 
@@ -484,15 +520,10 @@ def main():
     parser.add_argument("--resume-config", type=Path)
     parser.add_argument("--job-dir", type=Path)
     parser.add_argument("--poll-seconds", type=float, default=.5)
-    parser.add_argument("--completed-epochs", type=int, default=40)
     parser.add_argument("--background", action="store_true")
     args = parser.parse_args()
     if not math.isfinite(args.poll_seconds) or args.poll_seconds <= 0:
         parser.error("--poll-seconds must be finite and positive")
-    try:
-        validate_boundary(args.completed_epochs)
-    except ValueError as error:
-        parser.error(str(error))
     pointer = args.current_run.resolve(strict=True)
     root = pointer.parent.parent
     job = (args.job_dir or root / ".pipeline/jobs" / (
@@ -506,8 +537,7 @@ def main():
         command = [sys.executable, "-u", "-m", "MotionExpert.switch_to_window_cache",
                    "--current-run", str(pointer), "--cache-root", str(args.cache_root.resolve()),
                    "--acceptance", str(args.acceptance.resolve()), "--job-dir", str(job),
-                   "--poll-seconds", str(args.poll_seconds),
-                   "--completed-epochs", str(args.completed_epochs)]
+                   "--poll-seconds", str(args.poll_seconds)]
         if args.resume_config:
             command.extend(["--resume-config", str(args.resume_config.resolve())])
         with (job / "daemon.log").open("x") as stream:
@@ -533,8 +563,7 @@ def main():
         with locked(root / "training/.window-cache-transition.lock"):
             if any((job / name).exists() for name in ("plan.json", "state.json", "resume-config.yaml", "launch-marker.json")):
                 raise FileExistsError("Existing transition jobs cannot be restarted")
-            plan = prepare_plan(pointer, args.cache_root, args.acceptance, job, args.resume_config,
-                                args.completed_epochs)
+            plan = prepare_plan(pointer, args.cache_root, args.acceptance, job, args.resume_config)
             return run_switch(plan, poll_seconds=args.poll_seconds, stop=stop)
     except Exception as error:
         print(f"[{now()}] Transition failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)

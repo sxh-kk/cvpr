@@ -116,6 +116,10 @@ def test_success_launches_once_with_exact_training_command_and_lock_inheritance(
 
     def launch(command, **options):
         launches.append((command, options))
+        # The handoff reservation is short-lived; only the run/cache locks
+        # should remain owned while the actual training child is launched.
+        with watch.locked(Path(cfg.DATA.ARCHIVE_ROOT).parent / "training/.launcher-reservation.lock"):
+            pass
         # A real harmless subprocess tests fd inheritance, log redirection and
         # detached supervision without constructing a model or invoking CUDA.
         code = "import os; print('handoff-ok', os.environ['CUDA_VISIBLE_DEVICES'], flush=True)"
@@ -142,6 +146,17 @@ def test_success_launches_once_with_exact_training_command_and_lock_inheritance(
     with pytest.raises(FileExistsError, match="existing run"):
         watch.run_watch(cfg, **kwargs, check=lambda _: None, launch=launch)
     assert len(launches) == 1
+
+
+def test_cache_handoff_reservation_blocks_a_competing_dino_watcher(setup):
+    cfg, _, kwargs = setup
+    launched = []
+    with watch.locked(Path(cfg.DATA.ARCHIVE_ROOT).parent / "training/.launcher-reservation.lock"):
+        with pytest.raises(BlockingIOError):
+            watch.run_watch(cfg, **kwargs, check=lambda _: None,
+                            launch=lambda *a, **k: launched.append(a))
+    assert launched == []
+    assert not (kwargs["job_dir"] / "config.yaml").exists()
 
 
 def test_preflight_failure_cannot_launch(setup):

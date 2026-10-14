@@ -26,5 +26,13 @@ MotionExpert 的当前帧与 Ψ₀ 当前帧相同，MotionExpert 额外读取�
 完整命令与监控方式见 [MotionExpert README](MotionExpert/README.md#dino完成后自动启动八卡训练)。
 训练保留8卡、每卡batch256、每卡24workers、LR1e-4、BF16、200轮、每20轮保存。
 
+MotionExpert支持固定5Hz／11帧的运动窗口mmap缓存，将245维运动、18维轨迹、mask与解码变换
+按split存为大型 `.npy`，减少重复Parquet读取、FK和坐标计算；原生30Hz DINO仍使用已有mmap。
+缓存构建可与当前训练并行；本次固定在40轮自然checkpoint保存完成后停止，
+缓存未就绪则等待，独立验收通过后从同一个40轮checkpoint完整续训，
+保留优化器、EMA、学习率调度及训练参数，不增加保存次数。
+构建、验收、自动切换命令与监控见
+[窗口缓存说明](MotionExpert/README.md#固定窗口-mmap-缓存与已有训练切换)。
+
 环境迁移见 [MIGRATION.md](docs/MIGRATION.md)。数据、预训练权重、训练 checkpoint 和运行环境不随 Git 仓库分发。
 第三方代码沿用各目录原有许可与版权。

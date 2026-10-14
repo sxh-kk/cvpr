@@ -141,6 +141,78 @@ DINO失败、提前退出、缓存不完整或启动检查失败时，守护报�
 交接后已启动的训练保持运行，并继续持有运行锁和缓存读锁。
 停止后再次等待可使用新的job目录；已启动过的训练需按实际checkpoint选择续训，不能重复从头覆盖。
 
+### 固定窗口 mmap 缓存与已有训练切换
+
+`DATA.WINDOW_CACHE_ROOT` 默认为空，继续使用原参数读取器。设置后，普通训练／验证批次读取
+预先计算的5Hz、11帧窗口，省去逐样本Parquet解码、SMPL-H FK、坐标变换和脚接触计算。
+缓存保留原窗口顺序、筛选群体与有效mask；归一化仍使用原完整train统计，
+噪声、任务条件、轨迹dropout和采样随机性仍在训练时生成。
+稀疏采样评测的 `get_sample()` 保留原归档读取与完整世界坐标解码信息。
+
+每个窗口保存原始float32的 `[11,245]` 运动、`[11,18]` 轨迹及对应bool mask，
+以及首帧规范化变换、逐帧地面变换、地面兜底标记和历史6帧图像有效性。
+历史图像索引由原生起点加 `[0,6,12,18,24,30]` 得到；未来图像仍隐藏。
+按episode生成可恢复中间文件，最后按train／val／test压实为每split 12个大型 `.npy`，
+训练worker持有这些只读mmap。DINO继续读取原native30Hz `features.npy`，不复制特征。
+主SMPL-H归档、DINO和checkpoint都保留。
+
+从当前运行的配置快照复制一份配置，**只增加**：
+
+```yaml
+DATA:
+  WINDOW_CACHE_ROOT: /gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_v1
+```
+
+下面的 `SOURCE_CONFIG` 指当前运行的完整配置，`CACHE_CONFIG` 指只增加缓存路径的副本；
+二者使用绝对路径。当前任务的副本和验收记录保存在仓库外的 `.pipeline/jobs/window-cache-<时间>/`。
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+MOTION_PY=/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python
+CACHE_ROOT=/gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_v1
+
+# 当前训练继续运行；两个CPU构建进程，各自限制为单线程。
+"$MOTION_PY" -u -m MotionExpert.build_window_cache \
+  --config "$CACHE_CONFIG" --output-root "$CACHE_ROOT" --workers 2
+
+# 仅核对新增缓存路径：双来源、各split和地面策略的代表窗口逐值比较，
+# 并在真实模型上比较原／缓存输入的BF16损失、有限梯度。
+"$MOTION_PY" -u -m MotionExpert.validate_window_cache \
+  --config "$CACHE_CONFIG" --source-config "$SOURCE_CONFIG" \
+  --report "$ACCEPTANCE_REPORT" --gpu-check --device cuda:0
+
+# 固定在40轮的自然保存点停下；缓存未好则等待，独立验收通过后完整续训。
+"$MOTION_PY" -m MotionExpert.switch_to_window_cache \
+  --cache-root "$CACHE_ROOT" --acceptance "$ACCEPTANCE_REPORT" \
+  --resume-config "$CACHE_CONFIG" --completed-epochs 40 --background
+```
+
+构建器再次执行同一命令可验证并复用已提交episode；未完成临时目录会重建。
+全量生成及三个split打包结束后才发布 `manifest.json` 的 `complete/all`。
+`--diagnostic-episodes` 只生成诊断子集，不能用于正式训练或自动切换。
+验收支持 `--wait --builder-pid PID`，可与构建并行等待；构建提前退出会报告失败。
+已有数据物理数值验收不会重做。短窗口读取测速只代表I/O检查，不代表八卡整体吞吐。
+
+切换守护固定等待40轮完成，只通过自然 `last.ckpt` 链接确认原定保存已完成，
+不预读checkpoint内容。随后停止已确认身份的原训练进程组，等待旧DINO守护完成退出。
+若缓存尚未就绪，训练保持停止；完整缓存的独立验收通过后，
+以 `--resume` 从冻结的同一个40轮checkpoint启动一次八卡训练。
+保留AdamW、EMA、scheduler、epoch和global_step；batch256、24workers、LR1e-4、BF16、
+200轮及每20轮保存均保持原值，不额外保存checkpoint。
+保存边界后的少量未保存计算可能需要重做；不会丢失自然checkpoint中的已完成轮次。
+失败不自动重试。到保存点之前取消守护不会停止原训练；停下之后验收失败则保持停止，
+不会使用未通过验收的缓存启动。训练入口继续执行原有必要的续训兼容检查。
+
+监控文件：
+
+- 缓存构建：`training_cache/smplh245_5hz_w11_v1/progress.json`；初始化与索引阶段查看构建日志。
+- 构建job：`.pipeline/current_window_cache_job.json`。
+- 切换守护：`.pipeline/current_cache_transition.json`，内含 `daemon_log`、`log` 和切换状态；
+  `waiting_cache_after_stop` 表示40轮保存后已停止训练，等待缓存验收。
+- 训练：`training/current_run.json`；切换后更新为新进程身份及新训练日志。
+
+上述相对路径均位于 `/gaozt-test1/datasets/MixEgoMotion/`。停止切换守护不会停止已有或已续训的模型进程。
+
 ## 一步hidden与在线共享图像
 
 `forward_features()` 保留autograd，默认在高斯噪声 `t=1` 上执行一次条件模型调用：

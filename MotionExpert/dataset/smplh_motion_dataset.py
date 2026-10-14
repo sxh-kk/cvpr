@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..utils.task_conditioning import apply_task_conditioning
-from .representation import quaternion_matrix
+from .representation import MotionWindow, quaternion_matrix
 from .motion_layout import K12_JOINT_INDICES, SMPLH_REPRE_TYPE, motion_layout
 from .normalization import MotionNormalizer
 from .smplh_archive import SMPLHParameterArchive, PARAMETER_SCHEMA_VERSION, DINO_COLUMN
@@ -27,7 +28,7 @@ class SMPLHMotionDataset(Dataset):
                  contact_speed_m_s=.2, contact_height_m=.1, min_valid_image_fraction=0.,
                  train_task="fore", require_full_window=True, motion_supervision="joint",
                  allow_unpublished=False, episode_indices=None, vision_profile_root=None,
-                 image_profile=None, **legacy):
+                 image_profile=None, window_cache_root=None, **legacy):
         if cond_betas or bool(legacy.get("cond_text", False)):
             raise ValueError("SMPL-H beta16 is used only for source FK and audit metadata")
         if repre_type != SMPLH_REPRE_TYPE or img_feat_type != "dinov2_reg":
@@ -101,8 +102,23 @@ class SMPLHMotionDataset(Dataset):
                             for name, r in zip(self.seq_names, self.records)}
         self._seq_indices = {name: i for i, name in enumerate(self.seq_names)}
         self.idx_to_sidx_fidx, self.rejected_windows = [], {}
-        for sequence, record in enumerate(self.records):
-            self._index_record(sequence, record)
+        self.window_cache = None
+        if window_cache_root is not None:
+            from .window_cache import WindowCache, window_protocol
+            self.window_cache = WindowCache(
+                window_cache_root, archive=self.archive, split=self.split,
+                protocol=window_protocol(
+                    fps=self.fps, window=self.window, forecast_prefix=self.forecast_prefix,
+                    segment_stride=self.segment_stride, contact_speed_m_s=self.contact_speed_m_s,
+                    contact_height_m=self.contact_height_m, min_valid_image_fraction=self.min_valid_image_fraction),
+                allow_diagnostic=self.diagnostic, file_cache=parquet_file_cache)
+            if self.window_cache.records != self.records:
+                raise ValueError("Training window cache changes split episode membership or order")
+            self.idx_to_sidx_fidx = list(self.window_cache.idx_to_sidx_fidx)
+            self.rejected_windows = dict(getattr(self.window_cache, "rejected_windows", {}))
+        else:
+            for sequence, record in enumerate(self.records):
+                self._index_record(sequence, record)
         if not self.idx_to_sidx_fidx:
             raise ValueError(f"No usable complete SMPL-H windows in {split}; rejected={self.rejected_windows}")
         self.normalizer = MotionNormalizer(stats_path, clip=normalization_clip, allow_diagnostic=self.diagnostic) if self.do_normalization else None
@@ -205,7 +221,32 @@ class SMPLHMotionDataset(Dataset):
         return self.normalizer.denormalize(value, kind) if self.normalizer else torch.as_tensor(value).float()
 
     def __getitem__(self, index):
+        if self.window_cache is not None:
+            return self._get_cached_sample(int(index))
         return self.get_sample(index)
+
+    def assert_cache_current(self):
+        """Check immutable source/cache identities at the main-process epoch boundary."""
+        if self.window_cache is not None:
+            self.window_cache.assert_current()
+
+    def _get_cached_sample(self, index):
+        sequence, start = self.idx_to_sidx_fidx[index]
+        record = self.records[sequence]
+        payload = self.window_cache.read_window(sequence, start)
+        representation = MotionWindow(
+            payload["motion"], payload["motion_valid"], payload["trajectory"],
+            payload["trajectory_valid"], deepcopy(payload["metadata"]))
+        selected = np.asarray(payload["source_frame_indices"], dtype=np.int64)
+        historical_valid = np.asarray(payload["historical_image_valid"], dtype=bool)
+        arrays = {"frame_index": selected,
+                  "observation.valid.dino": np.r_[historical_valid, np.zeros(self.window - self.forecast_prefix, bool)]}
+        if self.cond_img_feat:
+            arrays[DINO_COLUMN] = np.zeros((self.window, 5120), np.float32)
+            arrays[DINO_COLUMN][:self.forecast_prefix] = self.window_cache.read_images(
+                record, selected[:self.forecast_prefix], valid=historical_valid).reshape(self.forecast_prefix, 5120)
+        return self._assemble_sample(record, self.seq_names[sequence], start, index,
+                                     arrays, representation, include_audit=False)
 
     def get_sample(self, index, task=None):
         sequence, start = self.idx_to_sidx_fidx[int(index)]
@@ -222,6 +263,9 @@ class SMPLHMotionDataset(Dataset):
                                                    fps=self.fps, forecast_prefix=self.forecast_prefix, load_dino=self.cond_img_feat)
         representation = build_smplh_window(arrays, metadata, task="fore", forecast_prefix=self.forecast_prefix,
                                              fps=self.fps, contact_speed_m_s=self.contact_speed_m_s, contact_height_m=self.contact_height_m)
+        return self._assemble_sample(record, seq_name, st, idx, arrays, representation, include_audit=True)
+
+    def _assemble_sample(self, record, seq_name, st, idx, arrays, representation, *, include_audit):
         if not representation.motion_valid[self.forecast_prefix:, :108].any():
             raise ValueError("SMPL-H forecast has no valid future body labels under prefix-floor policy")
         motion_valid = torch.from_numpy(representation.motion_valid.copy()).bool()
@@ -253,20 +297,22 @@ class SMPLHMotionDataset(Dataset):
                 "metadata_json": json.dumps(representation.metadata), "motion_nonfinite_mask": torch.zeros_like(motion_valid),
                 "traj_nonfinite_mask": torch.zeros(self.window, dtype=torch.bool), "discard_terrain": False}
         # Keep label provenance separate from model conditions and pseudo-truth.
-        for key in ("estimated.valid.body_position", "estimated.valid.body_rotation", "source.observed.body_position",
-                    "source.observed.body_rotation", "source.interpolated.body_position", "source.interpolated.body_rotation",
-                    "estimated.completed.body_position", "estimated.completed.body_rotation", "quality.position_confidence",
-                    "quality.rotation_confidence", "quality.observation_residual_m", "quality.observation_residual_valid"):
-            misc[key] = torch.from_numpy(arrays[key].copy())
-        for key in ("observation.state.hand_left_world", "observation.state.hand_right_world",
-                    "observation.valid.hand_left_position", "observation.valid.hand_right_position",
-                    "observation.interpolated.hand_left_position", "observation.interpolated.hand_right_position",
-                    "source.feet_world", "source.feet_valid", "source.feet_interpolated",
-                    "smplh.betas", "observation.state.body_world", "observation.state.body_world_rotation"):
-            misc[key] = torch.from_numpy(arrays[key].copy())
-        y = apply_task_conditioning(y, task or self.train_task, forecast_prefix=self.forecast_prefix,
+        if include_audit:
+            for key in ("estimated.valid.body_position", "estimated.valid.body_rotation", "source.observed.body_position",
+                        "source.observed.body_rotation", "source.interpolated.body_position", "source.interpolated.body_rotation",
+                        "estimated.completed.body_position", "estimated.completed.body_rotation", "quality.position_confidence",
+                        "quality.rotation_confidence", "quality.observation_residual_m", "quality.observation_residual_valid"):
+                misc[key] = torch.from_numpy(arrays[key].copy())
+            for key in ("observation.state.hand_left_world", "observation.state.hand_right_world",
+                        "observation.valid.hand_left_position", "observation.valid.hand_right_position",
+                        "observation.interpolated.hand_left_position", "observation.interpolated.hand_right_position",
+                        "source.feet_world", "source.feet_valid", "source.feet_interpolated",
+                        "smplh.betas", "observation.state.body_world", "observation.state.body_world_rotation"):
+                misc[key] = torch.from_numpy(arrays[key].copy())
+        y = apply_task_conditioning(y, self.train_task, forecast_prefix=self.forecast_prefix,
                                    supervise_history=self.motion_supervision == "joint")
-        self._assert_archive_current(record)
+        if include_audit:
+            self._assert_archive_current(record)
         return {"y": y, "misc": misc, "pred": {}}
 
     def process_sample_for_task(self, ret, task):

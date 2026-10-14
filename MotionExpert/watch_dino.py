@@ -1,6 +1,6 @@
 """One-shot Linux supervisor: completed native30Hz DINO -> eight-GPU training."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -173,7 +173,12 @@ def run_watch(cfg, *, job_dir, extraction_state, gpus, poll_seconds, stop,
     log = job_dir / "training.log"
     # A global lock serializes watchers; the trainer inherits it so stopping the
     # watcher after handoff cannot allow a second watcher to launch another run.
-    with locked(root / "training/.dino-to-motion.lock") as run_lock:
+    with ExitStack() as locks:
+        # Share the launch reservation with checkpoint-boundary handoffs. The
+        # reservation covers lock acquisition only; the inherited run lock
+        # remains held throughout this watcher and its training child.
+        with locked(root / "training/.launcher-reservation.lock"):
+            run_lock = locks.enter_context(locked(root / "training/.dino-to-motion.lock"))
         require_new_run(output)
         if any((job_dir / name).exists() for name in ("state.json", "config.yaml", "training.log")):
             raise FileExistsError("Use a new job directory; existing watcher state is immutable")

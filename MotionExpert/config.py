@@ -35,6 +35,7 @@ def smplh_motion_expert_config():
         STATS_PATH="/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint.pt", STATS_MODE="smplh_masked",
         NORMALIZATION_CLIP=None, ROW_GROUP_CACHE_MB=128, PARQUET_FILE_CACHE=8,
         VISION_PROFILE_ROOT=archive + "/vision_profiles/psi0_256x480_v1_30hz", IMAGE_PROFILE="256x480",
+        WINDOW_CACHE_ROOT=None,
         ROTATION_BASIS_PATH=None, ROTATION_BASIS_MODE="smplh_model_defined",
         TARGET_JOINT_BASIS="smplh_body22_axes_v1", REQUIRE_VERIFIED_ROTATIONS=True,
         MODEL_SHA256=SMPLH_MODEL_SHA256, SMPLH_MODEL_PATH=None,
@@ -84,6 +85,9 @@ def validate_architecture(cfg):
         raise ValueError("DATA.VISION_PROFILE_ROOT requires an explicit SMPL-H visual-cache directory")
     if image_profile is not None and (not isinstance(image_profile, str) or not image_profile.strip()):
         raise ValueError("DATA.IMAGE_PROFILE must be a shared image profile name or JSON path")
+    window_cache_root = getattr(cfg.DATA, "WINDOW_CACHE_ROOT", None)
+    if window_cache_root is not None and (not isinstance(window_cache_root, str) or not window_cache_root.strip()):
+        raise ValueError("DATA.WINDOW_CACHE_ROOT requires an explicit completed training-cache directory")
     dim, joints = MOTION_DIM, K12_JOINTS
     global_start, global_end = 108, 117
     expected = {
@@ -235,7 +239,7 @@ def load_config(path=None, *, data_dir=None):
         # This archive owns its split membership; relocating data relocates
         # that manifest too, rather than borrowing an old absolute path.
         cfg.DATA.SPLIT_MANIFEST = str(Path(cfg.DATA.ARCHIVE_ROOT) / "meta/splits.json")
-    for key in ("SPLIT_MANIFEST", "STATS_PATH", "ROTATION_BASIS_PATH", "SMPLH_MODEL_PATH", "VISION_PROFILE_ROOT"):
+    for key in ("SPLIT_MANIFEST", "STATS_PATH", "ROTATION_BASIS_PATH", "SMPLH_MODEL_PATH", "VISION_PROFILE_ROOT", "WINDOW_CACHE_ROOT"):
         value = getattr(cfg.DATA, key, None)
         if value:
             setattr(cfg.DATA, key, resolve(value))

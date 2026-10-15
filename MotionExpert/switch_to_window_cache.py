@@ -42,7 +42,8 @@ def _process_fields(pid):
         values = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
         if values[0] in {"Z", "X"}:
             return None
-        return {"parent": int(values[1]), "group": int(values[2])}
+        return {"parent": int(values[1]), "group": int(values[2]),
+                "session": int(values[3])}
     except (FileNotFoundError, ProcessLookupError):
         return None
 
@@ -218,10 +219,13 @@ def assert_original(plan):
     current = read_json(plan["current_run"])
     if current.get("trainer") != plan["trainer"] or current.get("pid") != plan["trainer"]["pid"]:
         raise RuntimeError("Current run was replaced; refusing to touch the frozen trainer")
-    if not process_alive(plan["trainer"]) or os.getpgid(plan["trainer"]["pid"]) != plan["pgid"]:
+    if (not process_alive(plan["trainer"])
+            or os.getpgid(plan["trainer"]["pid"]) != plan["pgid"]
+            or os.getsid(plan["trainer"]["pid"]) != plan["pgid"]):
         raise RuntimeError("Original training identity/session changed")
     for identity in plan["ranks"].values():
-        if not process_alive(identity) or os.getpgid(identity["pid"]) != plan["pgid"]:
+        if (not process_alive(identity) or os.getpgid(identity["pid"]) != plan["pgid"]
+                or os.getsid(identity["pid"]) != plan["pgid"]):
             raise RuntimeError("A frozen Lightning rank exited or changed identity/session")
     guardian = plan.get("guardian")
     if guardian is not None and process_alive(guardian):
@@ -234,8 +238,70 @@ def _group_alive(pgid):
                for path in Path("/proc").iterdir())
 
 
-def stop_original(plan, timeout=180):
-    """Terminate only the verified Lightning session, then wait for its guardian."""
+def _shutdown_members(plan):
+    """Snapshot identities in the verified, already frozen original session."""
+    members = {}
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        pid = int(path.name)
+        fields = _process_fields(pid)
+        if fields is None or fields["group"] != plan["pgid"]:
+            continue
+        if fields["session"] != plan["pgid"]:
+            raise RuntimeError("Original training group contains a different session")
+        identity = process_identity(pid)
+        if identity is not None:
+            members[pid] = identity
+    if any(members.get(identity["pid"]) != identity for identity in plan["ranks"].values()):
+        raise RuntimeError("Original Lightning rank identity changed before shutdown")
+    return members
+
+
+def _force_original_members(plan, members):
+    """Escalate through identity-bound pidfds; never kill a reused process group."""
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeError("Original training shutdown timed out; safe pidfd escalation is unavailable; "
+                           "manual cleanup is required and no new training was launched")
+    forced = []
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        pid = int(path.name)
+        fields = _process_fields(pid)
+        if fields is None or fields["group"] != plan["pgid"]:
+            continue
+        identity = members.get(pid)
+        if (identity is None or process_identity(pid) != identity
+                or fields["session"] != plan["pgid"]):
+            raise RuntimeError("Original session membership or identity changed; refusing forced shutdown")
+        try:
+            fd = os.pidfd_open(pid, 0)
+        except ProcessLookupError:
+            continue
+        try:
+            # Recheck after opening: the handle must refer to the frozen member,
+            # not a PID reused between the first identity check and pidfd_open.
+            current = process_identity(pid)
+            if current is None:
+                continue
+            current_fields = _process_fields(pid) or {}
+            if (current != identity or current_fields.get("session") != plan["pgid"]
+                    or current_fields.get("group") != plan["pgid"]):
+                raise RuntimeError("Original process identity changed while opening pidfd; refusing forced shutdown")
+            signal.pidfd_send_signal(fd, signal.SIGKILL, None, 0)
+            forced.append(identity)
+        except ProcessLookupError:
+            pass
+        finally:
+            os.close(fd)
+    return forced
+
+
+def stop_original(plan, timeout=180, *, force_timeout=30):
+    """Gracefully stop verified originals, then bound any safe forced cleanup."""
+    assert_original(plan)
+    members = _shutdown_members(plan)
     assert_original(plan)
     os.killpg(plan["pgid"], signal.SIGTERM)
     try:
@@ -244,15 +310,25 @@ def stop_original(plan, timeout=180):
         # All processes may already have honored TERM before CONT is sent.
         pass
     deadline = time.monotonic() + timeout
+    forced = []
     while _group_alive(plan["pgid"]):
         if time.monotonic() >= deadline:
-            raise RuntimeError("Original training session did not exit; no new training was launched")
+            forced = _force_original_members(plan, members)
+            force_deadline = time.monotonic() + force_timeout
+            while _group_alive(plan["pgid"]):
+                if time.monotonic() >= force_deadline:
+                    raise RuntimeError("Original training session survived forced shutdown; "
+                                       "manual cleanup is required and no new training was launched")
+                time.sleep(.1)
+            break
         time.sleep(.1)
     guardian = plan.get("guardian")
+    deadline = time.monotonic() + timeout
     while guardian is not None and process_alive(guardian):
         if time.monotonic() >= deadline:
             raise RuntimeError("Original guardian has not completed its final pointer write")
         time.sleep(.1)
+    return {"termination": "sigkill" if forced else "sigterm", "forced_processes": forced}
 
 
 def prepare_plan(pointer, cache_root, acceptance, job_dir, resume_config=None):
@@ -263,7 +339,7 @@ def prepare_plan(pointer, cache_root, acceptance, job_dir, resume_config=None):
     if trainer is None or trainer != process_identity(current.get("pid", -1)):
         raise ValueError("Current trainer PID identity is no longer valid")
     pid = trainer["pid"]
-    if os.getpgid(pid) != pid:
+    if os.getpgid(pid) != pid or os.getsid(pid) != pid:
         raise ValueError("Current Lightning trainer must own an isolated session")
     guardian = current.get("watcher")
     if guardian is not None and not process_alive(guardian):
@@ -320,7 +396,7 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
              "log": str(job / "training.log"), "daemon_log": str(job / "daemon.log"),
              "checkpoint_inspection": "natural_last_symlink_and_filename_only"}
     last_publish = 0.
-    owns_pointer, frozen, old_stopped = False, False, False
+    owns_pointer, frozen, old_stopped, shutdown_started = False, False, False, False
     child = None
     acceptance_stamps, acceptance_result = None, None
 
@@ -469,8 +545,10 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
                     if stop.is_set():
                         os.killpg(plan["pgid"], signal.SIGCONT); frozen = False
                         return cancelled()
-                    publish("stopping_original", reason=f"Accepted cache and recent natural {boundary}-epoch save are ready")
-                    shutdown(plan)
+                    shutdown_started = True
+                    publish("stopping_original", training_running=False, original_shutdown_started=True,
+                            reason=f"Accepted cache and recent natural {boundary}-epoch save are ready")
+                    state["shutdown_result"] = shutdown(plan)
                     old_stopped, frozen = True, False
                     atomic_json(job / "previous-run-final.json", read_json(plan["current_run"]))
                     run_lock = resume_locks.enter_context(locked(root / "training/.dino-to-motion.lock"))
@@ -499,16 +577,28 @@ def run_switch(plan, *, poll_seconds=.5, stop=None, launch=subprocess.Popen,
                 return 0 if code == 0 else 1
         return cancelled()
     except Exception as error:
-        if frozen and any(process_alive(identity) for identity in plan["ranks"].values()):
+        if frozen and any(process_alive(identity)
+                          and (_process_fields(identity["pid"]) or {}).get("session") == plan["pgid"]
+                          and (_process_fields(identity["pid"]) or {}).get("group") == plan["pgid"]
+                          for identity in plan["ranks"].values()):
             try:
                 os.killpg(plan["pgid"], signal.SIGCONT)
             except ProcessLookupError:
                 pass
+        remaining = [identity for identity in plan["ranks"].values() if process_alive(identity)]
+        original_running = (not shutdown_started and len(remaining) == len(plan["ranks"])
+                            and all((_process_fields(identity["pid"]) or {}).get("session") == plan["pgid"]
+                                    and (_process_fields(identity["pid"]) or {}).get("group") == plan["pgid"]
+                                    for identity in remaining))
+        reason = ("Transition failed during original training shutdown; manual cleanup is required; "
+                  "no new training was launched" if shutdown_started and not old_stopped else
+                  "Transition failed after the saved boundary; no automatic retry" if old_stopped else
+                  "Transition failed before stopping; original training continues" if original_running else
+                  "Transition failed before stopping; original training is no longer intact")
         publish("failed", error=f"{type(error).__name__}: {error}",
-                training_running=(child is not None and child.poll() is None) or
-                                 (not old_stopped and process_alive(plan["trainer"])),
-                reason=("Transition failed after the saved boundary; no automatic retry" if old_stopped
-                        else "Transition failed before stopping; original training continues"))
+                training_running=(child is not None and child.poll() is None) or original_running,
+                original_shutdown_started=shutdown_started, original_shutdown_complete=old_stopped,
+                remaining_original_ranks=remaining, reason=reason)
         raise
 
 

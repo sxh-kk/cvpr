@@ -361,3 +361,118 @@ def test_completed_unsaved_epoch_is_not_allowed_as_microsteps(setup):
     assert switch.recent_boundary(checkpoint, 40, progress)
     progress.update(epoch=39, batch=488)
     assert switch.recent_boundary(checkpoint, 40, progress)
+
+
+def _fake_pidfds(monkeypatch, *, opened=None):
+    """Exercise pidfd control flow on Python builds lacking these Linux APIs."""
+    handles, signals = {}, []
+    def open_pid(pid, flags):
+        assert flags == 0
+        fd = os.open(os.devnull, os.O_RDONLY)
+        handles[fd] = pid
+        if opened is not None:
+            opened(pid)
+        return fd
+    def send_signal(fd, signum, siginfo, flags):
+        assert siginfo is None and flags == 0
+        signals.append((handles[fd], signum))
+        # Only harmless CPU sessions created by the fixture are used here.
+        os.kill(handles[fd], signum)
+    monkeypatch.setattr(os, "pidfd_open", open_pid, raising=False)
+    monkeypatch.setattr(signal, "pidfd_send_signal", send_signal, raising=False)
+    return signals
+
+
+def test_stop_original_term_completes_without_escalation(setup):
+    plan, old, _ = setup
+    result = switch.stop_original(plan, timeout=1, force_timeout=.1)
+    assert old.wait(timeout=1) == -signal.SIGTERM
+    assert result == {"termination": "sigterm", "forced_processes": []}
+    assert not switch._group_alive(plan["pgid"])
+
+
+def test_stop_original_timeout_forces_only_verified_old_members(setup, monkeypatch):
+    plan, old, children = setup
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"],
+                                 start_new_session=True)
+    children.append(unrelated)
+    original_killpg = os.killpg
+    def ignore_term(pgid, signum):
+        if signum != signal.SIGTERM:
+            original_killpg(pgid, signum)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "killpg", ignore_term)
+        signals = _fake_pidfds(patch)
+        result = switch.stop_original(plan, timeout=.01, force_timeout=1)
+    assert old.wait(timeout=1) == -signal.SIGKILL
+    assert signals == [(old.pid, signal.SIGKILL)]
+    assert result == {"termination": "sigkill", "forced_processes": [plan["trainer"]]}
+    assert unrelated.poll() is None
+
+
+@pytest.mark.parametrize("changed_after_open", [False, True])
+def test_force_refuses_pid_identity_change(setup, monkeypatch, changed_after_open):
+    plan, old, _ = setup
+    members = switch._shutdown_members(plan)
+    original_identity = switch.process_identity
+    changed = [] if changed_after_open else [True]
+    signals = _fake_pidfds(monkeypatch, opened=lambda _: changed.append(True))
+    def identity(pid):
+        value = original_identity(pid)
+        if pid == old.pid and changed:
+            return {**value, "start_ticks": "reused"}
+        return value
+    with monkeypatch.context() as patch:
+        patch.setattr(switch, "process_identity", identity)
+        with pytest.raises(RuntimeError, match="identity changed"):
+            switch._force_original_members(plan, members)
+    assert signals == [] and old.poll() is None
+
+
+def test_force_refuses_unrecorded_old_group_member(setup, monkeypatch):
+    plan, old, _ = setup
+    signals = _fake_pidfds(monkeypatch)
+    with pytest.raises(RuntimeError, match="membership or identity changed"):
+        switch._force_original_members(plan, {})
+    assert signals == [] and old.poll() is None
+
+
+def test_force_without_pidfd_requires_manual_cleanup(setup, monkeypatch):
+    plan, old, _ = setup
+    members = switch._shutdown_members(plan)
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+    with pytest.raises(RuntimeError, match="safe pidfd escalation is unavailable; manual cleanup"):
+        switch._force_original_members(plan, members)
+    assert old.poll() is None
+
+
+def test_partial_shutdown_failure_does_not_claim_training_continues(setup):
+    plan, old, _ = setup
+    _publish_boundary(plan, 40)
+    def fail_shutdown(plan):
+        raise RuntimeError("shutdown timeout; simulated surviving rank")
+    with pytest.raises(RuntimeError, match="shutdown timeout"):
+        switch.run_switch(plan, poll_seconds=.01, shutdown=fail_shutdown)
+    state = switch.read_json(Path(plan["job_dir"]) / "state.json")
+    assert state["state"] == "failed" and state["training_running"] is False
+    assert state["original_shutdown_started"] is True
+    assert state["original_shutdown_complete"] is False
+    assert state["remaining_original_ranks"] == [plan["trainer"]]
+    assert "manual cleanup" in state["reason"] and "continues" not in state["reason"]
+    assert old.poll() is None
+
+
+def test_shutdown_failure_after_term_records_no_remaining_rank(setup):
+    plan, old, _ = setup
+    _publish_boundary(plan, 40)
+    def fail_after_term(plan):
+        switch.stop_original(plan, timeout=1)
+        raise RuntimeError("old guardian final write timed out")
+    with pytest.raises(RuntimeError, match="guardian final write"):
+        switch.run_switch(plan, poll_seconds=.01, shutdown=fail_after_term)
+    state = switch.read_json(Path(plan["job_dir"]) / "state.json")
+    assert state["training_running"] is False and state["remaining_original_ranks"] == []
+    assert state["original_shutdown_started"] is True
+    assert "during original training shutdown" in state["reason"]
+    assert old.poll() is not None

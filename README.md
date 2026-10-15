@@ -14,7 +14,8 @@ MotionExpert、共享图像处理和 DINO 特征提取代码。VLMExpert 保留�
 保留两来源 SMPL-H 参数、双手21点、相机、地面、各自 mask、原分割和自有模型。
 旧dense派生数据、此前废弃的DINO与早期实验checkpoint已清理；本次训练产物保留。
 新全量train统计为 `/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_fit-quality-v3.pt`；
-旧统计与本次已有checkpoint保持保留，修订后不能直接复用旧归一化续训。
+旧统计与本次已有checkpoint保持保留。第60轮EMA可通过显式热启动接入新数据和新统计，
+旧归一化与优化器状态不迁入；原有完整续训仍要求相同统计。
 
 新视觉版本采用 `dinov2-with-registers-large`，每帧 CLS＋4 register，即5×1024。
 当前DINO提取使用八卡、BF16、每进程batch128、每卡2进程；输出仍存float32，原生30Hz。
@@ -26,7 +27,9 @@ MotionExpert 的当前帧与 Ψ₀ 当前帧相同，MotionExpert 额外读取�
 自动启动八卡从头训练；完成计数、mask约定、提取进程退出和缓存锁释放均满足才交接。
 守护固定配置快照，记录状态／日志，拒绝重复启动及覆写已有训练目录；
 完整命令与监控方式见 [MotionExpert README](MotionExpert/README.md#dino完成后自动启动八卡训练)。
-训练保留8卡、每卡batch256、每卡24workers、LR1e-4、BF16、200轮、每20轮保存。
+训练保留8卡、每卡batch256、每卡24workers、基础LR1e-4、BF16、每20轮保存。
+从零配置为200轮；本次计划从第60轮EMA热启动，再训140轮，使用新的140轮cosine与20轮warmup。
+配置与手动启动命令见 [第60轮热启动](MotionExpert/README.md#第60轮权重热启动)。本轮仅实现与验收，未启动正式训练。
 本次双来源最终FK质量修订复用已有DINO，修订处理不会自动启动训练。
 
 MotionExpert支持固定5Hz／11帧的运动窗口mmap缓存，将245维运动、18维轨迹、mask与解码变换

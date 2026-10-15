@@ -1,6 +1,7 @@
 """Training and sampling for K12 body, reference motion, explicit hands and contacts."""
 
 import math
+from copy import deepcopy
 from collections.abc import Mapping
 import pytorch_lightning as pl
 import torch
@@ -59,7 +60,8 @@ def _training_phase_for_model_config(model_config):
         raise ValueError("Incomplete MotionExpert training phase configuration")
     if origin is _MISSING:
         # CKPT_PATH resumes a run; it says nothing about how that run started.
-        origin = "weights_init" if _config_value(model_config, "INIT_CKPT_PATH") else "from_scratch"
+        origin = "weights_init" if (_config_value(model_config, "INIT_CKPT_PATH")
+                                    or _config_value(model_config, "WARM_START_CKPT_PATH")) else "from_scratch"
         epoch = requested_epoch if origin == "weights_init" else 0
     phase = _validate_training_phase({"format": TRAINING_PHASE_FORMAT, "origin": origin,
                                       "effective_shared_unfreeze_epoch": epoch})
@@ -111,6 +113,7 @@ class UEM_Module(pl.LightningModule):
         self.model = UniEgoMotion(cfg)
         from ..dataset.normalization import MotionNormalizer
         self.normalizer = MotionNormalizer(cfg.DATA.STATS_PATH, clip=cfg.DATA.NORMALIZATION_CLIP)
+        self.warm_start_provenance = None
         self.flow = FlowMatching(
             num_steps=cfg.FLOW.NUM_STEPS, solver=cfg.FLOW.SOLVER,
             beta_alpha=cfg.FLOW.BETA_ALPHA, beta_beta=cfg.FLOW.BETA_BETA,
@@ -403,6 +406,8 @@ class UEM_Module(pl.LightningModule):
         checkpoint["motionexpert_normalization_clip"] = self.normalizer.clip
         checkpoint["motionexpert_training_phase"] = _training_phase_for_model_config(self.cfg.MODEL)
         checkpoint["motionexpert_visual_conditioning"] = training_visual_contract(self.cfg)
+        if self.warm_start_provenance is not None:
+            checkpoint["motionexpert_warm_start"] = deepcopy(self.warm_start_provenance)
 
     def on_load_checkpoint(self, checkpoint):
         validate_checkpoint_architecture(self.cfg, checkpoint)
@@ -410,6 +415,12 @@ class UEM_Module(pl.LightningModule):
         validate_checkpoint_statistics(self.cfg, checkpoint, self.normalizer)
         if training_phase_from_checkpoint(checkpoint) != _training_phase_for_model_config(self.cfg.MODEL):
             raise ValueError("Checkpoint training phase does not match the resolved resume phase")
+        provenance = checkpoint.get("motionexpert_warm_start")
+        if provenance is not None:
+            from ..warm_start import WARM_START_FORMAT
+            if not isinstance(provenance, Mapping) or provenance.get("format") != WARM_START_FORMAT:
+                raise ValueError("Invalid checkpoint warm-start provenance")
+        self.warm_start_provenance = deepcopy(provenance)
 
     def on_validation_epoch_start(self):
         self._validation_source_metrics = {}

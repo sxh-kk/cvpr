@@ -53,6 +53,8 @@ def smplh_motion_expert_config():
     )
     model = _ns(
         MODEL_NAME="uem", CKPT_PATH=None, INIT_CKPT_PATH=None,
+        WARM_START_CKPT_PATH=None, WARM_START_WEIGHTS="ema",
+        WARM_START_EXPECTED_COMPLETED_EPOCHS=None, WARM_START_SHA256=None,
         GENERATIVE_TYPE="flow", LEARN_TRAJ=False, ENCODER_TSFM=None,
         MOTION_EXPERT=expert, OUTPUT_BRANCH_MODE="single", ZERO_MASK_TOKEN=False,
         PREDICT_XSTART=True, GLOBAL_TOKEN_COUNT=1,
@@ -245,7 +247,8 @@ def load_config(path=None, *, data_dir=None):
             setattr(cfg.DATA, key, resolve(value))
     if cfg.DATA.IMAGE_PROFILE and cfg.DATA.IMAGE_PROFILE not in {"256x480", "256x320"}:
         cfg.DATA.IMAGE_PROFILE = resolve(cfg.DATA.IMAGE_PROFILE)
-    for section, key in ((cfg.MODEL, "INIT_CKPT_PATH"), (cfg.MODEL, "CKPT_PATH"), (cfg.TRAIN, "EXP_PATH")):
+    for section, key in ((cfg.MODEL, "INIT_CKPT_PATH"), (cfg.MODEL, "CKPT_PATH"),
+                         (cfg.MODEL, "WARM_START_CKPT_PATH"), (cfg.TRAIN, "EXP_PATH")):
         value = getattr(section, key, None)
         if value:
             setattr(section, key, resolve(value))

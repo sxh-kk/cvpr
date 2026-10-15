@@ -72,7 +72,8 @@ SMPL-H参数、双手XYZ、相机、模型与图像join保留；本次拟合监�
 显式添加 `--allow-visual-adaptation` 可允许共享RGB尺寸profile变化，DINO身份仍必须匹配；
 输出会记录训练视觉版本、实际缓存版本及适配声明。在线后训练的 `forward_features()` 支持两种尺寸。
 
-唯一正式预训练配置：[smplh_k12_psi0_pretrain.yaml](configs/smplh_k12_psi0_pretrain.yaml)。
+从零预训练配置：[smplh_k12_psi0_pretrain.yaml](configs/smplh_k12_psi0_pretrain.yaml)。
+本次第60轮热启动使用 [smplh_k12_psi0_warmstart_epoch60.yaml](configs/smplh_k12_psi0_warmstart_epoch60.yaml)，见下方专节。
 
 | 参数 | 设置 |
 | --- | --- |
@@ -103,6 +104,49 @@ Lightning按配置启动8卡DDP，无需另套torchrun。输出为
 这些是DINO提取参数，MotionExpert每卡训练batch仍为256。DINO命令见 [pipeline README](../pipeline/README.md)。
 续训默认沿用checkpoint学习率；如设置 `TRAIN.USE_CKPT_LR: false`，新学习率会在当前调度阶段生效，
 并同步更新scheduler基准，保留已完成的epoch与step。
+
+### 第60轮权重热启动
+
+本次使用第60轮checkpoint的EMA网络权重，接入v3数据、已有DINO和新全量train统计。
+来源为 `training/smplh_k12_psi0_256x480_5hz_from_scratch/epoch=59-step=29280.ckpt`，
+配置固定完成轮数60与文件SHA256，加载前验证完整网络tensor的名称、形状、dtype及有限性。
+EMA按原优化器的routed／unfrozen组顺序映射，缺失或错误EMA直接拒绝，不回退到raw权重。
+
+`--warm-start` 允许归档质量版本和统计数值改变，仍严格核对架构、SMPL-H模型、K12、
+坐标／6D旋转、5Hz窗口、原train/val/test分割、clipping和DINO／图像处理身份。
+当前数据与新统计仍通过正常DataModule验收，不跳过已有归档与缓存校验。
+仅加载网络state_dict；normalizer是独立对象，保留新统计。权重数值不进行仿射换算，
+新阶段继续优化以适应新归一化分布，不声明加载前后的物理预测完全等价。
+
+新AdamW、EMA和调度器重新建立，不恢复旧moments、EMA计数、RNG或Lightning循环状态。
+所有参数立即参与训练，新epoch和global_step从0开始；来源60轮与29280 step只作为溯源记录。
+新阶段140轮，加上来源60轮累计200轮；仍每卡256、8卡、24workers、BF16，基础LR1e-4。
+保留20轮warmup，因此初始有效LR为5e-6，20轮内达到1e-4，再按140轮cosine降至1e-5。
+每20个新epoch保存一次，结束保存final；保存频率不增加。
+
+下列为验收后手动启动的命令，本次实现和GPU检查不会自动执行正式训练：
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python \
+  -m MotionExpert.train \
+  --config MotionExpert/configs/smplh_k12_psi0_warmstart_epoch60.yaml
+```
+
+该配置已经声明warm-start来源，不要再添加 `--from-scratch` 或指向旧checkpoint的 `--resume`。
+输出为 `training/smplh_k12_psi0_256x480_5hz_fit_quality_v3_warmstart_epoch60`，保留在MixEgoMotion根目录。
+`warm_start.json` 和新checkpoint的 `motionexpert_warm_start` 保存来源SHA、新旧统计身份、
+权重选择及状态重置声明。之后恢复新任务使用 `--resume 新任务checkpoint`，保持原有严格统计校验，
+不会再次加载第60轮权重。显式选择raw权重可加 `--warm-start-weights raw`；更换来源还须更新配置中的预期轮数和SHA。
+
+2026-10-15热启动验收通过：54项新增CPU测试、22项相关训练／续训回归通过；
+单卡A100／BF16、batch256真实新数据连续3步，loss为0.121663／0.113736／0.112951，
+参数更新、完整Gaussian `t=1`、hidden反传及10步采样均通过。
+八卡每卡batch8连续3步，初始权重和每步完整1062个state tensor的SHA跨卡一致。
+八卡短检用于初始化与同步验证；正式batch256×8的吞吐和长期收敛未在本轮重新测试。
+验收报告位于MixEgoMotion的 `.pipeline/jobs/warmstart-epoch60-v3-20261015T145909685575Z/gpu-acceptance.json`；
+临时批次已删除，未保存测试checkpoint，正式训练未启动。
 
 ### DINO完成后自动启动八卡训练
 
@@ -321,7 +365,8 @@ batch64的5步真实更新、一步hidden反传和采样均通过。该检查未
 统计全扫拒绝任何NaN／Inf，包含mask无效通道，并定位到episode、窗口、帧和维度。
 新统计输出存在时拒绝覆盖。新旧checkpoint的归一化与archive fingerprint仍严格检查，
 旧第40／60／100轮不能直接搭配新统计使用 `--resume` 或 `--init-weights`。
-从旧权重开启新训练需要另行显式适配，不能跳过检查宣称兼容；当前正式命令使用 `--from-scratch`。
+从旧权重开启新训练使用上方显式 `--warm-start` 入口；第60轮专用配置加载EMA、保留新统计并重建训练状态。
+从零训练仍使用 `--from-scratch`，两个入口不放宽原有严格resume／init-weights检查。
 
 本次修订状态在 `.pipeline/current_final_fit_quality.json`，完整日志和验收报告位于其job目录。
 原 `current_hm_quality_revision.json` 保留v2流程记录。旧自然100轮停止状态在

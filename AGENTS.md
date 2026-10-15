@@ -47,6 +47,7 @@
 - 训练目标为经过双来源最终FK质量修订的SMPL-H参数归档：
   `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality`
 - 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1/v2与现有checkpoint保留追溯。
+- 当前计划用第60轮EMA权重热启动v3与新统计，再训140轮；新epoch/step从0计数，重建AdamW、EMA与140轮调度，保留20轮warmup。使用专用warmstart_epoch60配置；本轮只验收，不启动正式训练。
 - 保留双手各21点、相机轨迹、地面、有效 mask 和原始分割。
 - MotionExpert 使用5Hz、11帧：
   历史5帧＋当前帧，预测未来5帧。

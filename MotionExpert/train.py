@@ -1,6 +1,7 @@
 """Train or resume sparse K12 motion with explicit hand supervision."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .dataset.data_module import SMPLHMotionDataModule
 from .ema import EMA
 from .module.uem_module import UEM_Module, restore_training_phase
 from .precision import trainer_precision_options
+from .warm_start import apply_warm_start
 
 
 class PeriodicModelCheckpoint(ModelCheckpoint):
@@ -28,18 +30,27 @@ class PeriodicModelCheckpoint(ModelCheckpoint):
             super()._save_last_checkpoint(trainer, monitor_candidates)
 
 
-def configure_initialization(cfg, *, resume=None, init_weights=None, from_scratch=False):
+def configure_initialization(cfg, *, resume=None, init_weights=None, warm_start=None, from_scratch=False):
     """Explicit CLI initialization takes priority over configured checkpoints."""
-    if sum((resume is not None, init_weights is not None, bool(from_scratch))) > 1:
-        raise ValueError("Choose one of resume, init_weights and from_scratch")
-    if from_scratch or init_weights is not None:
+    explicit = sum((resume is not None, init_weights is not None, warm_start is not None, bool(from_scratch)))
+    if explicit > 1:
+        raise ValueError("Choose one of resume, init_weights, warm_start and from_scratch")
+    if not explicit and sum(bool(getattr(cfg.MODEL, name, None)) for name in
+                            ("CKPT_PATH", "INIT_CKPT_PATH", "WARM_START_CKPT_PATH")) > 1:
+        raise ValueError("Configured initialization paths must be mutually exclusive")
+    if from_scratch or init_weights is not None or warm_start is not None:
         cfg.MODEL.CKPT_PATH = None
         cfg.MODEL.INIT_CKPT_PATH = str(Path(init_weights).resolve()) if init_weights is not None else None
+        cfg.MODEL.WARM_START_CKPT_PATH = str(Path(warm_start).resolve()) if warm_start is not None else None
     else:
         resume = resume or cfg.MODEL.CKPT_PATH
         cfg.MODEL.CKPT_PATH = str(Path(resume).resolve()) if resume else None
         if resume:
             cfg.MODEL.INIT_CKPT_PATH = None
+            cfg.MODEL.WARM_START_CKPT_PATH = None
+    if sum(bool(getattr(cfg.MODEL, name, None)) for name in
+           ("CKPT_PATH", "INIT_CKPT_PATH", "WARM_START_CKPT_PATH")) > 1:
+        raise ValueError("Configured initialization paths must be mutually exclusive")
     # A new run must infer its own origin; resume restores the original below.
     for name in ("TRAINING_ORIGIN", "EFFECTIVE_SHARED_UNFREEZE_EPOCH"):
         if hasattr(cfg.MODEL, name):
@@ -63,7 +74,9 @@ def main():
     init = parser.add_mutually_exclusive_group()
     init.add_argument("--resume", type=Path)
     init.add_argument("--init-weights", type=Path)
+    init.add_argument("--warm-start", type=Path, help="Transfer weights across an audited quality/statistics revision")
     init.add_argument("--from-scratch", action="store_true")
+    parser.add_argument("--warm-start-weights", choices=("ema", "raw"))
     parser.add_argument("--fast-dev-run", action="store_true")
     parser.add_argument("--limit-train-batches", type=int)
     parser.add_argument("--limit-val-batches", type=int)
@@ -93,7 +106,12 @@ def main():
     if args.global_weight is not None:
         cfg.FLOW.GLOBAL_WEIGHT = args.global_weight
     resume = configure_initialization(cfg, resume=args.resume, init_weights=args.init_weights,
+                                      warm_start=args.warm_start,
                                       from_scratch=args.from_scratch)
+    if args.warm_start_weights:
+        if not cfg.MODEL.WARM_START_CKPT_PATH:
+            parser.error("--warm-start-weights requires a warm-start checkpoint")
+        cfg.MODEL.WARM_START_WEIGHTS = args.warm_start_weights
     validate_architecture(cfg)
     if resume:
         checkpoint = read_checkpoint(cfg.MODEL.CKPT_PATH)
@@ -118,6 +136,8 @@ def main():
         validate_checkpoint_statistics(cfg, checkpoint, model.normalizer)
         model.model.load_state_dict(model_state(model.model, checkpoint), strict=True)
         del checkpoint
+    if cfg.MODEL.WARM_START_CKPT_PATH:
+        apply_warm_start(model)
     gpu_count = int(cfg.TRAIN.NUM_GPUS)
     if gpu_count < 0 or gpu_count > torch.cuda.device_count():
         raise ValueError(f"Requested {gpu_count} GPUs, available: {torch.cuda.device_count()}; use --devices 0 for CPU")
@@ -149,6 +169,8 @@ def main():
     )
     if trainer.is_global_zero:
         (output / "config.yaml").write_text(yaml.safe_dump(as_dict(cfg), sort_keys=False), encoding="utf-8")
+        if model.warm_start_provenance is not None:
+            (output / "warm_start.json").write_text(json.dumps(model.warm_start_provenance, indent=2) + "\n", encoding="utf-8")
     trainer.fit(model, datamodule=dm, ckpt_path=cfg.MODEL.CKPT_PATH)
     if not args.fast_dev_run:
         final_path = output / "final.ckpt"

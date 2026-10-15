@@ -1,7 +1,10 @@
 # MixEgoMotion：当前数据与 DINO 提取
 
 当前 pipeline 只负责从已验收的 SMPL-H 运动归档和原始相机视频提取新 DINO 特征。
-历史 dense 转换、拟合实验、迁移和全量数值审计脚本已清理；正式运动归档保持原样。
+历史 dense 转换、拟合实验、迁移和全量数值审计脚本已清理。
+当前训练目标为 `smplh-parameters-v3-fit-quality`，运动质量修订由MotionExpert负责，
+已提取的原生30Hz DINO及join复用相同字节，不需要为运动mask修订重新提取。
+原v1/v2目录保留追溯，正式训练与下方示例均使用v3路径。
 
 ## 保留的数据
 
@@ -9,7 +12,7 @@
 
 ```text
 MixEgoMotion/
-├── smplh-parameters-v1/
+├── smplh-parameters-v3-fit-quality/
 │   ├── meta/                  # info、episode索引、train/val/test分割
 │   ├── episodes/XXXXXXXX/
 │   │   ├── motion.parquet     # 原生30Hz运动参数与显式标签
@@ -17,7 +20,7 @@ MixEgoMotion/
 │   ├── weights/smplh/         # 自有共同人体模型与手部表示资源
 │   ├── .pipeline/             # 提交记录、验收证据、旧视觉退休清单
 │   └── vision_profiles/psi0_256x480_v1_30hz/  # 重新提取后生成
-├── statistics/smplh_k12_5hz_joint.pt         # 已验收全量train统计
+├── statistics/smplh_k12_5hz_joint_fit-quality-v3.pt         # 已验收全量train统计
 ├── weights/dinov2-with-registers-large/     # 保留DINO预训练权重
 ├── .pipeline/runtimes/                     # 现有提取／训练环境
 └── training/                               # 新训练产物
@@ -88,7 +91,8 @@ vision_profiles/psi0_256x480_v1_30hz/
 ## 全量提取命令
 
 从仓库根目录执行。当前环境和预训练权重已就绪，无需重新下载。
-输出目录此前不存在；以下命令会开始全量提取，约781GB float32特征，另加少量join和凭证。
+本次运动质量修订复用已有完整视觉缓存，不需要执行以下命令。
+以下为另行重提取任务的命令示例，完整数据约781GB float32特征，另加join和凭证；同命令恢复只复用匹配来源和配置的产物。
 CLI固定原生30Hz，无需指定fps。当前选定BF16、每进程batch128、每卡2个DINO进程，8卡共16个进程。
 每个进程保留8个PIL预处理线程、4个解码线程和2批预取；输出仍为float32。
 八卡真实视频对照约1,370～1,419帧/秒，原TF32／batch32／每卡1进程约1,061帧/秒。
@@ -101,8 +105,8 @@ cd /root/workspace/wbc/guanzerong/cvpr
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 /gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/dino-torch260-cu118/bin/python \
   -m egomotion_pipeline.cli extract-smplh-features \
-  --dataset /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1 \
-  --output /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/vision_profiles/psi0_256x480_v1_30hz \
+  --dataset /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality \
+  --output /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality/vision_profiles/psi0_256x480_v1_30hz \
   --config pipeline/configs/dino.local.json \
   --gpus 0 1 2 3 4 5 6 7 \
   --workers-per-gpu 2

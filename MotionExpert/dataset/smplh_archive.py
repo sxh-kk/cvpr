@@ -310,8 +310,9 @@ class SMPLHParameterArchive:
         revision = "quality_revision" in self.info
         if revision and not self.allow_unpublished:
             from .revision_acceptance import REVISION_FORMAT
+            from .fit_revision_acceptance import REVISION_FORMAT as FIT_REVISION_FORMAT
             declaration = self.info["quality_revision"]
-            if not isinstance(declaration, dict) or declaration.get("format") != REVISION_FORMAT:
+            if not isinstance(declaration, dict) or declaration.get("format") not in {REVISION_FORMAT, FIT_REVISION_FORMAT}:
                 raise ValueError("SMPL-H quality revision declaration is invalid")
             if not isinstance(report_path, str) or not report_path:
                 raise ValueError("SMPL-H quality revisions require owned independent acceptance")
@@ -334,9 +335,16 @@ class SMPLHParameterArchive:
         if not isinstance(report, dict):
             raise ValueError("SMPL-H full acceptance report must be a mapping")
         from .revision_acceptance import ACCEPTANCE_FORMAT, check_revision_acceptance
+        from .fit_revision_acceptance import (ACCEPTANCE_FORMAT as FIT_ACCEPTANCE_FORMAT,
+                                              check_fit_revision_acceptance)
+        if report.get("format") == FIT_ACCEPTANCE_FORMAT:
+            if not revision or self.info["quality_revision"].get("format") != "smplh-fit-quality-revision-v1":
+                raise ValueError("SMPL-H final-FK acceptance requires its declared quality revision")
+            check_fit_revision_acceptance(self, report, path)
+            return
         if report.get("format") == ACCEPTANCE_FORMAT:
-            if not revision:
-                raise ValueError("SMPL-H revision acceptance requires a declared quality revision")
+            if not revision or self.info["quality_revision"].get("format") != "smplh-hm-quality-revision-v1":
+                raise ValueError("SMPL-H revision acceptance requires its declared quality revision")
             check_revision_acceptance(self, report, path)
             return
         if revision:

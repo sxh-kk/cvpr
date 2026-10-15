@@ -57,6 +57,18 @@ def check_computation(previous_binding, current_binding, previous_source):
             raise ValueError(f"Unchanged-shard reuse requires identical {key}")
 
 
+def check_archive_info(previous_info, current_info):
+    """Allow only a new revision declaration over the same archive schema."""
+    before, after = deepcopy(previous_info), deepcopy(current_info)
+    parent_revision = before.pop("quality_revision", None)
+    revision = after.pop("quality_revision", None)
+    if before != after:
+        raise ValueError("Only the declared quality revision may change archive information")
+    if parent_revision is not None and (not isinstance(revision, dict)
+            or revision.get("parent_revision") != parent_revision):
+        raise ValueError("Revised archive does not preserve its exact parent revision declaration")
+
+
 def _owned_file(root, relative):
     root, relative = Path(root).resolve(strict=True), Path(relative)
     if relative.is_absolute() or ".." in relative.parts:
@@ -258,10 +270,7 @@ def main():
         old_info = old_archive / "meta/info.json"
         if file_sha256(old_info) != manifest["binding"]["archive_binding"]["info_sha256"]:
             raise ValueError("Previous archive information changed")
-        current_info = deepcopy(archive.info)
-        current_info.pop("quality_revision", None)
-        if json.loads(old_info.read_text()) != current_info:
-            raise ValueError("Only the declared quality revision may change archive information")
+        check_archive_info(json.loads(old_info.read_text()), archive.info)
         for key in ("model_sha256", "hand_basis_sha256", "split_metadata_sha256"):
             if manifest["binding"]["archive_binding"][key] != binding["archive_binding"][key]:
                 raise ValueError(f"Unchanged-shard reuse requires identical archive {key}")

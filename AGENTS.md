@@ -44,15 +44,16 @@
 
 ### 运动协议
 
-- 训练目标为经过HM质量修订的SMPL-H参数归档：
-  `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality`
-- 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1与现有checkpoint保留追溯。
+- 训练目标为经过双来源最终FK质量修订的SMPL-H参数归档：
+  `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality`
+- 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1/v2与现有checkpoint保留追溯。
 - 保留双手各21点、相机轨迹、地面、有效 mask 和原始分割。
 - MotionExpert 使用5Hz、11帧：
   历史5帧＋当前帧，预测未来5帧。
 - Ψ₀ 当前图像对应 MotionExpert 历史6帧中的最后一帧。
 - 运动表示为245维，相机轨迹为18维。
 - 身体使用既定K12，保留6D旋转、XYZ、双手显式监督、参考运动与脚接触。
+- 最终FK头部必须通过相机及有效源头部观测的物理一致性筛选。EgoSuite失败时屏蔽拟合身体，保留独立源手/脚/相机；HM拟合关联手脚随身体失效。
 - 坐标采用相机地面投影参考系，单位为米，世界坐标Z-up。
 - 6D旋转编码取旋转矩阵前两行。
 - 标签 mask 用于监督；未来标签可用性不得影响部署输入。

@@ -1,4 +1,5 @@
 """Only immutable, computation-identical accepted shards may be reused."""
+from copy import deepcopy
 import json
 import os
 
@@ -7,7 +8,7 @@ import pytest
 
 from MotionExpert.dataset.window_cache import ARRAY_SPECS, CONTRACT, atomic_json, digest, file_sha256, stamp
 from MotionExpert.dataset.vision_cache import CONTRACT as VISION_CONTRACT, storage_digest
-from MotionExpert.reuse_window_cache import computation_ast, previous_visual_source, reuse_episode, visual_reuse_proof
+from MotionExpert.reuse_window_cache import check_archive_info, computation_ast, previous_visual_source, reuse_episode, visual_reuse_proof
 
 
 def test_publication_change_does_not_hide_fk_changes():
@@ -107,6 +108,42 @@ def test_raw_bytes_share_inode_and_receipts_remain_independent(tmp_path):
         assert file_sha256(target) == receipt["arrays"][key]["sha256"]
     with pytest.raises(FileExistsError):
         reuse_episode(old, new, descriptor, record, {}, vision, vision_sources=vision_sources)
+
+
+@pytest.mark.parametrize("previous_revision", [None, {"format": "prior-quality", "policy": {"distance": 1.}}])
+def test_successive_quality_revisions_reuse_identical_shards(tmp_path, previous_revision):
+    previous = {"fps": 30, "model": {"model_sha256": "same-model"}}
+    if previous_revision is not None:
+        previous["quality_revision"] = deepcopy(previous_revision)
+    current = deepcopy(previous)
+    current["quality_revision"] = {"format": "next-quality", "parent_revision": deepcopy(previous_revision)}
+    frozen_previous, frozen_current = deepcopy(previous), deepcopy(current)
+    check_archive_info(previous, current)
+    assert previous == frozen_previous and current == frozen_current
+    old, new, descriptor, record, vision, sources = fixture_shard(tmp_path)
+    reuse_episode(old, new, descriptor, record, {"revision": "new"}, vision, vision_sources=sources)
+    receipt = json.loads((new / descriptor["receipt_path"]).read_text())
+    assert receipt["reuse"]["unchanged_complete_record"] is True
+    for name in ARRAY_SPECS:
+        assert os.path.samefile(old / f"episodes/00000007/{name}.npy", new / receipt["arrays"][name]["path"])
+
+
+@pytest.mark.parametrize("mutation", ["fps", "model", "missing_parent", "different_parent"])
+def test_revision_compatibility_rejects_other_info_or_wrong_lineage(mutation):
+    previous = {"fps": 30, "model": {"model_sha256": "same-model"},
+                "quality_revision": {"format": "prior-quality", "policy": {"distance": 1.}}}
+    current = deepcopy(previous)
+    current["quality_revision"] = {"format": "next-quality", "parent_revision": deepcopy(previous["quality_revision"])}
+    if mutation == "fps":
+        current["fps"] = 15
+    elif mutation == "model":
+        current["model"]["model_sha256"] = "different-model"
+    elif mutation == "missing_parent":
+        current["quality_revision"].pop("parent_revision")
+    else:
+        current["quality_revision"]["parent_revision"]["policy"]["distance"] = .5
+    with pytest.raises(ValueError, match="archive information|parent revision declaration"):
+        check_archive_info(previous, current)
 
 
 def test_reject_changed_encoder_and_changed_array_identity(tmp_path):

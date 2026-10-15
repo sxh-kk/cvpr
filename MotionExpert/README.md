@@ -57,14 +57,14 @@ EgoSuite身体为拟合估计，HM为发布的优化参数；来源观测、插�
 
 ## 当前数据与训练
 
-训练目标归档：`/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality`，独立验收后可用；
-原 `smplh-parameters-v1`、旧统计和已有checkpoint保留追溯。
+训练目标归档：`/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality`，独立验收后可用；
+原 `smplh-parameters-v1`／`smplh-parameters-v2-hm-quality`、旧统计和已有checkpoint保留追溯。
 两来源共9,263 episodes／38,137,884原生帧，原分割在 `meta/splits.json`。
 保留47段HM隔离记录，reader按training eligibility及窗口mask筛选。
 旧dense缓存和旧视觉文件已删除；reader只支持新的共享profile视觉缓存。
-SMPL-H参数、双手XYZ、相机、模型与图像join保留；本次质量mask、地面及物理fingerprint按修订更新。
+SMPL-H参数、双手XYZ、相机、模型与图像join保留；本次拟合监督mask、相关地面及物理fingerprint按修订更新。
 
-新完整train运动统计位于 `/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_hm-quality-v2.pt`。
+新完整train运动统计位于 `/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_fit-quality-v3.pt`。
 图像尺寸变化本身不需要重算运动统计；本次监督mask与地面改变，因此重算全train并拒绝复用旧统计。
 缓存manifest必须complete/all且与归档、分割、30Hz帧join和profile一致。
 统计绑定物理表示，checkpoint另外绑定视觉版本。
@@ -97,7 +97,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 ```
 
 Lightning按配置启动8卡DDP，无需另套torchrun。输出为
-`/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_hm_quality_v2_from_scratch`。
+`/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_fit_quality_v3_from_scratch`。
 本次复用已有DINO字节。旧MotionExpert checkpoint保留评估，新统计默认不支持直接续训旧checkpoint。
 全量DINO使用BF16、每进程batch128、每卡2进程；可使用下面的守护入口自动转入正式训练。
 这些是DINO提取参数，MotionExpert每卡训练batch仍为256。DINO命令见 [pipeline README](../pipeline/README.md)。
@@ -106,7 +106,7 @@ Lightning按配置启动8卡DDP，无需另套torchrun。输出为
 
 ### DINO完成后自动启动八卡训练
 
-此入口用于重新提取DINO的新任务；本次HM质量修订直接复用既有特征，不调用该训练守护。
+此入口用于重新提取DINO的新任务；本次双来源最终FK质量修订直接复用既有特征，不调用该训练守护。
 
 从仓库根目录启动一次守护进程；`--background` 返回后关闭终端不影响守护：
 
@@ -258,61 +258,74 @@ WORKER_CONTROL=/gaozt-test1/datasets/MixEgoMotion/.pipeline/window-cache-workers
 
 上述相对路径均位于 `/gaozt-test1/datasets/MixEgoMotion/`。停止切换守护不会停止已有或已续训的模型进程。
 
-## HM质量修订与统计
+## 拟合监督质量修订与统计
 
-HM原生 `valid` 主要反映原始拟合是否有效输出，仍可能包含人体偏离头戴相机数米的帧。
-质量审计使用发布的OpenPose67拟合鼻点与已注册相机世界位置比较；
-`observation.state.head_world` 是Aria CPF，不能代替拟合人体头部用于此项检查。
-默认硬筛鼻点与相机距离大于1米的帧，以及相对位置突变大于 `0.25＋3Δt` 米的两端；
-0.5米仅作警戒。缺少相机证据单独记录，不将其当作质量已通过的证据，也不直接拒绝有限拟合。
-相机自身速度尾部独立审计，不与身体mask混合；保留的拟合不等于已验证的真实人体标签。
+当前目标为 `smplh-parameters-v3-fit-quality`。v1原归档和v2鼻点筛选归档保留追溯；
+v2仍存在EgoSuite低置信度身体补全与HM边界拟合的头部偏离，不作为新正式训练目标。
 
-`audit_hm_quality` 只写仓库外sidecar，默认覆盖全部可训练HM，保留原47段隔离记录。
-生产修订目标为 `smplh-parameters-v2-hm-quality`，先发布candidate，独立验收后才允许训练。
-只修改质量相关监督mask、confidence和地面：SMPL-H参数、双手XYZ、相机与视觉帧join保留原值。
-被拒绝帧同时失去身体、拟合双手与脚点监督；地面由筛选后的脚点重估，
-失败时继续使用既有历史6帧脚点兜底。地面改变时整个episode的窗口重建。
-新DINO目录以硬链接复用原特征与join，并重新绑定修订归档，不重新提取。
+`audit_fit_quality` 对两来源全部可训练episode的原生30Hz最终SMPL-H FK头部进行物理筛选，
+比较同帧相机、有效源头部观测以及相对位置连续性。硬门为相机距离0.5米、
+源头部距离0.35米、相对跳变 `0.15＋3Δt` 米；警戒距离分别0.3／0.2米。阈值只使用train样本校准，
+归档policy和校准报告保存实际阈值、缺失证据、警告与拒绝原因；不按标准化σ裁切标签。
+相机或源头部观测证据缺失时不授予身体拟合认证；原有无效mask不能被提升。
+源头部观测与最终模型head joint有不同语义，筛选距离允许正常的解剖与安装偏置。
 
-新缓存为 `training_cache/smplh245_5hz_w11_hm-quality-v2`，
-新统计为 `statistics/smplh_k12_5hz_joint_hm-quality-v2.pt`，均位于MixEgoMotion根目录。
-旧归档、缓存、统计和checkpoint保持保留。`reuse_window_cache` 仅复用完整record不变、
-视觉字节相同且计算实现不变的已验收episode数组；它不发布缓存、不继承旧验收结果。
-受影响episode重新构建，三个split重新打包与核验。
+EgoSuite的坏拟合只屏蔽身体估计的位置、旋转、confidence、完成和残差有效性；
+独立源身体观测、原始脚点、双手21点、相机和源头部观测保留各自原mask。
+HM的身体、双手和脚来自同一拟合，错误拟合会同时屏蔽这些关联监督。
+只有脚点mask改变时重估原生30Hz地面；窗口的历史脚点兜底和5Hz接触规则保持一致。
+所有SMPL-H参数、手部XYZ、相机和帧join保留原值，DINO特征与join以硬链接复用。
 
-处理入口依次为 `audit_hm_quality`、`revise_hm_archive`、`validate_hm_revision --publish`、
-`reuse_window_cache` 和 `build_window_cache`。审计和构建始终写新目录；
-`validate_hm_revision` 默认只生成独立报告，加 `--publish` 才发布归档。
-不可把candidate状态或部分诊断报告改名为已验收数据。
+处理入口依次为 `audit_fit_quality`、`revise_fit_archive`、`validate_fit_revision --publish`、
+`reuse_window_cache` 和 `build_window_cache`。构建先写candidate，独立验收重算最终头部质量规则，
+仅对改写的motion核对全部列；未改变的文件继承原验收和相同inode，DINO不重新解码或提取。
+原47段HM隔离记录及train/val/test分割保留，未修改episode的record保持相同，便于复用窗口数组。
 
-新归档需要新统计，因此缓存验收分为两步：
+本次原生筛选覆盖9,216段可训练episode／38,076,141帧。在v2基础上，
+EgoSuite新增屏蔽12,799帧身体拟合监督，HM新增屏蔽48,512帧关联拟合监督；
+共改写891段motion，其余8,372段保持原文件和record。筛选修改监督mask，不删除原生帧，
+也不把保留的模型拟合声明为真实标注。已通过的原数值验收和本轮独立头部复算不重复执行。
 
-1. `validate_window_cache --raw-only` 对未归一化窗口与来源读取逐值比较，生成专用raw报告。
-   不读取DINO嵌入、不依赖尚未生成的统计；此报告不能用于训练切换。
-2. `compute_cached_motion_stats` 从全部train mmap窗口扫描245维运动与18维轨迹及mask，
+新缓存为 `training_cache/smplh245_5hz_w11_fit-quality-v3`，
+新统计为 `statistics/smplh_k12_5hz_joint_fit-quality-v3.pt`，均位于MixEgoMotion根目录。
+缓存复用不会直接授予新缓存验收：受影响episode重建，三个split重新打包核验。
+连续质量修订允许更新归档的`quality_revision`声明，新声明必须保留精确的`parent_revision`；
+其它归档信息、模型、分割、计算协议和完整episode记录仍须一致，视觉复用仍验证相同文件身份。
+新统计与GPU检查完成前 `formal_training_ready=false`，训练入口拒绝启动；
+最终就绪声明绑定本次统计SHA，不能拿旧统计替换。
+
+2026-10-15验收完成，`formal_training_ready=true`。新缓存共1,249,688个窗口：
+train 999,511、val 125,047、test 125,130。此前88个远距离头部样本，
+46个保留在窗口中但身体监督已屏蔽，42个随不可用窗口排除，没有继续参与有效身体监督的样本。
+单卡A100／BF16下，batch3的来源读取与缓存loss、658个梯度张量完全一致；
+batch64的5步真实更新、一步hidden反传和采样均通过。该检查未读取旧checkpoint，未启动正式训练。
+
+缓存和统计分阶段验收：
+
+1. `validate_window_cache --raw-only` 比较未归一化窗口与来源读取，生成专用raw报告。
+   不读取DINO嵌入，不依赖新统计；此报告不能用于正式训练切换。
+2. `compute_cached_motion_stats` 扫描完整train mmap的245维运动、18维轨迹和mask，
    保留11帧及重叠窗口权重，参考增量共享统计、脚接触均值0标准差1。
-   新统计完成后，执行原归一化窗口与GPU loss/梯度验收。
+3. 新统计完成后执行归一化窗口与GPU loss/梯度一致性验收，并核对缓存中有效头部的物理极值。
 
 ```bash
 "$MOTION_PY" -m MotionExpert.compute_cached_motion_stats \
   --config "$REVISION_CONFIG" \
-  --archive-root /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality \
-  --cache-root /gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_hm-quality-v2 \
+  --archive-root /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality \
+  --cache-root /gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_fit-quality-v3 \
   --acceptance "$RAW_CACHE_REPORT" \
-  --output /gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_hm-quality-v2.pt
+  --output /gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_fit-quality-v3.pt
 ```
 
-`MOTION_PY`、`REVISION_CONFIG` 和 `RAW_CACHE_REPORT` 应指向本次修订的运行环境、配置和raw验收报告。
+`MOTION_PY`、`REVISION_CONFIG` 和 `RAW_CACHE_REPORT` 指本次修订环境、配置和raw验收报告。
 统计全扫拒绝任何NaN／Inf，包含mask无效通道，并定位到episode、窗口、帧和维度。
-新统计输出存在时拒绝覆盖。统计修订改变archive fingerprint与数值，旧checkpoint默认不能直接
-`--resume` 或 `--init-weights`；不能通过更改标签或跳过检查来宣称兼容。后续训练策略需单独确定。
+新统计输出存在时拒绝覆盖。新旧checkpoint的归一化与archive fingerprint仍严格检查，
+旧第40／60／100轮不能直接搭配新统计使用 `--resume` 或 `--init-weights`。
+从旧权重开启新训练需要另行显式适配，不能跳过检查宣称兼容；当前正式命令使用 `--from-scratch`。
 
-只停止到自然100轮且不续训，可使用一次性 `stop_at_epoch --completed-epochs 100 --background`。
-它只核对 `last.ckpt` 链接、文件名和stat，拒绝错过100轮后改停120轮，不额外保存。
-生产运行应使用支持 `os.pidfd_open` 与 `signal.pidfd_send_signal` 的Python；
-当前训练runtime缺少这两个接口，使用系统 `/usr/bin/python3` 并通过 `PYTHONPATH` 加载runtime依赖。
-守护状态位于 `.pipeline/current_training_stop.json`；质量修订job位于
-`.pipeline/current_hm_quality_revision.json`。这两个流程都不会自动启动新训练。
+本次修订状态在 `.pipeline/current_final_fit_quality.json`，完整日志和验收报告位于其job目录。
+原 `current_hm_quality_revision.json` 保留v2流程记录。旧自然100轮停止状态在
+`.pipeline/current_training_stop.json`；修订流程不自动启动正式训练。
 
 ## 一步hidden与在线共享图像
 

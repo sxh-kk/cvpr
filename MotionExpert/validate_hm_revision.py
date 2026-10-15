@@ -415,8 +415,11 @@ def _audit_revision(parent_root, revision_root, *, parent_vision_root=None, prog
     _same_file(Path(plan["quality_report"]), quality_path, "quality audit")
     old_visual, new_visual = parent.vision_cache.manifest, candidate.vision_cache.manifest
     expected_visual = deepcopy(old_visual)
-    expected_visual.update(source_root=str(root), source_binding=new_visual.get("source_binding"),
+    expected_visual.update(source_root=str(root), output_root=str(candidate.vision_cache.root),
+                           source_binding=new_visual.get("source_binding"),
                            quality_revision_reuse=new_visual.get("quality_revision_reuse"))
+    if new_visual.get("quality_revision_reuse", {}).get("parent_profile_root") != str(parent.vision_cache.root):
+        raise ValueError("Revision visual parent profile path differs from its frozen source")
     if old_visual.get("encoder") != new_visual.get("encoder") or new_visual != expected_visual:
         raise ValueError("Revision changed the frozen DINO encoder/image-processing declaration")
     quality_receipts = quality.get("episodes", [])

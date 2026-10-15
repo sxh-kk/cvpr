@@ -36,6 +36,9 @@ def candidate(revision_source, tmp_path, monkeypatch):
 
 def test_delta_audit_and_publish_preserve_parent_and_do_not_repeat_unchanged_payloads(candidate, monkeypatch):
     parent, vision, root = candidate
+    visual_manifest = json.loads((root / validator.PROFILE / "manifest.json").read_text())
+    assert visual_manifest["output_root"] == str(root / validator.PROFILE)
+    assert visual_manifest["quality_revision_reuse"]["parent_profile_root"] == str(vision)
     before = (parent / ".pipeline/dataset-state.json").read_bytes()
     original_parquet, original_table, original_numpy = pq.ParquetFile, pq.read_table, np.load
     def reject_unchanged(path):
@@ -75,6 +78,17 @@ def test_delta_audit_and_publish_preserve_parent_and_do_not_repeat_unchanged_pay
     assert (parent / ".pipeline/dataset-state.json").read_bytes() == before
     with pytest.raises(ValueError, match="published once"):
         validator.publish_revision(parent, root, proof, parent_vision_root=vision)
+
+
+def test_delta_audit_rejects_visual_output_path_pointing_back_to_parent(candidate):
+    parent, vision, root = candidate
+    path = root / validator.PROFILE / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["output_root"] = str(vision)
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="frozen DINO"):
+        validator.audit_revision(parent, root, parent_vision_root=vision)
+    assert json.loads((root / ".pipeline/dataset-state.json").read_text())["state"] == "candidate"
 
 
 @pytest.mark.parametrize("poison", ["parameter", "hand_mask", "ground", "noop"])

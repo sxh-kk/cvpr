@@ -156,9 +156,10 @@ DINO失败、提前退出、缓存不完整或启动检查失败时，守护报�
 训练worker持有这些只读mmap。DINO继续读取原native30Hz `features.npy`，不复制特征。
 主SMPL-H归档、DINO和checkpoint都保留。
 
-episode的 `start_frames.npy` 使用普通小文件写入，并在提交前读回核对计划窗口起点。
-打包前逐episode对照冻结的split索引，打包写盘后再次核对完整起点数组；
-文件SHA一致也不能替代窗口起点的语义一致性检查。任何一处不符都不会发布该阶段的完整缓存。
+每个episode的12个数组先在RAM生成，再用普通NPY写入，逐字段读回核对生成值、shape和dtype。
+打包前逐episode对照冻结的split索引，同时累计各字段的源payload摘要；
+打包写盘后流式读回所有字段，核对源payload摘要及完整起点数组。
+文件SHA一致不能替代生成值和窗口身份检查；任何一处不符都不会发布该阶段的完整缓存。
 验收失败时原训练继续，切换守护结束；定点恢复后须重新通过缓存验收，并启动新的切换守护。
 恢复记录和失败文件备份保存在仓库外的job目录，不能直接把验收状态改为通过。
 
@@ -216,6 +217,11 @@ WORKER_CONTROL=/gaozt-test1/datasets/MixEgoMotion/.pipeline/window-cache-workers
 全量生成及三个split打包结束后才发布 `manifest.json` 的 `complete/all`。
 `--diagnostic-episodes` 只生成诊断子集，不能用于正式训练或自动切换。
 验收支持 `--wait --builder-pid PID`，可与构建并行等待；构建提前退出会报告失败。
+恢复指定episode后，可给验收命令增加 `--required-episode-indices 65 7150`，
+在保留全量scope和原代表窗口的基础上，额外核对指定episode的首、中、末窗口；
+这与仅生成诊断子集的 `--episode-indices` 不同。
+验收报告逐窗口更新 `comparisons` 与 `current_sample`；失败时保留 `failed_sample`，
+张量差异包含字段、episode和原生起始帧，便于直接定位。
 已有数据物理数值验收不会重做。短窗口读取测速只代表I/O检查，不代表八卡整体吞吐。
 
 缓存构建和验收期间，原训练持续运行。完整缓存独立验收通过后，

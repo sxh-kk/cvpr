@@ -452,3 +452,82 @@ def test_packed_commit_rejects_start_keys_corrupted_during_flush(cached_archive,
     assert json.loads((root / "manifest.json").read_text())["state"] == "building"
     assert not (root / "packed/train").exists()
     assert not (root / "packed/.train.building/receipt.json").exists()
+
+
+@pytest.mark.parametrize("key", ["trajectory_valid", "motion"])
+def test_episode_commit_rejects_nonstart_array_corrupted_during_save(
+        cached_archive, tmp_path, monkeypatch, key):
+    from MotionExpert import build_window_cache as builder
+    root = tmp_path / "corrupt-episode-array"
+    original_save = np.save
+    original_memmap = np.lib.format.open_memmap
+    corrupted = []
+
+    def guarded_memmap(path, *args, **kwargs):
+        assert "episodes" not in Path(path).parts, "Episode arrays must be generated in RAM"
+        return original_memmap(path, *args, **kwargs)
+
+    def corrupt_save(path, values, *args, **kwargs):
+        if Path(path).name == f"{key}.npy" and Path(path).parent.name == ".00000000.building":
+            values = values.copy()
+            prefix = values.reshape(-1)[:max(1, 3912 // values.dtype.itemsize)]
+            assert np.any(prefix)
+            prefix[:] = 0
+            corrupted.append(Path(path))
+        return original_save(path, values, *args, **kwargs)
+
+    monkeypatch.setattr(np.lib.format, "open_memmap", guarded_memmap)
+    monkeypatch.setattr(np, "save", corrupt_save)
+    with pytest.raises(ValueError, match=f"Written episode array differs.*{key}"):
+        builder.build_window_cache(cached_archive, root, workers=0)
+    assert len(corrupted) == 1
+    assert json.loads((root / "manifest.json").read_text())["state"] == "building"
+    assert not (root / "episodes/00000000").exists()
+    assert not (root / "episodes/.00000000.building/receipt.json").exists()
+
+
+@pytest.mark.parametrize("key", ["trajectory_valid", "motion"])
+def test_packed_commit_rejects_nonstart_array_corrupted_during_flush(
+        cached_archive, tmp_path, monkeypatch, key):
+    from MotionExpert import build_window_cache as builder
+    root = tmp_path / "corrupt-packed-array"
+    original_flush = np.memmap.flush
+    corrupted = []
+
+    def corrupt_flush(value, *args, **kwargs):
+        path = Path(value.filename)
+        if path.name == f"{key}.npy" and path.parent.name == ".train.building":
+            prefix = value.reshape(-1)[:max(1, 3912 // value.dtype.itemsize)]
+            assert np.any(prefix)
+            prefix[:] = 0
+            corrupted.append(path)
+        return original_flush(value, *args, **kwargs)
+
+    monkeypatch.setattr(np.memmap, "flush", corrupt_flush)
+    with pytest.raises(ValueError, match=f"Packed array payload differs.*{key}"):
+        builder.build_window_cache(cached_archive, root, workers=0)
+    assert len(corrupted) == 1
+    assert json.loads((root / "manifest.json").read_text())["state"] == "building"
+    assert not (root / "packed/train").exists()
+    assert not (root / "packed/.train.building/receipt.json").exists()
+
+
+@pytest.mark.parametrize("shape,dtype", [((0, 11, 18), "float32"), ((9, 11, 18), "bool"),
+                                       ((9, 11, 245), "float32")])
+def test_payload_digest_uses_bounded_c_order_views(shape, dtype):
+    import hashlib
+    from MotionExpert.build_window_cache import _update_payload_digest
+    value = np.arange(np.prod(shape), dtype=np.int64).reshape(shape).astype(dtype)
+    blocks = []
+    result = hashlib.sha256()
+
+    class BoundedDigest:
+        def update(self, block):
+            assert isinstance(block, memoryview)
+            assert block.nbytes <= 257
+            blocks.append(block.nbytes)
+            result.update(block)
+
+    _update_payload_digest(BoundedDigest(), value, block_bytes=257)
+    assert result.digest() == hashlib.sha256(value.tobytes(order="C")).digest()
+    assert sum(blocks) == value.nbytes

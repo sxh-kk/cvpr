@@ -93,3 +93,27 @@ def test_representative_categories_skip_episodes_with_zero_windows():
 def test_cpu_cannot_be_reported_as_a_bf16_gpu_acceptance():
     with pytest.raises(ValueError, match="CUDA"):
         gpu_equivalence(smplh_motion_expert_config(), [], [], "cpu")
+
+
+def test_validation_error_names_field_episode_and_native_start():
+    import torch
+    expected = {"misc": {"motion": torch.zeros(11, 245), "traj": torch.ones(11, 18),
+                         "episode_index": 7150, "start_idx": 30, "source": "hm"}}
+    actual = deepcopy(expected)
+    actual["misc"]["traj"].zero_()
+    with pytest.raises(AssertionError, match=r"misc.traj.*episode=7150 start=30"):
+        compare_sample(actual, expected)
+
+
+def test_required_episodes_extend_representatives_without_filtering_scope():
+    class Indexed:
+        records = [{"source": "suite", "metadata": {"ground": {"valid": True}}, "episode_index": i}
+                   for i in (0, 65, 7150)]
+        idx_to_sidx_fidx = [(s, start) for s in range(3) for start in (0, 30, 60)]
+        def __len__(self):
+            return len(self.idx_to_sidx_fidx)
+    dataset = Indexed()
+    baseline = set(representative_indices(dataset, 1))
+    expanded = set(representative_indices(dataset, 1, [65, 7150]))
+    assert baseline < expanded == set(range(9))
+    assert len(dataset.records) == 3 and len(dataset) == 9

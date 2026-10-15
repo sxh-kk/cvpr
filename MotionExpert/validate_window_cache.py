@@ -58,13 +58,22 @@ def validate_config_change(source_cfg, resume_cfg):
 
 def compare_sample(cached, original):
     """Masks/images and normalized targets must be exactly the same."""
+    info = original["misc"]
+    context = (f"episode={info.get('episode_index')} start={info.get('start_idx')} "
+               f"source={info.get('source')}")
+    def compare_tensor(actual, expected, field):
+        try:
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        except AssertionError as error:
+            raise AssertionError(f"Cache {field} differs ({context}): {error}") from error
+
     for key in ("motion", "traj", "feature_valid_mask", "trajectory_valid",
                 "world_from_window", "floor_transform"):
-        torch.testing.assert_close(cached["misc"][key], original["misc"][key], rtol=0, atol=0)
+        compare_tensor(cached["misc"][key], original["misc"][key], f"misc.{key}")
     for key, value in original["y"].items():
         actual = cached["y"][key]
         if isinstance(value, torch.Tensor):
-            torch.testing.assert_close(actual, value, rtol=0, atol=0)
+            compare_tensor(actual, value, f"y.{key}")
         elif actual != value:
             raise AssertionError(f"Different conditioning field: {key}")
     for key in ("source", "seq_name", "start_idx", "end_idx", "episode_index", "fps",
@@ -75,7 +84,7 @@ def compare_sample(cached, original):
         raise AssertionError("Future images entered the cache conditions")
 
 
-def representative_indices(dataset, count):
+def representative_indices(dataset, count, required_episodes=()):
     """Cover both sources, ground policies and positions inside episodes."""
     keys = {}
     positions_by_sequence = {}
@@ -86,7 +95,11 @@ def representative_indices(dataset, count):
         key = (record["source"], bool(record["metadata"].get("ground", {}).get("valid", False)))
         keys.setdefault(key, sequence)
     indices = set()
-    for sequence in keys.values():
+    selected_sequences = set(keys.values())
+    required = set(required_episodes)
+    selected_sequences.update(sequence for sequence in positions_by_sequence
+                              if dataset.records[sequence].get("episode_index") in required)
+    for sequence in selected_sequences:
         positions = positions_by_sequence[sequence]
         indices.update((positions[0], positions[len(positions) // 2], positions[-1]))
     indices.update(np.linspace(0, len(dataset) - 1, min(count, len(dataset)), dtype=int).tolist())
@@ -240,6 +253,8 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--samples-per-split", type=int, default=8)
     parser.add_argument("--episode-indices", nargs="+", type=int, help="Explicit diagnostic cache selection")
+    parser.add_argument("--required-episode-indices", nargs="+", type=int, default=[],
+                        help="Also compare first/middle/last windows of these episodes, preserving full scope")
     parser.add_argument("--gpu-check", action="store_true")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--benchmark-batches", type=int, default=0)
@@ -262,30 +277,43 @@ def main():
         manifest = wait_for_cache(root, args.builder_pid) if args.wait else json.loads((root / "manifest.json").read_text())
         report["state"] = "validating"
         report["cache_manifest_sha256"] = sha256(root / "manifest.json")
+        required = set(args.required_episode_indices)
+        available = {item["episode_index"] for item in manifest["episodes"] if item["windows"] > 0}
+        if not required <= available:
+            raise ValueError(f"Required cache episodes are absent or have no windows: {sorted(required - available)}")
+        report["required_episode_indices"] = sorted(required)
         atomic_json(args.report, report)
         comparisons = []
+        report["comparisons"] = comparisons
         gpu_cases = {}
         for split in manifest.get("splits", ("train", "val", "test")):
             if manifest.get("indices", {}).get(split, {}).get("windows") == 0:
                 continue
             print(f"[{now()}] Validating new {split} cache path", flush=True)
             cached = dataset_from_config(cfg, split, episode_indices=args.episode_indices)
-            indices = representative_indices(cached, args.samples_per_split)
+            indices = representative_indices(cached, args.samples_per_split, required)
             selected_sequences = {cached.idx_to_sidx_fidx[i][0] for i in indices}
             validate_selected_indices(cached, selected_sequences)
             original = OriginalWindowPath(cached)
             split_checks = []
+            split_report = {"split": split, "windows": len(cached), "checked": split_checks, "exact_equal": False}
+            comparisons.append(split_report)
             for index in indices:
                 sequence, start = cached.idx_to_sidx_fidx[index]
                 key = cached.records[sequence]["source_key"]
+                report["current_sample"] = {"split": split, "episode": cached.records[sequence]["episode_index"],
+                                            "start": int(start), "index": int(index)}
+                atomic_json(args.report, report)
+                print(f"[{now()}] Comparing {report['current_sample']}", flush=True)
                 expected = cached.get_from_seq_and_st(key, int(start), idx=index)
                 actual = cached[index]
                 compare_sample(actual, expected)
                 split_checks.append({"episode": cached.records[sequence]["episode_index"], "start": int(start)})
+                atomic_json(args.report, report)
                 if split == "train":
                     case = (actual["misc"]["source"], bool(actual["misc"]["ground_fallback_used"]))
                     gpu_cases.setdefault(case, (expected, actual))
-            comparisons.append({"split": split, "windows": len(cached), "checked": split_checks, "exact_equal": True})
+            split_report["exact_equal"] = True
             if args.benchmark_batches:
                 report.setdefault("loader_benchmarks", {})[split] = {
                     "original": loader_benchmark(original, indices, batch_size=int(cfg.DATA.BATCH_SIZE),
@@ -294,6 +322,8 @@ def main():
                                               workers=args.benchmark_workers, batches=args.benchmark_batches)}
             del original, cached
         report["comparisons"] = comparisons
+        report.pop("current_sample", None)
+        atomic_json(args.report, report)
         if args.gpu_check:
             if not gpu_cases:
                 raise ValueError("GPU acceptance requires nonempty training windows")
@@ -315,6 +345,8 @@ def main():
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         return 0
     except Exception as error:
+        if report.get("current_sample"):
+            report["failed_sample"] = report["current_sample"]
         report.update(error=f"{type(error).__name__}: {error}", finished_at=now(), passed=False, state="failed")
         atomic_json(args.report, report)
         raise

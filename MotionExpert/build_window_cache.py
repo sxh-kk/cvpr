@@ -6,6 +6,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import multiprocessing
 import os
@@ -179,17 +180,9 @@ def _write_episode(task):
         shutil.rmtree(temporary)
     temporary.mkdir(parents=True, exist_ok=True)
     count = len(starts)
-    arrays_out = {}
-    for key, (dtype, tail) in ARRAY_SPECS.items():
-        if key == "start_frames":
-            continue
-        shape = (count, *tail)
-        if count:
-            arrays_out[key] = np.lib.format.open_memmap(temporary / f"{key}.npy", mode="w+", dtype=dtype, shape=shape)
-        else:
-            value = np.empty(shape, dtype=dtype)
-            np.save(temporary / f"{key}.npy", value, allow_pickle=False)
-            arrays_out[key] = value
+    arrays_out = {key: np.empty((count, *tail), dtype=dtype)
+                  for key, (dtype, tail) in ARRAY_SPECS.items()}
+    arrays_out["start_frames"][:] = starts
     template = None
     cursor = 0
     while cursor < count:
@@ -226,20 +219,18 @@ def _write_episode(task):
             arrays_out["historical_image_valid"][row] = window_arrays["observation.valid.dino"][:6]
         cursor = end_cursor
     archive.assert_current(record)
-    for value in arrays_out.values():
-        if isinstance(value, np.memmap):
-            value.flush()
-            value._mmap.close()
-    # Keep this small identity array out of the long-lived writable mappings.
-    # A file checksum alone cannot prove that the disk contents match the
-    # planned window keys: read them back before committing the episode.
-    planned_starts = np.asarray(starts, dtype=np.int64)
-    starts_path = temporary / "start_frames.npy"
-    np.save(starts_path, planned_starts, allow_pickle=False)
-    saved_starts = np.load(starts_path, allow_pickle=False)
-    if (saved_starts.dtype != np.int64 or saved_starts.shape != (count,)
-            or not np.array_equal(saved_starts, planned_starts)):
-        raise ValueError("Written episode start-frame keys differ from the planned window index")
+    # Episodes are small enough to retain their generated values in RAM. A
+    # self-consistent file checksum cannot prove a successful write: compare
+    # every saved array with those values before publishing its receipt.
+    for key, value in arrays_out.items():
+        path = temporary / f"{key}.npy"
+        np.save(path, value, allow_pickle=False)
+        saved = np.load(path, allow_pickle=False)
+        if (saved.dtype != value.dtype or saved.shape != value.shape
+                or not np.array_equal(saved, value)):
+            if key == "start_frames":
+                raise ValueError("Written episode start-frame keys differ from the planned window index")
+            raise ValueError(f"Written episode array differs from the generated values: {key}")
     identities = {}
     for key, (dtype, tail) in ARRAY_SPECS.items():
         path = temporary / f"{key}.npy"
@@ -288,6 +279,18 @@ def _packed_receipt(root, split, binding, index, sources, windows):
     return receipt
 
 
+def _update_payload_digest(result, value, *, block_bytes=16 * 1024 * 1024):
+    """Hash C-order array bytes in bounded views, including empty arrays."""
+    array = np.asarray(value)
+    if not array.flags.c_contiguous:
+        raise ValueError("Packed cache payload hashing requires C-order source arrays")
+    if not array.nbytes:
+        return
+    raw = memoryview(array).cast("B")
+    for first in range(0, raw.nbytes, block_bytes):
+        result.update(raw[first:first + block_bytes])
+
+
 def _pack_split(root, split, binding, index, descriptors):
     """One sequential copy per shard, then publish twelve split-wide mmap files."""
     windows = sum(item["windows"] for item in descriptors)
@@ -309,6 +312,7 @@ def _pack_split(root, split, binding, index, descriptors):
         shutil.rmtree(temporary)
     temporary.mkdir(parents=True, exist_ok=True)
     packed = {}
+    source_hashes = {key: hashlib.sha256() for key in ARRAY_SPECS}
     for key, (dtype, tail) in ARRAY_SPECS.items():
         shape = (windows, *tail)
         if windows:
@@ -333,6 +337,7 @@ def _pack_split(root, split, binding, index, descriptors):
             source = np.load(root / spec["path"], mmap_mode="r" if count else None, allow_pickle=False)
             if list(source.shape) != spec["shape"] or str(source.dtype) != spec["dtype"]:
                 raise ValueError("Episode array header differs before packing")
+            _update_payload_digest(source_hashes[key], source)
             packed[key][offset:offset + count] = source
             if isinstance(source, np.memmap):
                 source._mmap.close()
@@ -348,6 +353,17 @@ def _pack_split(root, split, binding, index, descriptors):
     identities = {}
     for key, (dtype, tail) in ARRAY_SPECS.items():
         path = temporary / f"{key}.npy"
+        saved = np.load(path, mmap_mode="r" if windows else None, allow_pickle=False)
+        try:
+            if saved.shape != (windows, *tail) or str(saved.dtype) != dtype:
+                raise ValueError(f"Packed array header differs after writing: {key}")
+            saved_hash = hashlib.sha256()
+            _update_payload_digest(saved_hash, saved)
+            if saved_hash.digest() != source_hashes[key].digest():
+                raise ValueError(f"Packed array payload differs from its source arrays after writing: {key}")
+        finally:
+            if isinstance(saved, np.memmap):
+                saved._mmap.close()
         size, modified = stamp(path)
         identities[key] = {"path": str((destination / path.name).relative_to(root)),
                            "dtype": dtype, "shape": [windows, *tail], "size_bytes": size,

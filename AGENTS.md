@@ -44,8 +44,9 @@
 
 ### 运动协议
 
-- 统一主数据集为 SMPL-H 参数归档：
-  `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1`
+- 训练目标为经过HM质量修订的SMPL-H参数归档：
+  `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality`
+- 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1与现有checkpoint保留追溯。
 - 保留双手各21点、相机轨迹、地面、有效 mask 和原始分割。
 - MotionExpert 使用5Hz、11帧：
   历史5帧＋当前帧，预测未来5帧。

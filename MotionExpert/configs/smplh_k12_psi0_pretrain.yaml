@@ -1,10 +1,11 @@
-# New run after native30Hz DINO re-extraction. Launch with --from-scratch.
-# DINO is frozen pretrained; MotionExpert uses no previous training checkpoint.
+# HM质量修订：归档、窗口缓存和新统计验收完成后，使用--from-scratch。
+# 复用原生30Hz DINO；旧MotionExpert checkpoint保留评估，不复用旧归一化。
 DATA:
-  ARCHIVE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1
-  SPLIT_MANIFEST: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/meta/splits.json
-  STATS_PATH: /gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint.pt
-  VISION_PROFILE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1/vision_profiles/psi0_256x480_v1_30hz
+  ARCHIVE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality
+  SPLIT_MANIFEST: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality/meta/splits.json
+  STATS_PATH: /gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_hm-quality-v2.pt
+  VISION_PROFILE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality/vision_profiles/psi0_256x480_v1_30hz
+  WINDOW_CACHE_ROOT: /gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_hm-quality-v2
   IMAGE_PROFILE: 256x480
   REPRE_TYPE: smplh12_rot6d_hands21_contacts_v1
   ROTATION_BASIS_MODE: smplh_model_defined
@@ -29,7 +30,7 @@ MODEL:
 FLOW:
   GLOBAL_WEIGHT: 8.0
 TRAIN:
-  EXP_PATH: /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_from_scratch
+  EXP_PATH: /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_hm_quality_v2_from_scratch
   NUM_GPUS: 8
   LR: 1.0e-4
   NUM_EPOCHS: 200

@@ -28,6 +28,21 @@ def test_cache_transition_config_rejects_training_or_visual_changes():
             validate_config_change(source, changed)
 
 
+def test_raw_pre_statistics_validation_needs_no_statistics_or_feature_embeddings(cached_archive, tmp_path):
+    cfg = deepcopy(cached_archive)
+    cfg.DATA.STATS_PATH = str(tmp_path / "not-computed-yet.pt")
+    data = dataset_from_config(cfg, "train", raw=True)
+    assert data.normalizer is None
+    assert data.cond_img_feat is False
+    cached = data[0]
+    expected = OriginalWindowPath(data)[0]
+    compare_sample(cached, expected)
+    assert not cached["y"]["img_embs"].any()
+    assert not cached["y"]["valid_img_embs"].any()
+    with pytest.raises(FileNotFoundError):
+        dataset_from_config(cfg, "train")
+
+
 def test_validation_compares_new_cached_values_and_decoding_anchors(cached_archive):
     cfg = cached_archive
     kwargs = dict(archive_root=cfg.DATA.ARCHIVE_ROOT, do_normalization=False,

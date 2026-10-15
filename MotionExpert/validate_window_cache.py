@@ -16,6 +16,7 @@ from .dataset.smplh_motion_dataset import SMPLHMotionDataset
 from .watch_dino import atomic_json, now, process_alive, process_identity
 
 FORMAT = "motionexpert-window-cache-acceptance-v1"
+RAW_FORMAT = "motionexpert-raw-window-cache-acceptance-v1"
 
 
 def sha256(path):
@@ -26,14 +27,14 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def dataset_from_config(cfg, split, *, cache=True, episode_indices=None, verified_archive=None):
+def dataset_from_config(cfg, split, *, cache=True, episode_indices=None, verified_archive=None, raw=False):
     d = cfg.DATA
     if verified_archive is not None and getattr(verified_archive, "model_sha256", None) != d.MODEL_SHA256:
         raise ValueError("Verified archive model differs from the frozen configuration")
     return SMPLHMotionDataset(
         archive_root=d.ARCHIVE_ROOT, split=split, split_manifest=d.SPLIT_MANIFEST,
-        stats_path=d.STATS_PATH, do_normalization=True,
-        cond_img_feat=d.COND_IMG_FEAT, cond_traj=d.COND_TRAJ, cond_betas=d.COND_BETAS,
+        stats_path=d.STATS_PATH, do_normalization=not raw,
+        cond_img_feat=d.COND_IMG_FEAT and not raw, cond_traj=d.COND_TRAJ, cond_betas=d.COND_BETAS,
         window=d.WINDOW, fps=d.FPS, forecast_prefix=d.FORECAST_PREFIX, segment_stride=d.SEGMENT_STRIDE,
         sparse_joint_indices=cfg.SPARSE_JOINTS.INDICES, repre_type=d.REPRE_TYPE, img_feat_type=d.IMG_FEAT_TYPE,
         row_group_cache_mb=d.ROW_GROUP_CACHE_MB, parquet_file_cache=d.PARQUET_FILE_CACHE,
@@ -258,6 +259,8 @@ def main():
     parser.add_argument("--required-episode-indices", nargs="+", type=int, default=[],
                         help="Also compare first/middle/last windows of these episodes, preserving full scope")
     parser.add_argument("--gpu-check", action="store_true")
+    parser.add_argument("--raw-only", action="store_true",
+                        help="Check raw windows before computing new statistics; never grants formal GPU acceptance")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--benchmark-batches", type=int, default=0)
     parser.add_argument("--benchmark-workers", type=int, default=2)
@@ -266,11 +269,15 @@ def main():
     args = parser.parse_args()
     if args.samples_per_split < 1 or args.benchmark_batches < 0 or args.benchmark_workers < 0:
         parser.error("Sample count must be positive; benchmark counts cannot be negative")
+    if args.raw_only and args.gpu_check:
+        parser.error("Raw pre-statistics acceptance and normalized GPU acceptance are separate phases")
     cfg, source = load_config(args.config), load_config(args.source_config)
     validate_architecture(cfg)
     validate_config_change(source, cfg)
     root = Path(cfg.DATA.WINDOW_CACHE_ROOT).resolve()
-    report = {"format": FORMAT, "passed": False, "cache_root": str(root), "started_at": now(),
+    report = {"format": RAW_FORMAT if args.raw_only else FORMAT,
+              "passed": False, "cache_root": str(root), "started_at": now(),
+              "raw_only": args.raw_only, "normalization_checked": not args.raw_only,
               "state": "waiting_cache" if args.wait else "validating",
               "source_config_sha256": sha256(args.source_config), "resume_config_sha256": sha256(args.config),
               "previous_physical_acceptance_repeated": False}
@@ -278,6 +285,7 @@ def main():
     try:
         manifest = wait_for_cache(root, args.builder_pid) if args.wait else json.loads((root / "manifest.json").read_text())
         report["state"] = "validating"
+        report["scope"] = manifest.get("scope")
         report["cache_manifest_sha256"] = sha256(root / "manifest.json")
         required = set(args.required_episode_indices)
         available = {item["episode_index"] for item in manifest["episodes"] if item["windows"] > 0}
@@ -294,7 +302,7 @@ def main():
                 continue
             print(f"[{now()}] Validating new {split} cache path", flush=True)
             cached = dataset_from_config(cfg, split, episode_indices=args.episode_indices,
-                                         verified_archive=verified_archive)
+                                         verified_archive=verified_archive, raw=args.raw_only)
             verified_archive = cached.archive
             indices = representative_indices(cached, args.samples_per_split, required)
             selected_sequences = {cached.idx_to_sidx_fidx[i][0] for i in indices}
@@ -338,7 +346,7 @@ def main():
             report["gpu"] = gpu_equivalence(cfg, gpu_original, gpu_cached, args.device)
             report["gpu"]["cases"] = [list(key) for key in list(gpu_cases)[:4]]
         diagnostic = bool(manifest.get("diagnostic", False) or manifest.get("scope") != "all")
-        report.update(passed=not diagnostic and bool(args.gpu_check), diagnostic=diagnostic,
+        report.update(passed=not diagnostic and bool(args.gpu_check or args.raw_only), diagnostic=diagnostic,
                       checks_passed=True, state="complete", finished_at=now())
         if sha256(root / "manifest.json") != report["cache_manifest_sha256"]:
             raise ValueError("Cache manifest changed during validation")

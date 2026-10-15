@@ -307,6 +307,17 @@ class SMPLHParameterArchive:
         if self.state.get("episodes") != len(self._records) or self.state.get("frames") != self.frames:
             raise ValueError("SMPL-H published population differs from owned records")
         report_path = self.state.get("acceptance_report")
+        revision = "quality_revision" in self.info
+        if revision and not self.allow_unpublished:
+            from .revision_acceptance import REVISION_FORMAT
+            declaration = self.info["quality_revision"]
+            if not isinstance(declaration, dict) or declaration.get("format") != REVISION_FORMAT:
+                raise ValueError("SMPL-H quality revision declaration is invalid")
+            if not isinstance(report_path, str) or not report_path:
+                raise ValueError("SMPL-H quality revisions require owned independent acceptance")
+            owned_report = self.owned_path(report_path)
+            if self.state.get("acceptance_report_sha256") != file_sha256(owned_report):
+                raise ValueError("SMPL-H quality revision acceptance SHA differs")
         if self.allow_unpublished or not report_path:
             return
         path = Path(report_path)
@@ -322,6 +333,14 @@ class SMPLHParameterArchive:
         report = json.loads(path.read_text())
         if not isinstance(report, dict):
             raise ValueError("SMPL-H full acceptance report must be a mapping")
+        from .revision_acceptance import ACCEPTANCE_FORMAT, check_revision_acceptance
+        if report.get("format") == ACCEPTANCE_FORMAT:
+            if not revision:
+                raise ValueError("SMPL-H revision acceptance requires a declared quality revision")
+            check_revision_acceptance(self, report, path)
+            return
+        if revision:
+            raise ValueError("SMPL-H quality revisions require their independent revision acceptance format")
         qualified = report.get("format") == "qualified-standalone-smplh-parameter-full-audit-v1"
         required = ("passed", "parameter_and_source_integrity_passed", "old_dense_dependency_absent", "cleanup_allowed")
         required += (("original_fit_numerical_quality_passed", "latest_motionexpert_accepted") if qualified else

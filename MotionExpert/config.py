@@ -23,7 +23,7 @@ def _ns(**values):
 
 def smplh_motion_expert_config():
     """SMPL-H245, 5Hz historical6 to future5, with shared-image DINO conditioning."""
-    archive = "/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v1"
+    archive = "/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v2-hm-quality"
     data = _ns(
         DATA_DIR=archive, ARCHIVE_ROOT=archive, DATASET_NAME="mixegomotion_smplh",
         REPRE_TYPE=SMPLH_REPRESENTATION_VERSION, COND_BETAS=False,
@@ -32,7 +32,7 @@ def smplh_motion_expert_config():
         TRAIN_TASK="fore", REQUIRE_FULL_WINDOW=True, TRAJECTORY_CONDITION_PROB=0.5,
         MOTION_SUPERVISION="joint",
         SPLIT_MANIFEST=archive + "/meta/splits.json",
-        STATS_PATH="/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint.pt", STATS_MODE="smplh_masked",
+        STATS_PATH="/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_hm-quality-v2.pt", STATS_MODE="smplh_masked",
         NORMALIZATION_CLIP=None, ROW_GROUP_CACHE_MB=128, PARQUET_FILE_CACHE=8,
         VISION_PROFILE_ROOT=archive + "/vision_profiles/psi0_256x480_v1_30hz", IMAGE_PROFILE="256x480",
         WINDOW_CACHE_ROOT=None,
@@ -65,7 +65,7 @@ def smplh_motion_expert_config():
         GLOBAL_FEATURE_START=108, GLOBAL_FEATURE_END=117,
     )
     train = _ns(
-        EXP_PATH=str(ROOT / "exp/smplh_k12_psi0_pretrain"), LR=1e-4, SEED=62,
+        EXP_PATH="/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_hm_quality_v2_from_scratch", LR=1e-4, SEED=62,
         USE_CKPT_LR=True, FUSED_ADAMW=False, BATCHED_METRIC_SYNC=False, WEIGHT_DECAY=0.01,
         NUM_EPOCHS=200, NUM_GPUS=8, PRECISION="bf16-mixed",
         ACCUMULATE_GRAD_BATCHES=1, GRADIENT_CLIP_VAL=1.0, EMA_DECAY=0.992028,

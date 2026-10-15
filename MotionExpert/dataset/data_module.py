@@ -20,12 +20,14 @@ class SMPLHMotionDataModule(pl.LightningDataModule):
         super().__init__()
         self.cfg=cfg
         self._cache_checked_epochs = {}
+        self._verified_window_archive = None
 
     def setup(self,stage=None):
         data=self.cfg.DATA
+        use_window_cache = bool(getattr(data,"WINDOW_CACHE_ROOT",None))
         def make(split):
             dataset_class = SMPLHMotionDataset
-            return dataset_class(archive_root=getattr(data,"ARCHIVE_ROOT",None) or getattr(data,"DATA_DIR",None),
+            dataset = dataset_class(archive_root=getattr(data,"ARCHIVE_ROOT",None) or getattr(data,"DATA_DIR",None),
                 split=split,split_manifest=getattr(data,"SPLIT_MANIFEST",None),stats_path=getattr(data,"STATS_PATH",None),
                 do_normalization=True,cond_img_feat=data.COND_IMG_FEAT,cond_traj=data.COND_TRAJ,cond_betas=data.COND_BETAS,
                 window=data.WINDOW,fps=data.FPS,forecast_prefix=data.FORECAST_PREFIX,
@@ -40,7 +42,11 @@ class SMPLHMotionDataModule(pl.LightningDataModule):
                 train_task=getattr(data,"TRAIN_TASK",None) or "fore",require_full_window=getattr(data,"REQUIRE_FULL_WINDOW",False),
                 motion_supervision=getattr(data,"MOTION_SUPERVISION",None),
                 vision_profile_root=getattr(data,"VISION_PROFILE_ROOT",None),image_profile=getattr(data,"IMAGE_PROFILE",None),
-                window_cache_root=getattr(data,"WINDOW_CACHE_ROOT",None))
+                window_cache_root=getattr(data,"WINDOW_CACHE_ROOT",None),
+                verified_archive=self._verified_window_archive if use_window_cache else None)
+            if use_window_cache:
+                self._verified_window_archive = dataset.archive
+            return dataset
         if stage in (None,"fit","train") and not hasattr(self,"train_dataset"): self.train_dataset=make("train")
         if stage in (None,"fit","validate","val") and not hasattr(self,"val_dataset"): self.val_dataset=make("val")
         if stage in ("test","predict") and not hasattr(self,"test_dataset"): self.test_dataset=make("test")

@@ -225,6 +225,8 @@ WORKER_CONTROL=/gaozt-test1/datasets/MixEgoMotion/.pipeline/window-cache-workers
 正式验收只为首个split构造一次来源Archive，后续split复用该对象；
 复用前核对根目录、发布模式、模型、读取缓存设置及视觉身份，并完整执行 `archive.assert_current()`。
 每个split仍独立验证自己的WindowCache、记录、窗口索引、receipt和统计；普通训练默认创建Archive的路径不变。
+配置 `WINDOW_CACHE_ROOT` 后，训练DataModule也在每个训练进程内复用首个split已验证的Archive，
+覆盖fit及先validate后fit的启动顺序；DataLoader worker继续按原规则建立自己的文件句柄。
 已有数据物理数值验收不会重做。短窗口读取测速只代表I/O检查，不代表八卡整体吞吐。
 
 缓存构建和验收期间，原训练持续运行。完整缓存独立验收通过后，

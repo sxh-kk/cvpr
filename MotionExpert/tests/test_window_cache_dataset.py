@@ -531,3 +531,31 @@ def test_payload_digest_uses_bounded_c_order_views(shape, dtype):
     _update_payload_digest(BoundedDigest(), value, block_bytes=257)
     assert result.digest() == hashlib.sha256(value.tobytes(order="C")).digest()
     assert sum(blocks) == value.nbytes
+
+
+@pytest.mark.parametrize("first_stage", ["fit", "validate"])
+def test_cached_data_module_reuses_one_verified_archive_across_setup_stages(
+        cached_archive, monkeypatch, first_stage):
+    expected = {split: _dataset(cached_archive, cached=True, split=split)[0]
+                for split in ("train", "val")}
+    original_init = SMPLHParameterArchive.__init__
+    constructors = []
+
+    def counted_init(archive, *args, **kwargs):
+        constructors.append(archive)
+        return original_init(archive, *args, **kwargs)
+
+    monkeypatch.setattr(SMPLHParameterArchive, "__init__", counted_init)
+    data = SMPLHMotionDataModule(cached_archive)
+    data.setup(first_stage)
+    data.setup("fit")
+    assert len(constructors) == 1
+    assert data.train_dataset.archive is data.val_dataset.archive is constructors[0]
+    assert data.train_dataset.window_cache is not data.val_dataset.window_cache
+    for split in ("train", "val"):
+        _same(getattr(data, f"{split}_dataset")[0], expected[split])
+    train, validation = data.train_dataset, data.val_dataset
+    data.setup("fit")
+    data.setup("validate")
+    assert len(constructors) == 1
+    assert data.train_dataset is train and data.val_dataset is validation

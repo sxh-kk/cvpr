@@ -222,6 +222,9 @@ WORKER_CONTROL=/gaozt-test1/datasets/MixEgoMotion/.pipeline/window-cache-workers
 这与仅生成诊断子集的 `--episode-indices` 不同。
 验收报告逐窗口更新 `comparisons` 与 `current_sample`；失败时保留 `failed_sample`，
 张量差异包含字段、episode和原生起始帧，便于直接定位。
+正式验收只为首个split构造一次来源Archive，后续split复用该对象；
+复用前核对根目录、发布模式、模型、读取缓存设置及视觉身份，并完整执行 `archive.assert_current()`。
+每个split仍独立验证自己的WindowCache、记录、窗口索引、receipt和统计；普通训练默认创建Archive的路径不变。
 已有数据物理数值验收不会重做。短窗口读取测速只代表I/O检查，不代表八卡整体吞吐。
 
 缓存构建和验收期间，原训练持续运行。完整缓存独立验收通过后，

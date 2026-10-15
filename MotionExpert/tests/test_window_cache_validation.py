@@ -10,7 +10,7 @@ from MotionExpert.dataset.smplh_motion_dataset import SMPLHMotionDataset
 from MotionExpert.tests.fixtures import owned_archive
 from MotionExpert.tests.test_window_cache_dataset import cached_archive
 from MotionExpert.validate_window_cache import (
-    OriginalWindowPath, compare_sample, gpu_equivalence, representative_indices,
+    OriginalWindowPath, compare_sample, dataset_from_config, gpu_equivalence, representative_indices,
     validate_config_change, validate_selected_indices, wait_for_cache,
 )
 
@@ -117,3 +117,101 @@ def test_required_episodes_extend_representatives_without_filtering_scope():
     expanded = set(representative_indices(dataset, 1, [65, 7150]))
     assert baseline < expanded == set(range(9))
     assert len(dataset.records) == 3 and len(dataset) == 9
+
+
+def test_validator_reuses_verified_archive_without_reconstructing_or_changing_samples(cached_archive, monkeypatch):
+    from pathlib import Path
+    from MotionExpert.dataset.smplh_archive import SMPLHParameterArchive
+    from MotionExpert.dataset.window_cache import source_code_binding
+    baseline = dataset_from_config(cached_archive, "val")
+    archive = baseline.archive
+    checks = []
+    original_assert = archive.assert_current
+
+    def forbidden_constructor(*args, **kwargs):
+        raise AssertionError("Reused validation split reconstructed the whole archive")
+
+    def current(record=None):
+        checks.append(record)
+        return original_assert(record)
+
+    monkeypatch.setattr(SMPLHParameterArchive, "__init__", forbidden_constructor)
+    monkeypatch.setattr(archive, "assert_current", current)
+    train = dataset_from_config(cached_archive, "train", verified_archive=archive)
+    validation = dataset_from_config(cached_archive, "val", verified_archive=archive)
+    assert checks == [None, None]
+    assert train.archive is validation.archive is archive
+    assert train.window_cache is not validation.window_cache
+    assert validation.window_cache is not baseline.window_cache
+    assert validation.records == baseline.records
+    assert validation.idx_to_sidx_fidx == baseline.idx_to_sidx_fidx
+    assert {item["episode_index"] for item in train.records}.isdisjoint(
+        item["episode_index"] for item in validation.records)
+    compare_sample(validation[0], baseline[0])
+    compare_sample(train[0], OriginalWindowPath(train)[0])
+    manifest = json.loads((Path(cached_archive.DATA.WINDOW_CACHE_ROOT) / "manifest.json").read_text())
+    assert source_code_binding() == manifest["binding"]["representation_sha256"]
+
+
+def test_verified_archive_rejects_identity_scope_or_current_source_mismatch(cached_archive, tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    archive = dataset_from_config(cached_archive, "train").archive
+    kwargs = dict(archive_root=cached_archive.DATA.ARCHIVE_ROOT,
+                  vision_profile_root=cached_archive.DATA.VISION_PROFILE_ROOT,
+                  image_profile=cached_archive.DATA.IMAGE_PROFILE,
+                  min_valid_image_fraction=cached_archive.DATA.MIN_VALID_IMAGE_FRACTION,
+                  window_cache_root=cached_archive.DATA.WINDOW_CACHE_ROOT,
+                  verified_archive=archive, do_normalization=False)
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+    with pytest.raises(TypeError, match="SMPLHParameterArchive"):
+        SMPLHMotionDataset(**dict(kwargs, verified_archive=object()))
+    changes = (({"archive_root": str(other_root)}, "root differs"),
+               ({"vision_profile_root": str(other_root)}, "vision profile root differs"),
+               ({"vision_profile_root": None}, "vision profile differs"),
+               ({"image_profile": "256x320"}, "image profile differs"),
+               ({"allow_unpublished": True}, "publication/diagnostic mode"),
+               ({"allow_unpublished": 0}, "publication/diagnostic mode"),
+               ({"row_group_cache_mb": 0}, "reader cache settings"),
+               ({"episode_indices": [999]}, "episode selection"))
+    for change, message in changes:
+        with pytest.raises(ValueError, match=message):
+            SMPLHMotionDataset(**dict(kwargs, **change))
+    with monkeypatch.context() as patch:
+        patch.setitem(archive.info, "schema_version", "wrong-schema")
+        with pytest.raises(ValueError, match="schema/model dimensions"):
+            SMPLHMotionDataset(**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(archive, "model_sha256", "0" * 64)
+        with pytest.raises(ValueError, match="model SHA256"):
+            SMPLHMotionDataset(**kwargs)
+    wrong_config = deepcopy(cached_archive)
+    wrong_config.DATA.MODEL_SHA256 = "0" * 64
+    with pytest.raises(ValueError, match="frozen configuration"):
+        dataset_from_config(wrong_config, "val", verified_archive=archive)
+    # The requested split is val, but a changed train episode must still fail
+    # the full archive.assert_current call used before reusing the snapshot.
+    path = Path(archive._record_paths[0])
+    before = path.stat()
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000))
+    with pytest.raises(ValueError, match="episode record changed"):
+        SMPLHMotionDataset(**dict(kwargs, split="val"))
+
+
+def test_verified_archive_still_checks_each_splits_cache_index(cached_archive, monkeypatch):
+    from pathlib import Path
+    from MotionExpert.dataset.smplh_archive import SMPLHParameterArchive
+    archive = dataset_from_config(cached_archive, "train").archive
+    root = Path(cached_archive.DATA.WINDOW_CACHE_ROOT)
+    manifest = json.loads((root / "manifest.json").read_text())
+    path = root / manifest["indices"]["val"]["path"]
+    with path.open("ab") as stream:
+        stream.write(b"corrupt-split-index")
+
+    def forbidden_constructor(*args, **kwargs):
+        raise AssertionError("Reused validation split reconstructed the whole archive")
+
+    monkeypatch.setattr(SMPLHParameterArchive, "__init__", forbidden_constructor)
+    with pytest.raises(ValueError, match="split index digest mismatch"):
+        dataset_from_config(cached_archive, "val", verified_archive=archive)

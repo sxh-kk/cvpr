@@ -28,7 +28,7 @@ class SMPLHMotionDataset(Dataset):
                  contact_speed_m_s=.2, contact_height_m=.1, min_valid_image_fraction=0.,
                  train_task="fore", require_full_window=True, motion_supervision="joint",
                  allow_unpublished=False, episode_indices=None, vision_profile_root=None,
-                 image_profile=None, window_cache_root=None, **legacy):
+                 image_profile=None, window_cache_root=None, verified_archive=None, **legacy):
         if cond_betas or bool(legacy.get("cond_text", False)):
             raise ValueError("SMPL-H beta16 is used only for source FK and audit metadata")
         if repre_type != SMPLH_REPRE_TYPE or img_feat_type != "dinov2_reg":
@@ -47,9 +47,15 @@ class SMPLHMotionDataset(Dataset):
             raise ValueError("Invalid SMPL-H segment stride or split")
         self.allow_unpublished = allow_unpublished
         self.diagnostic = bool(allow_unpublished or episode_indices is not None)
-        self.archive = SMPLHParameterArchive(archive_root or data_dir or "", cache_mb=row_group_cache_mb,
-                                             file_cache=parquet_file_cache, allow_unpublished=allow_unpublished,
-                                             vision_profile_root=vision_profile_root, image_profile=image_profile)
+        if verified_archive is None:
+            self.archive = SMPLHParameterArchive(archive_root or data_dir or "", cache_mb=row_group_cache_mb,
+                                                 file_cache=parquet_file_cache, allow_unpublished=allow_unpublished,
+                                                 vision_profile_root=vision_profile_root, image_profile=image_profile)
+        else:
+            self.archive = self._reuse_verified_archive(
+                verified_archive, root=archive_root or data_dir or "", allow_unpublished=allow_unpublished,
+                vision_profile_root=vision_profile_root, image_profile=image_profile,
+                cache_mb=row_group_cache_mb, file_cache=parquet_file_cache)
         self.root, self.reader = self.archive.root, self.archive.reader
         self.vision_profile = self.archive.vision_cache.metadata if self.archive.vision_cache is not None else None
         self.image_profile = self.archive.vision_cache.image_profile if self.archive.vision_cache is not None else None
@@ -124,6 +130,46 @@ class SMPLHMotionDataset(Dataset):
         self.normalizer = MotionNormalizer(stats_path, clip=normalization_clip, allow_diagnostic=self.diagnostic) if self.do_normalization else None
         if self.normalizer:
             self._validate_statistics(self.normalizer.stats)
+
+    @staticmethod
+    def _reuse_verified_archive(archive, *, root, allow_unpublished, vision_profile_root,
+                               image_profile, cache_mb, file_cache):
+        """Reuse an already checked snapshot; retain full current-artifact checks."""
+        from ..config import SMPLH_MODEL_SHA256
+        if not isinstance(archive, SMPLHParameterArchive):
+            raise TypeError("verified_archive must be a validated SMPLHParameterArchive")
+        if archive.root != Path(root).resolve(strict=True):
+            raise ValueError("Verified archive root differs from the requested archive")
+        if type(allow_unpublished) is not bool or archive.allow_unpublished is not allow_unpublished:
+            raise ValueError("Verified archive publication/diagnostic mode differs")
+        info = archive.info
+        identity = info.get("model", {})
+        if (info.get("schema_version") != PARAMETER_SCHEMA_VERSION or info.get("fps") != 30
+                or info.get("requires_old_dense_archive") is not False
+                or (identity.get("body_joint_count"), identity.get("joint_count"), identity.get("shape_basis_count")) != (22, 52, 16)):
+            raise ValueError("Verified archive schema/model dimensions differ")
+        if any(value != SMPLH_MODEL_SHA256 for value in (
+                archive.model_sha256, archive.model.model_sha256,
+                archive.binding.get("model_sha256"), identity.get("model_sha256"))):
+            raise ValueError("Verified archive model SHA256 differs")
+        if (archive.reader.max_bytes != int(cache_mb * 1024**2)
+                or archive.reader.max_files != file_cache):
+            raise ValueError("Verified archive reader cache settings differ")
+        vision = archive.vision_cache
+        if vision_profile_root is None:
+            if vision is not None or image_profile is not None:
+                raise ValueError("Verified archive vision profile differs")
+        else:
+            if vision is None or vision.root != Path(vision_profile_root).resolve(strict=True):
+                raise ValueError("Verified archive vision profile root differs")
+            if (vision.fps, vision.cache_sampling_step, vision.file_cache) != (30, 1, file_cache):
+                raise ValueError("Verified archive vision sampling/cache settings differ")
+            if image_profile is not None:
+                from ImageProcess import load_profile
+                if load_profile(image_profile).fingerprint != vision.profile_sha256:
+                    raise ValueError("Verified archive image profile differs")
+        archive.assert_current()
+        return archive
 
     def _validate_statistics(self, stats):
         if stats.get("diagnostic", False) and not self.diagnostic:

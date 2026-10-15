@@ -26,8 +26,10 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def dataset_from_config(cfg, split, *, cache=True, episode_indices=None):
+def dataset_from_config(cfg, split, *, cache=True, episode_indices=None, verified_archive=None):
     d = cfg.DATA
+    if verified_archive is not None and getattr(verified_archive, "model_sha256", None) != d.MODEL_SHA256:
+        raise ValueError("Verified archive model differs from the frozen configuration")
     return SMPLHMotionDataset(
         archive_root=d.ARCHIVE_ROOT, split=split, split_manifest=d.SPLIT_MANIFEST,
         stats_path=d.STATS_PATH, do_normalization=True,
@@ -42,7 +44,7 @@ def dataset_from_config(cfg, split, *, cache=True, episode_indices=None):
         train_task=d.TRAIN_TASK, require_full_window=d.REQUIRE_FULL_WINDOW,
         motion_supervision=d.MOTION_SUPERVISION, vision_profile_root=d.VISION_PROFILE_ROOT,
         image_profile=d.IMAGE_PROFILE, window_cache_root=d.WINDOW_CACHE_ROOT if cache else None,
-        episode_indices=episode_indices,
+        episode_indices=episode_indices, verified_archive=verified_archive,
     )
 
 
@@ -286,11 +288,14 @@ def main():
         comparisons = []
         report["comparisons"] = comparisons
         gpu_cases = {}
+        verified_archive = None
         for split in manifest.get("splits", ("train", "val", "test")):
             if manifest.get("indices", {}).get(split, {}).get("windows") == 0:
                 continue
             print(f"[{now()}] Validating new {split} cache path", flush=True)
-            cached = dataset_from_config(cfg, split, episode_indices=args.episode_indices)
+            cached = dataset_from_config(cfg, split, episode_indices=args.episode_indices,
+                                         verified_archive=verified_archive)
+            verified_archive = cached.archive
             indices = representative_indices(cached, args.samples_per_split, required)
             selected_sequences = {cached.idx_to_sidx_fidx[i][0] for i in indices}
             validate_selected_indices(cached, selected_sequences)

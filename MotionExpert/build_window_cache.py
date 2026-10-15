@@ -181,6 +181,8 @@ def _write_episode(task):
     count = len(starts)
     arrays_out = {}
     for key, (dtype, tail) in ARRAY_SPECS.items():
+        if key == "start_frames":
+            continue
         shape = (count, *tail)
         if count:
             arrays_out[key] = np.lib.format.open_memmap(temporary / f"{key}.npy", mode="w+", dtype=dtype, shape=shape)
@@ -188,7 +190,6 @@ def _write_episode(task):
             value = np.empty(shape, dtype=dtype)
             np.save(temporary / f"{key}.npy", value, allow_pickle=False)
             arrays_out[key] = value
-    arrays_out["start_frames"][:] = starts
     template = None
     cursor = 0
     while cursor < count:
@@ -229,6 +230,16 @@ def _write_episode(task):
         if isinstance(value, np.memmap):
             value.flush()
             value._mmap.close()
+    # Keep this small identity array out of the long-lived writable mappings.
+    # A file checksum alone cannot prove that the disk contents match the
+    # planned window keys: read them back before committing the episode.
+    planned_starts = np.asarray(starts, dtype=np.int64)
+    starts_path = temporary / "start_frames.npy"
+    np.save(starts_path, planned_starts, allow_pickle=False)
+    saved_starts = np.load(starts_path, allow_pickle=False)
+    if (saved_starts.dtype != np.int64 or saved_starts.shape != (count,)
+            or not np.array_equal(saved_starts, planned_starts)):
+        raise ValueError("Written episode start-frame keys differ from the planned window index")
     identities = {}
     for key, (dtype, tail) in ARRAY_SPECS.items():
         path = temporary / f"{key}.npy"
@@ -285,6 +296,13 @@ def _pack_split(root, split, binding, index, descriptors):
     existing = _packed_receipt(root, split, binding, index, sources, windows)
     if existing is not None:
         return existing
+    index_path = root / index["path"]
+    if file_sha256(index_path) != index["sha256"]:
+        raise ValueError("Frozen split index digest differs before packing")
+    frozen_index = np.load(index_path, allow_pickle=False)
+    if (frozen_index.dtype != np.int64 or frozen_index.shape != (windows, 2)
+            or index["windows"] != windows):
+        raise ValueError("Frozen split index population/shape differs before packing")
     destination = root / f"packed/{split}"
     temporary = root / f"packed/.{split}.building"
     if temporary.exists():
@@ -299,9 +317,18 @@ def _pack_split(root, split, binding, index, descriptors):
             packed[key] = np.empty(shape, dtype=dtype)
             np.save(temporary / f"{key}.npy", packed[key], allow_pickle=False)
     offset = 0
-    for descriptor in descriptors:
+    for sequence, descriptor in enumerate(descriptors):
         receipt = json.loads((root / descriptor["receipt_path"]).read_text())
         count = descriptor["windows"]
+        if descriptor.get("row_offset") != offset:
+            raise ValueError("Episode row offsets differ from the frozen split index before packing")
+        rows = frozen_index[offset:offset + count]
+        source_starts = np.load(root / receipt["arrays"]["start_frames"]["path"], allow_pickle=False)
+        if (source_starts.dtype != np.int64 or source_starts.shape != (count,)
+                or not np.all(rows[:, 0] == sequence)
+                or not np.array_equal(source_starts, rows[:, 1])
+                or digest(source_starts.tolist()) != receipt["start_frames_sha256"]):
+            raise ValueError("Episode start-frame keys differ from the frozen split index before packing")
         for key, spec in receipt["arrays"].items():
             source = np.load(root / spec["path"], mmap_mode="r" if count else None, allow_pickle=False)
             if list(source.shape) != spec["shape"] or str(source.dtype) != spec["dtype"]:
@@ -314,6 +341,10 @@ def _pack_split(root, split, binding, index, descriptors):
         if isinstance(value, np.memmap):
             value.flush()
             value._mmap.close()
+    packed_starts = np.load(temporary / "start_frames.npy", allow_pickle=False)
+    if (packed_starts.dtype != np.int64 or packed_starts.shape != (windows,)
+            or not np.array_equal(packed_starts, frozen_index[:, 1])):
+        raise ValueError("Packed start-frame keys differ from the frozen split index after writing")
     identities = {}
     for key, (dtype, tail) in ARRAY_SPECS.items():
         path = temporary / f"{key}.npy"

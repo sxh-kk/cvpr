@@ -267,7 +267,9 @@ class WindowCache:
                     or np.any(np.diff(starts) <= 0)
                     or np.any(np.diff(starts) % native_stride)
                     or digest(starts.tolist()) != descriptor["receipt"]["start_frames_sha256"]):
-                raise ValueError("Window-cache episode start-frame order/stride/bounds/digest differs")
+                raise ValueError(
+                    f"Window-cache episode {record['episode_index']} ({split}) "
+                    "start-frame order/stride/bounds/digest differs")
             rows = values[offset:offset + count]
             if not np.all(rows[:, 0] == sequence) or not np.array_equal(rows[:, 1], starts):
                 raise ValueError("Window-cache split index keys differ from the episode receipt")

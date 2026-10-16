@@ -147,6 +147,7 @@ def _resume_receipt(root, record, starts, binding):
 def _block(archive, record, selected):
     """Decode each selected world frame once, keeping true validity for every row."""
     arrays = archive._motion(record, selected)
+    arrays["observation.valid.head_reference_transition"] = archive.camera_transition_valid(record, selected)
     position, rotation = archive.model.decode(arrays)
     count = len(selected)
     for component, value in (("position", position), ("rotation", rotation)):

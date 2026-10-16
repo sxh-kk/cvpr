@@ -55,11 +55,10 @@ class UniEgoMotion(nn.Module):
         ])
         self.output_process = nn.Linear(self.latent_dim, self.input_feats)
         self._last_moe_aux_loss = None
-        self.num_prefix_tokens = 1 + cfg.MODEL.GLOBAL_TOKEN_COUNT
-        if cfg.MODEL.GLOBAL_TOKEN_COUNT:
-            self.global_token = nn.Parameter(torch.randn(self.latent_dim) * 0.02)
-        else:
-            self.register_parameter("global_token", None)
+        self._safety_activation_rms = None
+        # The only prefix is flow time. Global motion features are read out
+        # from the eleven motion states after the first denoising call.
+        self.num_prefix_tokens = 1
 
     def get_moe_auxiliary_loss(self):
         return self._last_moe_aux_loss
@@ -109,8 +108,6 @@ class UniEgoMotion(nn.Module):
                 return_features=False):
         if return_hidden and return_features:
             raise ValueError("return_hidden and return_features are mutually exclusive")
-        if return_features and self.global_token is None:
-            raise ValueError("Global features require GLOBAL_TOKEN_COUNT=1")
         if x.ndim != 3 or x.shape[-1] != self.input_feats:
             raise ValueError(f"Motion must be [B,T,{self.input_feats}], got {tuple(x.shape)}")
         batch, frames, _ = x.shape
@@ -126,7 +123,11 @@ class UniEgoMotion(nn.Module):
             unconditional = self.forward(x, timesteps, {"valid_frames": valid_frames},
                                          return_hidden=return_hidden,
                                          return_features=return_features)
-            if return_hidden or return_features:
+            if return_features:
+                prediction = unconditional[0] + (conditional[0] - unconditional[0]) * cond_scale
+                hidden = unconditional[1] + (conditional[1] - unconditional[1]) * cond_scale
+                return prediction, hidden, hidden.mean(dim=1)
+            if return_hidden:
                 return tuple(u + (c - u) * cond_scale
                              for c, u in zip(conditional, unconditional))
             return unconditional + (conditional - unconditional) * cond_scale
@@ -189,27 +190,34 @@ class UniEgoMotion(nn.Module):
         context = torch.cat((enc_time[:, None], enc_imgs.flatten(1, 2)), dim=1)
         context_valid = torch.cat((valid_frames.new_ones(batch, 1),
                                    visible_images.repeat_interleave(self.image_tokens, dim=1)), dim=1)
-        prefixes = [enc_time[:, None]]
-        if self.global_token is not None:
-            prefixes.append(self.global_token.to(dtype=x.dtype).view(1, 1, -1).expand(
-                batch, -1, -1).contiguous())
-        x = torch.cat((*prefixes, x), dim=1)
+        x = torch.cat((enc_time[:, None], x), dim=1)
         token_valid = torch.cat((valid_frames.new_ones(batch, self.num_prefix_tokens), valid_frames), dim=1)
         router_conditions = {"pose": pose_router_cond, "ego": router_ego_cond,
                              "ego_valid_frames": router_ego_valid, "timestep": enc_time,
                              "valid_frames": valid_frames}
+        activation_rms = []
+        collect_safety = self.training and self.cfg.TRAIN.SAFETY_ENABLED
+        self._safety_activation_rms = None
         for decoder in self.tsfm:
             x = decoder(x=x, context=context, mask=token_valid[:, None, None],
                         context_mask=context_valid[:, None, None],
                         num_prefix_tokens=self.num_prefix_tokens,
                         router_conditions=router_conditions)
+            if collect_safety:
+                # Preserve single-token excursions instead of diluting them
+                # across the batch; no graph or labels enter this diagnostic.
+                activation_rms.append(x.detach().float().square().mean(-1).sqrt().amax())
+        if activation_rms:
+            self._safety_activation_rms = torch.stack(activation_rms)
         aux_losses = [block.ff.last_aux_loss for block in self.tsfm
                       if block.ff.last_aux_loss is not None]
         self._last_moe_aux_loss = torch.stack(aux_losses).mean() if aux_losses else None
         hidden = x[:, self.num_prefix_tokens:self.num_prefix_tokens + frames].contiguous()
         prediction = self.output_process(hidden)
         if return_features:
-            return prediction, hidden, x[:, 1].contiguous()
+            # Every generated motion state participates, including future
+            # frames with unavailable labels. Pooling preserves autograd.
+            return prediction, hidden, hidden.mean(dim=1)
         if return_hidden:
             return prediction, hidden
         return prediction

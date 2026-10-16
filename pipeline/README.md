@@ -2,9 +2,11 @@
 
 当前 pipeline 只负责从已验收的 SMPL-H 运动归档和原始相机视频提取新 DINO 特征。
 历史 dense 转换、拟合实验、迁移和全量数值审计脚本已清理。
-当前训练目标为 `smplh-parameters-v3-fit-quality`，运动质量修订由MotionExpert负责，
+当前训练目标为 `smplh-parameters-v4-camera-quality`，运动质量修订由MotionExpert负责，
 已提取的原生30Hz DINO及join复用相同字节，不需要为运动mask修订重新提取。
-原v1/v2目录保留追溯，正式训练与下方示例均使用v3路径。
+原v1/v2/v3目录保留追溯，下方示例使用v4路径。相机原生质量修订继承v3的FK验收，
+新增camera point/transition mask，MotionExpert检查5Hz间全部原生边，避免跨跟踪中断生成有效增量。
+新缓存、新全train统计与当前模型GPU验收完成前不能启动训练，本次不自动启动训练。
 
 ## 保留的数据
 
@@ -12,15 +14,15 @@
 
 ```text
 MixEgoMotion/
-├── smplh-parameters-v3-fit-quality/
+├── smplh-parameters-v4-camera-quality/
 │   ├── meta/                  # info、episode索引、train/val/test分割
 │   ├── episodes/XXXXXXXX/
 │   │   ├── motion.parquet     # 原生30Hz运动参数与显式标签
 │   │   └── receipt.json       # 原始不可变提交凭证
 │   ├── weights/smplh/         # 自有共同人体模型与手部表示资源
 │   ├── .pipeline/             # 提交记录、验收证据、旧视觉退休清单
-│   └── vision_profiles/psi0_256x480_v1_30hz/  # 重新提取后生成
-├── statistics/smplh_k12_5hz_joint_fit-quality-v3.pt         # 已验收全量train统计
+│   └── vision_profiles/psi0_256x480_v1_30hz/  # 原有DINO按相同字节复用
+├── statistics/smplh_k12_5hz_joint_camera-quality-v4.pt         # 相机质量mask修订后的全量train统计
 ├── weights/dinov2-with-registers-large/     # 保留DINO预训练权重
 ├── .pipeline/runtimes/                     # 现有提取／训练环境
 └── training/                               # 新训练产物
@@ -41,11 +43,12 @@ MixEgoMotion/
 - `smplh.root_orient [3]`、`pose_body [63]`、`trans [3]`、`betas [16]`，以及来源可用时的手指PCA。
 - 左右各21点世界XYZ及逐点mask，独立于手指PCA可用性。
 - 相机／头部／头戴参考世界位置、四元数、mask及插值标记。
+- v4受影响episode额外保存相机点质量与原生incoming-edge连续性mask；其余episode由独立全有效证书继承原mask。
 - 地面高度、法向、有效性／认证标记，原始双脚点及mask。
 - 身体估计与来源观测的独立位置／旋转mask、confidence、完成及残差信息。
 - 原生frame/index、时间、视频帧号、PTS误差及原始图像mask。
 
-共同模型定义SMPL-H身体22关节轴，世界坐标米、Z-up。MotionExpert在读取时做FK并选既有K12，
+共同模型定义SMPL-H身体22关节轴，世界坐标米、Z-up。MotionExpert构建窗口缓存时做FK并选既有K12，训练直接mmap读取，
 同时构建相机地面参考坐标和接触代理；不在归档增加dense22缓存。
 共同模型SHA256为 `be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947`。
 
@@ -86,7 +89,7 @@ vision_profiles/psi0_256x480_v1_30hz/
 提取恢复只复用同配置、同来源、同文件身份的已完成episode。
 坏帧不提升为有效，输出mask必须与原始来源mask相同，否则正式提取或训练拒绝。
 训练要求完整 `complete/all` manifest与同一归档、分割、图像profile绑定。
-运动统计因此可以复用，视觉版本另行写入checkpoint。
+视觉尺寸变化本身不要求重算运动统计；本次相机质量mask变化，需要新全train统计。视觉版本另行写入checkpoint。
 
 ## 全量提取命令
 
@@ -105,8 +108,8 @@ cd /root/workspace/wbc/guanzerong/cvpr
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 /gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/dino-torch260-cu118/bin/python \
   -m egomotion_pipeline.cli extract-smplh-features \
-  --dataset /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality \
-  --output /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality/vision_profiles/psi0_256x480_v1_30hz \
+  --dataset /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality \
+  --output /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality/vision_profiles/psi0_256x480_v1_30hz \
   --config pipeline/configs/dino.local.json \
   --gpus 0 1 2 3 4 5 6 7 \
   --workers-per-gpu 2

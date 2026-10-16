@@ -1,7 +1,9 @@
 """Only immutable, computation-identical accepted shards may be reused."""
 from copy import deepcopy
+import hashlib
 import json
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,6 +11,15 @@ import pytest
 from MotionExpert.dataset.window_cache import ARRAY_SPECS, CONTRACT, atomic_json, digest, file_sha256, stamp
 from MotionExpert.dataset.vision_cache import CONTRACT as VISION_CONTRACT, storage_digest
 from MotionExpert.reuse_window_cache import check_archive_info, computation_ast, previous_visual_source, reuse_episode, visual_reuse_proof
+from MotionExpert import reuse_window_cache as reuse
+
+
+def test_reviewed_camera_source_pair_is_pinned_to_current_implementation():
+    from pathlib import Path
+    from MotionExpert.dataset.window_cache import source_code_binding
+    assert reuse.CAMERA_REUSE_SOURCE_PAIR["after"] == source_code_binding()
+    assert reuse.CAMERA_REUSE_SOURCE_PAIR["validator_sha256"] == file_sha256(
+        Path(reuse.__file__).with_name("validate_camera_revision.py"))
 
 
 def test_publication_change_does_not_hide_fk_changes():
@@ -224,3 +235,170 @@ def test_immutable_motion_and_visual_can_inherit_the_existing_join_acceptance(tm
     os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
     with pytest.raises(ValueError, match="Unchanged source motion"):
         visual_reuse_proof(record, **sources)
+
+
+def _camera_proof_case(tmp_path, monkeypatch):
+    parent, root = tmp_path / "parent-v3", tmp_path / "camera-v4"
+    parent.mkdir(); root.mkdir()
+    record = {"episode_index": 7, "source_key": "hm:unchanged", "motion_sha256": "f" * 64}
+    old_source = b'class SMPLHParameterArchive:\n    def _check_acceptance(self):\n        pass\n'
+    before_codes = {"MotionExpert.dataset.smplh_archive": hashlib.sha256(old_source).hexdigest(),
+                    "motion": "1" * 64}
+    after_codes = dict(before_codes, motion="2" * 64, camera="3" * 64)
+    previous_binding = {"archive_binding": {"info_sha256": "old-info"}, "archive_fingerprint": "v3",
+                        "protocol": {"fps": 5}, "split_fingerprint": "original-split",
+                        "model_sha256": "model", "image_profile_sha256": "image",
+                        "representation_sha256": before_codes}
+    current_binding = dict(previous_binding, archive_binding={"info_sha256": "new-info"},
+                           archive_fingerprint="v4", representation_sha256=after_codes)
+    validator = tmp_path / "validate_camera_revision.py"
+    validator.write_text("# fixed independently reviewed validation fixture\n")
+    validator_sha = file_sha256(validator)
+    monkeypatch.setattr(reuse, "__file__", str(tmp_path / "reuse_window_cache.py"))
+    monkeypatch.setattr(reuse, "CAMERA_REUSE_SOURCE_PAIR", {
+        "before": before_codes, "after": after_codes, "validator_sha256": validator_sha})
+    parent_top = parent / ".pipeline/acceptance-report.json"
+    atomic_json(parent_top, {"format": "accepted-parent-v3", "passed": True})
+    parent_state = {"state": "accepted", "independent_acceptance_pending": False,
+                    "acceptance_report": ".pipeline/acceptance-report.json",
+                    "acceptance_report_sha256": file_sha256(parent_top)}
+    atomic_json(parent / ".pipeline/dataset-state.json", parent_state)
+    quality_root = root / ".pipeline/camera-quality"
+    quality_root.mkdir(parents=True)
+    mask = quality_root / "episode_00000007.npz"
+    np.savez(mask, native_valid=np.ones(91, dtype=bool))
+    qc = {"episode_index": 7, "mask_path": mask.name, "mask_sha256": file_sha256(mask),
+          "summary": {"motion_revision_required": False, "newly_rejected_frames": 0,
+                      "newly_rejected_native_edges": 0, "invalid_native_frames": 0,
+                      "representation_changed_due_native_continuity": False}}
+    atomic_json(quality_root / "episode_00000007.json", qc)
+    quality = {"format": "smplh-camera-quality-audit-v1", "state": "complete", "diagnostic": False,
+               "archive_root": str(parent), "episodes": [qc]}
+    quality_path = quality_root / "report.json"
+    atomic_json(quality_path, quality)
+    population = {"episodes": 1, "frames": 91}
+    build = {"parent_archive_binding": previous_binding["archive_binding"],
+             "parent_archive_fingerprint": "v3", "quality_report_sha256": file_sha256(quality_path),
+             "parent_acceptance_sha256": file_sha256(parent_top)}
+    revision = {"format": reuse.CAMERA_REVISION_FORMAT, "scope": "full", "build_binding": build,
+                "build_binding_sha256": digest(build), "binding": current_binding["archive_binding"],
+                "archive_fingerprint": "v4", "source_root": str(parent), "output_root": str(root),
+                "population": population}
+    revision_path = root / ".pipeline/camera-quality-revision.json"
+    atomic_json(revision_path, revision)
+    certificate = {"source_record_sha256": digest(record), "motion_sha256": record["motion_sha256"],
+                   "native_reference_all_valid": True, "native_transition_all_valid": True,
+                   "camera_audit_receipt_sha256": digest(qc), "camera_mask_sha256": file_sha256(mask)}
+    independent = {"format": "independent-smplh-camera-quality-revision-delta-audit-v1", "scope": "full",
+                   "passed": True, "failures": [], "binding": current_binding["archive_binding"],
+                   "parent_archive_binding": previous_binding["archive_binding"],
+                   "parent_archive_fingerprint": "v3", "revision_manifest_sha256": file_sha256(revision_path),
+                   "quality_audit_sha256": file_sha256(quality_path), "validator_sha256": validator_sha,
+                   "population": population, "unchanged_reference_certificates": {"7": certificate}}
+    independent_path = root / ".pipeline/independent-camera-audit.json"
+    atomic_json(independent_path, independent)
+    inherited = root / ".pipeline/inherited-parents/v3"
+    inherited.mkdir(parents=True)
+    parent_state_copy, parent_top_copy = inherited / "dataset-state.json", inherited / "acceptance-report.json"
+    parent_state_copy.write_bytes((parent / ".pipeline/dataset-state.json").read_bytes())
+    parent_top_copy.write_bytes(parent_top.read_bytes())
+    proofs = {name: {"path": str(path.relative_to(root)), "sha256": file_sha256(path)}
+              for name, path in (("revision_manifest", revision_path), ("quality_audit", quality_path),
+                                 ("independent_revision_audit", independent_path),
+                                 ("parent_publication", parent_state_copy), ("parent_acceptance", parent_top_copy))}
+    top = {"format": reuse.CAMERA_ACCEPTANCE_FORMAT, "scope": "full", "passed": True, "failures": [],
+           "binding": current_binding["archive_binding"], "population": population, "proofs": proofs}
+    top_path = root / ".pipeline/acceptance-report.json"
+    atomic_json(top_path, top)
+    atomic_json(root / ".pipeline/dataset-state.json", dict(parent_state, acceptance_report_sha256=file_sha256(top_path)))
+    archive = SimpleNamespace(root=root, binding=current_binding["archive_binding"], archive_fingerprint="v4")
+    return SimpleNamespace(root=root, parent=parent, record=record, qc=qc, certificate=certificate,
+                           archive=archive, before=previous_binding, after=current_binding, old_source=old_source)
+
+
+def test_reviewed_camera_pair_requires_published_per_episode_evidence(tmp_path, monkeypatch):
+    case = _camera_proof_case(tmp_path, monkeypatch)
+    evidence = reuse.camera_reuse_evidence(case.archive, case.before, case.after, case.parent)
+    reuse.check_computation(case.before, case.after, case.old_source,
+                            camera_quality_reuse=True, camera_evidence=evidence)
+    assert evidence.episode(case.record) == case.certificate
+    assert evidence.episode(dict(case.record, episode_index=8)) is None
+    with pytest.raises(ValueError, match="published independent archive evidence"):
+        reuse.check_computation(case.before, case.after, case.old_source, camera_quality_reuse=True)
+    with pytest.raises(ValueError, match="published independent archive evidence"):
+        reuse.check_computation(case.before, case.after, case.old_source,
+                                camera_quality_reuse=True, camera_evidence={"unchanged": True})
+
+
+def test_camera_source_exception_is_never_enabled_by_default(tmp_path, monkeypatch):
+    from MotionExpert.dataset import smplh_archive
+
+    case = _camera_proof_case(tmp_path, monkeypatch)
+    source = tmp_path / "smplh_archive.py"
+    source.write_bytes(case.old_source)
+    monkeypatch.setattr(smplh_archive, "__file__", str(source))
+    evidence = reuse.camera_reuse_evidence(case.archive, case.before, case.after, case.parent)
+    with pytest.raises(ValueError, match="representation/indexing computation changed"):
+        reuse.check_computation(case.before, case.after, case.old_source, camera_evidence=evidence)
+
+
+@pytest.mark.parametrize("mutation", ["before", "after", "new_module", "unreviewed", "validator_unreviewed"])
+def test_camera_reuse_rejects_any_unreviewed_complete_source_pair(tmp_path, monkeypatch, mutation):
+    case = _camera_proof_case(tmp_path, monkeypatch)
+    evidence = reuse.camera_reuse_evidence(case.archive, case.before, case.after, case.parent)
+    before, after = deepcopy(case.before), deepcopy(case.after)
+    if mutation == "before":
+        before["representation_sha256"]["motion"] = "changed"
+    elif mutation == "after":
+        after["representation_sha256"]["motion"] = "changed"
+    elif mutation == "new_module":
+        after["representation_sha256"]["extra_computation"] = "changed"
+    else:
+        monkeypatch.setitem(reuse.CAMERA_REUSE_SOURCE_PAIR,
+                            "after" if mutation == "unreviewed" else "validator_sha256", None)
+    with pytest.raises(ValueError, match="exact reviewed complete source-code hash pair"):
+        reuse.check_computation(before, after, case.old_source,
+                                camera_quality_reuse=True, camera_evidence=evidence)
+
+
+@pytest.mark.parametrize("mutation", ["record", "reference", "transition", "point_count", "edge_count", "native_gap", "continuity"])
+def test_same_parquet_is_not_enough_when_native_reference_semantics_changed(tmp_path, monkeypatch, mutation):
+    case = _camera_proof_case(tmp_path, monkeypatch)
+    evidence = reuse.camera_reuse_evidence(case.archive, case.before, case.after, case.parent)
+    if mutation == "record":
+        changed = dict(case.record, split="different")
+    else:
+        changed = case.record
+        if mutation in ("reference", "transition"):
+            evidence.certificates["7"][f"native_{mutation}_all_valid"] = False
+        else:
+            summary = evidence.quality_episodes[7]["summary"]
+            key = {"point_count": "newly_rejected_frames", "edge_count": "newly_rejected_native_edges",
+                   "native_gap": "invalid_native_frames", "continuity": "representation_changed_due_native_continuity"}[mutation]
+            summary[key] = True if mutation == "continuity" else 1
+            evidence.certificates["7"]["camera_audit_receipt_sha256"] = digest(evidence.quality_episodes[7])
+    with pytest.raises(ValueError, match="identical native reference computation"):
+        evidence.episode(changed)
+
+
+@pytest.mark.parametrize("artifact", ["camera-quality/report.json", "camera-quality/episode_00000007.npz", "independent-camera-audit.json"])
+def test_camera_reuse_proofs_cannot_change_after_loading(tmp_path, monkeypatch, artifact):
+    case = _camera_proof_case(tmp_path, monkeypatch)
+    evidence = reuse.camera_reuse_evidence(case.archive, case.before, case.after, case.parent)
+    path = case.root / ".pipeline" / artifact
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="evidence changed"):
+        evidence.assert_current()
+
+
+def test_camera_publication_requires_exact_schema_and_parent_declaration():
+    old = {"fps": 30, "quality_revision": {"format": "smplh-fit-quality-revision-v1", "policy": {"exact": True}}}
+    new = deepcopy(old)
+    new["quality_revision"] = {"format": reuse.CAMERA_REVISION_FORMAT,
+        "parent_revision": deepcopy(old["quality_revision"]), "parameter_values_preserved": True,
+        "image_join_values_preserved": True, "world_observations_preserved": True,
+        "ground_values_preserved": True}
+    reuse.check_archive_info(old, new, camera_quality_reuse=True)
+    new["quality_revision"]["ground_values_preserved"] = False
+    with pytest.raises(ValueError, match="preserved values"):
+        reuse.check_archive_info(old, new, camera_quality_reuse=True)

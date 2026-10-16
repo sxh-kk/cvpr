@@ -44,10 +44,12 @@
 
 ### 运动协议
 
-- 训练目标为经过双来源最终FK质量修订的SMPL-H参数归档：
-  `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality`
-- 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1/v2与现有checkpoint保留追溯。
-- 当前计划用第60轮EMA权重热启动v3与新统计，再训140轮；新epoch/step从0计数，重建AdamW、EMA与140轮调度，保留20轮warmup。使用专用warmstart_epoch60配置；本轮只验收，不启动正式训练。
+- 训练目标为继承双来源最终FK验收并完成相机原生质量修订的SMPL-H参数归档：
+  `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`
+- 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1/v2/v3与现有checkpoint保留追溯。
+- 当前架构为e7_smplh12_hands21_meanpool_qkvnorm_v2；删除可学习GLOBAL，11个motion hidden直接mean pooling。self-attention Q/K/V全归一化，cross context独立归一化。旧GLOBAL/旧注意力checkpoint不兼容，旧第60轮专用配置已移除；从头新任务200轮，20轮warmup。本轮只验收，不启动正式训练。
+- HM检查原始MPS质量及closed/open-loop连续性；EgoSuite没有源confidence，不伪造。5Hz参考增量必须检查中间所有30Hz点及边。相机质量失败不删除独立world观测或DINO。
+- 训练更新前检查全卡loss/activation、unscale后clip前梯度，异常一致停止并保存batch/RNG诊断；正式就绪绑定新缓存、全train统计和当前架构GPU验收。
 - 保留双手各21点、相机轨迹、地面、有效 mask 和原始分割。
 - MotionExpert 使用5Hz、11帧：
   历史5帧＋当前帧，预测未来5帧。

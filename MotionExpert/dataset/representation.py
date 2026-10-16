@@ -204,6 +204,11 @@ def build_motion_window(arrays, metadata, *, task="fore", forecast_prefix=6, fps
     delta_rotation[1:] = np.swapaxes(floor_rotation[:-1], -1, -2) @ floor_rotation[1:]
     delta_position[1:] = np.einsum("tji,tj->ti", floor_rotation[:-1], np.diff(flat_floor, axis=0))
     delta_valid = floor_valid.copy(); delta_valid[1:] &= floor_valid[:-1]
+    if "observation.valid.head_reference_transition" in arrays:
+        transitions = np.asarray(arrays["observation.valid.head_reference_transition"])
+        if transitions.dtype != np.bool_ or transitions.shape != (count,):
+            raise ValueError("Head reference transition must be boolean T after native-span checking")
+        delta_valid[1:] &= transitions[1:]
     delta = np.concatenate([delta_rotation[:, :2].reshape(count, 6), delta_position], -1)
     local_head_rotation = np.swapaxes(floor_rotation, -1, -2) @ canonical_head_rotation
     local_head_position = np.einsum("tji,tj->ti", floor_rotation, canonical_head-floor_position)

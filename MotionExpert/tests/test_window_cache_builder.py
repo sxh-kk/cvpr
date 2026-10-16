@@ -12,9 +12,60 @@ import torch
 from MotionExpert import build_window_cache as builder
 from MotionExpert.config import smplh_motion_expert_config
 from MotionExpert.dataset.smplh_archive import SMPLHParameterArchive
-from MotionExpert.dataset.window_cache import atomic_json, cache_binding, protocol_from_config
-from MotionExpert.tests.fixtures import owned_archive
+from MotionExpert.dataset.window_cache import atomic_json, cache_binding, protocol_from_config, source_code_binding
+from MotionExpert.tests.fixtures import owned_archive, rewrite_episode
 from MotionExpert.tests.test_vision_profile_cache import write_cache
+
+
+def test_cache_identity_binds_native_camera_continuity_implementation():
+    from MotionExpert import camera_quality
+    from MotionExpert.dataset.window_cache import file_sha256
+    assert source_code_binding()[camera_quality.__name__] == file_sha256(camera_quality.__file__)
+    from pathlib import Path
+    assert source_code_binding()["window_builder"] == file_sha256(Path(builder.__file__))
+
+
+@pytest.mark.parametrize("block_frames", [11, 4096])
+@pytest.mark.parametrize("kind", ["native_point_gap", "explicit_transition"])
+def test_cache_builder_keeps_native_transition_masks_and_window_anchors(
+        owned_archive, tmp_path, monkeypatch, block_frames, kind):
+    """Hidden native failures must survive both block decoding and slicing."""
+    from MotionExpert.dataset.smplh_representation import build_smplh_window
+
+    def mutation(arrays):
+        if kind == "native_point_gap":
+            arrays["observation.valid.head_reference_position"][3] = False
+        else:
+            arrays["observation.valid.camera_tracking"] = np.ones(91, bool)
+            arrays["observation.valid.camera_transition"] = np.ones(91, bool)
+            arrays["observation.valid.camera_transition"][[3, 30]] = False
+
+    rewrite_episode(owned_archive, 0, motion_mutation=mutation)
+    vision = write_cache(owned_archive, tmp_path / "vision")
+    archive = SMPLHParameterArchive(owned_archive, vision_profile_root=vision)
+    cfg = smplh_motion_expert_config()
+    cfg.DATA.ARCHIVE_ROOT = cfg.DATA.DATA_DIR = str(owned_archive)
+    cfg.DATA.VISION_PROFILE_ROOT = str(vision)
+    monkeypatch.setattr(builder, "_archive", lambda *args: archive)
+    root = tmp_path / "windows"
+    manifest = builder.build_window_cache(cfg, root, workers=0, block_frames=block_frames)
+    descriptor = next(x for x in manifest["episodes"] if x["episode_index"] == 0)
+    import json
+    receipt = json.loads((root / descriptor["receipt_path"]).read_text())
+    saved = {key: np.load(root / spec["path"], allow_pickle=False)
+             for key, spec in receipt["arrays"].items()}
+    assert saved["start_frames"].tolist() == [0, 30]
+    for row, start in enumerate((0, 30)):
+        arrays, metadata = archive.read_window(0, start_frame=start, load_dino=False)
+        expected = build_smplh_window(arrays, metadata)
+        for key, value in (("motion", expected.motion), ("motion_valid", expected.motion_valid),
+                           ("trajectory", expected.trajectory), ("trajectory_valid", expected.trajectory_valid)):
+            np.testing.assert_array_equal(saved[key][row], value)
+    assert not saved["motion_valid"][0, 1, 108:117].any()
+    assert not saved["trajectory_valid"][0, 1, 9:18].any()
+    # At the next window its initial reference is valid even when the incoming
+    # edge at native30 failed outside that window's temporal domain.
+    assert saved["motion_valid"][1, 0, 108:117].all()
 
 
 @pytest.fixture

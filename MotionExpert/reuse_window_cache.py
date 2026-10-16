@@ -1,6 +1,8 @@
 """Seed a new quality revision with unchanged, previously accepted raw shards.
 
 Only episodes whose complete committed records are identical can be reused.
+Camera-native semantic revisions additionally require an exact reviewed source
+pair and independently accepted, all-valid native-reference certificates.
 Changed episodes, indices and packed arrays must go through the normal builder.
 This command never publishes a cache or copies an old acceptance decision.
 """
@@ -9,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 from copy import deepcopy
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
@@ -20,6 +23,69 @@ import numpy as np
 
 from .dataset.window_cache import ARRAY_SPECS, CONTRACT, atomic_json, cache_binding, digest, file_sha256, protocol_from_config, stamp
 from .dataset.vision_cache import CONTRACT as VISION_CONTRACT, storage_digest
+
+
+CAMERA_REVISION_FORMAT = "smplh-camera-quality-revision-v1"
+CAMERA_ACCEPTANCE_FORMAT = "independent-smplh-camera-quality-revision-acceptance-v1"
+# This is an exact source-pair authorization, not an allowlist of filenames.
+# Both sides name the reviewed complete computation and independent checker.
+# Any later computation change fails closed and requires a fresh review.
+CAMERA_REUSE_SOURCE_PAIR = {
+    "before": {
+        "MotionExpert.dataset.representation": "9e9497a3574b25a2398933d25224aef812c821b2c05b48d2dce844b457789cfa",
+        "MotionExpert.dataset.smplh_archive": "0ecd14629420d98d1d3ecc4bc03935406d46dc16ce6fcc92eab92edb507d36fd",
+        "MotionExpert.dataset.smplh_representation": "3d4c3b7808524c058ddf27279a866bca4300a268013059412421430bb6a7d2f0",
+        "MotionExpert.utils.rotation_conversions": "4dd42ef7227fe93560da284cf200aa93beef19f0ed2241cfed3ea2bf8bbfea46",
+        "window_index": "c6d996fe62f87943d91a26909279443aaaa103325826a4a9b36d4d034be0e2c2",
+    },
+    "after": {
+        "MotionExpert.dataset.representation": "3129a3f03e5eeb1680aaf6ec68a8781184d701d9b1d357bbb19bbae932c92f49",
+        "MotionExpert.dataset.smplh_representation": "3d4c3b7808524c058ddf27279a866bca4300a268013059412421430bb6a7d2f0",
+        "MotionExpert.dataset.smplh_archive": "676b142d80dc2e7aa9b5fe96bb1cea2385b7c81bb5e989f4120bc706d6e7c5fe",
+        "MotionExpert.utils.rotation_conversions": "4dd42ef7227fe93560da284cf200aa93beef19f0ed2241cfed3ea2bf8bbfea46",
+        "MotionExpert.camera_quality": "7a9a2d1a9af9b3b871d25d39fbac45396a72f51839aff8625dc773b368912401",
+        "window_index": "c6d996fe62f87943d91a26909279443aaaa103325826a4a9b36d4d034be0e2c2",
+        "window_builder": "bcf2269fa547b9a662a31dcbf407cb3bb6b8672e926f7bce7b9b06b43e25d9b9",
+    },
+    "validator_sha256": "281fb7051a14b589c6a6193513c7165ba9f52d9159c3b95ad41b3757b9f7f9f3",
+}
+
+
+@dataclass(frozen=True)
+class CameraReuseEvidence:
+    """Owned, published independent evidence, never a caller-supplied flag."""
+
+    previous_binding_sha256: str
+    current_binding_sha256: str
+    certificates: dict
+    quality_episodes: dict
+    artifacts: tuple
+
+    def assert_current(self):
+        if any(file_sha256(path) != sha256 for path, sha256 in self.artifacts):
+            raise ValueError("Camera reuse acceptance evidence changed during seeding")
+
+    def episode(self, record):
+        index = record["episode_index"]
+        certificate, quality = self.certificates.get(str(index)), self.quality_episodes.get(index)
+        if certificate is None:
+            return None
+        if quality is None:
+            raise ValueError("Camera unchanged certificate lacks its complete native audit")
+        summary = quality.get("summary", {})
+        if (certificate.get("source_record_sha256") != digest(record)
+                or certificate.get("motion_sha256") != record.get("motion_sha256")
+                or certificate.get("native_reference_all_valid") is not True
+                or certificate.get("native_transition_all_valid") is not True
+                or certificate.get("camera_audit_receipt_sha256") != digest(quality)
+                or certificate.get("camera_mask_sha256") != quality.get("mask_sha256")
+                or summary.get("motion_revision_required") is not False
+                or summary.get("newly_rejected_frames") != 0
+                or summary.get("newly_rejected_native_edges") != 0
+                or summary.get("invalid_native_frames") != 0
+                or summary.get("representation_changed_due_native_continuity") is not False):
+            raise ValueError("Camera unchanged certificate does not prove identical native reference computation")
+        return deepcopy(certificate)
 
 
 def computation_ast(source):
@@ -37,13 +103,28 @@ def computation_ast(source):
     return ast.dump(tree, include_attributes=False)
 
 
-def check_computation(previous_binding, current_binding, previous_source):
-    """A publication-only reader extension cannot alter the cached values."""
+def check_computation(previous_binding, current_binding, previous_source, *,
+                      camera_quality_reuse=False, camera_evidence=None):
+    """Accept publication-only changes or the separately certified camera pair."""
     before = deepcopy(previous_binding["representation_sha256"])
     after = deepcopy(current_binding["representation_sha256"])
     key = "MotionExpert.dataset.smplh_archive"
     if hashlib.sha256(previous_source).hexdigest() != before.get(key):
         raise ValueError("Previous implementation snapshot does not match the accepted cache")
+    for field in ("protocol", "split_fingerprint", "model_sha256", "image_profile_sha256"):
+        if previous_binding.get(field) != current_binding.get(field):
+            raise ValueError(f"Unchanged-shard reuse requires identical {field}")
+    if camera_quality_reuse:
+        reviewed = CAMERA_REUSE_SOURCE_PAIR
+        if (reviewed["after"] is None or reviewed["validator_sha256"] is None
+                or before != reviewed["before"] or after != reviewed["after"]):
+            raise ValueError("Camera quality reuse requires the exact reviewed complete source-code hash pair")
+        if (not isinstance(camera_evidence, CameraReuseEvidence)
+                or camera_evidence.previous_binding_sha256 != digest(previous_binding)
+                or camera_evidence.current_binding_sha256 != digest(current_binding)):
+            raise ValueError("Camera quality reuse requires its published independent archive evidence")
+        camera_evidence.assert_current()
+        return
     from .dataset import smplh_archive
     current_source = Path(smplh_archive.__file__).read_bytes()
     if computation_ast(previous_source) != computation_ast(current_source):
@@ -52,12 +133,9 @@ def check_computation(previous_binding, current_binding, previous_source):
     after.pop(key)
     if before != after:
         raise ValueError("Window representation/indexing computation changed; rebuild all shards")
-    for key in ("protocol", "split_fingerprint", "model_sha256", "image_profile_sha256"):
-        if previous_binding.get(key) != current_binding.get(key):
-            raise ValueError(f"Unchanged-shard reuse requires identical {key}")
 
 
-def check_archive_info(previous_info, current_info):
+def check_archive_info(previous_info, current_info, *, camera_quality_reuse=False):
     """Allow only a new revision declaration over the same archive schema."""
     before, after = deepcopy(previous_info), deepcopy(current_info)
     parent_revision = before.pop("quality_revision", None)
@@ -67,6 +145,14 @@ def check_archive_info(previous_info, current_info):
     if parent_revision is not None and (not isinstance(revision, dict)
             or revision.get("parent_revision") != parent_revision):
         raise ValueError("Revised archive does not preserve its exact parent revision declaration")
+    if camera_quality_reuse and (not isinstance(revision, dict)
+            or revision.get("format") != CAMERA_REVISION_FORMAT
+            or not isinstance(parent_revision, dict)
+            or parent_revision.get("format") != "smplh-fit-quality-revision-v1"
+            or any(revision.get(name) is not True for name in (
+                "parameter_values_preserved", "image_join_values_preserved",
+                "world_observations_preserved", "ground_values_preserved"))):
+        raise ValueError("Camera revision must declare preserved values over its complete exact parent")
 
 
 def _owned_file(root, relative):
@@ -77,6 +163,111 @@ def _owned_file(root, relative):
     if not path.is_relative_to(root) or not path.is_file():
         raise ValueError("Visual reuse artifact escapes its profile root")
     return path
+
+
+def camera_reuse_evidence(archive, previous_binding, current_binding, previous_archive_root):
+    """Load the archive-owned acceptance chain and its independently checked deltas.
+
+    A JSON file supplied on the command line cannot authorize a changed reader.
+    Both the complete implementation pair and the checker are pinned in source;
+    this routine additionally binds the published v4 archive to its exact v3
+    parent, accepted native mask audit and per-episode certificates.
+    """
+    root, parent = archive.root.resolve(strict=True), Path(previous_archive_root).resolve(strict=True)
+    artifacts = []
+
+    def read(path, expected=None):
+        path = Path(path).resolve(strict=True)
+        sha = file_sha256(path)
+        if expected is not None and expected != sha:
+            raise ValueError("Camera reuse proof SHA256 differs from its publication")
+        value = json.loads(path.read_text())
+        if not isinstance(value, dict):
+            raise ValueError("Camera reuse proof must be a complete mapping")
+        artifacts.append((path, sha))
+        return value, sha
+
+    state, _ = read(_owned_file(root, ".pipeline/dataset-state.json"))
+    if (state.get("state") != "accepted" or state.get("independent_acceptance_pending") is not False
+            or not state.get("acceptance_report_sha256")):
+        raise ValueError("Camera reuse requires a published independently accepted archive")
+    top, _ = read(_owned_file(root, state.get("acceptance_report", "")), state["acceptance_report_sha256"])
+    if (top.get("format") != CAMERA_ACCEPTANCE_FORMAT or top.get("scope") != "full"
+            or top.get("passed") is not True or top.get("failures") != []
+            or top.get("binding") != archive.binding):
+        raise ValueError("Camera revision acceptance is partial, failed, or bound to another archive")
+    proofs = top.get("proofs", {})
+    values, hashes = {}, {}
+    for name in ("revision_manifest", "quality_audit", "independent_revision_audit",
+                 "parent_publication", "parent_acceptance"):
+        proof = proofs.get(name, {})
+        if not isinstance(proof, dict) or not proof.get("sha256"):
+            raise ValueError("Camera acceptance lacks the complete parent/audit proof chain")
+        values[name], hashes[name] = read(_owned_file(root, proof.get("path", "")), proof["sha256"])
+    revision, quality, independent = (values[name] for name in (
+        "revision_manifest", "quality_audit", "independent_revision_audit"))
+    build = revision.get("build_binding", {})
+    if (revision.get("format") != CAMERA_REVISION_FORMAT or revision.get("scope") != "full"
+            or revision.get("binding") != archive.binding
+            or revision.get("archive_fingerprint") != archive.archive_fingerprint
+            or revision.get("build_binding_sha256") != digest(build)
+            or build.get("parent_archive_binding") != previous_binding.get("archive_binding")
+            or build.get("parent_archive_fingerprint") != previous_binding.get("archive_fingerprint")
+            or build.get("quality_report_sha256") != hashes["quality_audit"]
+            or build.get("parent_acceptance_sha256") != hashes["parent_acceptance"]
+            or Path(revision.get("source_root", "")).resolve() != parent
+            or Path(revision.get("output_root", "")).resolve() != root):
+        raise ValueError("Camera revision does not preserve its exact accepted parent/cache lineage")
+    old_state, _ = read(_owned_file(parent, ".pipeline/dataset-state.json"), hashes["parent_publication"])
+    if (old_state != values["parent_publication"] or old_state.get("state") != "accepted"
+            or old_state.get("independent_acceptance_pending") is not False
+            or old_state.get("acceptance_report_sha256") != hashes["parent_acceptance"]):
+        raise ValueError("Camera revision copied parent publication differs from the actual accepted parent")
+    read(_owned_file(parent, old_state.get("acceptance_report", "")), hashes["parent_acceptance"])
+    reviewed_validator = CAMERA_REUSE_SOURCE_PAIR["validator_sha256"]
+    validator = Path(__file__).with_name("validate_camera_revision.py")
+    if (reviewed_validator is None or not validator.is_file()
+            or file_sha256(validator) != reviewed_validator
+            or independent.get("validator_sha256") != reviewed_validator):
+        raise ValueError("Camera reuse requires the exact reviewed independent validator implementation")
+    artifacts.append((validator, reviewed_validator))
+    if (independent.get("format") != "independent-smplh-camera-quality-revision-delta-audit-v1"
+            or independent.get("scope") != "full" or independent.get("passed") is not True
+            or independent.get("failures") != [] or independent.get("binding") != archive.binding
+            or independent.get("parent_archive_binding") != previous_binding.get("archive_binding")
+            or independent.get("parent_archive_fingerprint") != previous_binding.get("archive_fingerprint")
+            or independent.get("revision_manifest_sha256") != hashes["revision_manifest"]
+            or independent.get("quality_audit_sha256") != hashes["quality_audit"]
+            or independent.get("population") != revision.get("population")
+            or top.get("population") != revision.get("population")):
+        raise ValueError("Camera independent audit is incomplete or mismatched to the publication")
+    if (quality.get("format") != "smplh-camera-quality-audit-v1" or quality.get("state") != "complete"
+            or quality.get("diagnostic") is not False
+            or Path(quality.get("archive_root", "")).resolve() != parent):
+        raise ValueError("Camera native audit lacks its complete original parent scope")
+    items = quality.get("episodes", [])
+    episodes = {item["episode_index"]: item for item in items}
+    certificates = independent.get("unchanged_reference_certificates")
+    if (len(episodes) != len(items) or not isinstance(certificates, dict)
+            or any(not key.isdigit() or int(key) not in episodes for key in certificates)):
+        raise ValueError("Camera independent unchanged certificates have an invalid native population")
+    # Bind the small native sidecars, without repeating their numerical audit.
+    # No certificate may inherit a subsequently edited producer receipt/mask.
+    quality_root = root / ".pipeline/camera-quality"
+    for key in certificates:
+        item = episodes[int(key)]
+        receipt, _ = read(_owned_file(quality_root, f"episode_{int(key):08d}.json"))
+        if receipt != item:
+            raise ValueError("Camera native receipt differs from its independently accepted audit")
+        mask = _owned_file(quality_root, item.get("mask_path", ""))
+        mask_sha = file_sha256(mask)
+        if mask_sha != item.get("mask_sha256"):
+            raise ValueError("Camera native mask differs from its independently accepted audit")
+        artifacts.append((mask, mask_sha))
+    evidence = CameraReuseEvidence(digest(previous_binding), digest(current_binding),
+                                   deepcopy(certificates), deepcopy(episodes), tuple(artifacts))
+    evidence.assert_current()
+    return evidence
 
 
 def previous_visual_source(cache_manifest):
@@ -160,7 +351,8 @@ def visual_reuse_proof(record, *, previous_root, current_root, previous_manifest
             "feature_payload_read": False, "join_bytes_preserved": True, "join_evidence": join_evidence}
 
 
-def reuse_episode(old_root, new_root, descriptor, record, binding, vision_metadata, *, vision_sources):
+def reuse_episode(old_root, new_root, descriptor, record, binding, vision_metadata, *,
+                  vision_sources, camera_certificate=None):
     """Hardlink raw arrays; commit a fresh receipt only after identity checks."""
     old_root, new_root = Path(old_root).resolve(), Path(new_root).resolve()
     receipt_path = old_root / descriptor["receipt_path"]
@@ -219,6 +411,8 @@ def reuse_episode(old_root, new_root, descriptor, record, binding, vision_metada
         result["reuse"] = {"source_receipt_sha256": descriptor["receipt_sha256"],
                            "source_cache": str(old_root), "unchanged_complete_record": True,
                            "array_identity": "same_filesystem_hardlinks", "visual_proof": visual_proof}
+        if camera_certificate is not None:
+            result["reuse"]["camera_native_reference_certificate"] = deepcopy(camera_certificate)
         atomic_json(temporary / "receipt.json", result)
         os.replace(temporary, destination)
     except BaseException:
@@ -233,6 +427,8 @@ def main():
     parser.add_argument("--previous-acceptance", required=True, type=Path)
     parser.add_argument("--previous-archive-implementation", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--camera-quality-reuse", action="store_true",
+                        help="Reuse only independently certified unchanged v3→v4 camera-native shards")
     args = parser.parse_args()
     from .build_window_cache import _archive
     from .config import load_config
@@ -265,12 +461,16 @@ def main():
         cfg = load_config(args.config)
         archive = _archive(cfg, False)
         binding = cache_binding(archive, protocol_from_config(cfg))
-        check_computation(manifest["binding"], binding, args.previous_archive_implementation.read_bytes())
         old_archive = Path(manifest["archive_root"]).resolve(strict=True)
+        camera_evidence = (camera_reuse_evidence(archive, manifest["binding"], binding, old_archive)
+                           if args.camera_quality_reuse else None)
+        check_computation(manifest["binding"], binding, args.previous_archive_implementation.read_bytes(),
+                          camera_quality_reuse=args.camera_quality_reuse, camera_evidence=camera_evidence)
         old_info = old_archive / "meta/info.json"
         if file_sha256(old_info) != manifest["binding"]["archive_binding"]["info_sha256"]:
             raise ValueError("Previous archive information changed")
-        check_archive_info(json.loads(old_info.read_text()), archive.info)
+        check_archive_info(json.loads(old_info.read_text()), archive.info,
+                           camera_quality_reuse=args.camera_quality_reuse)
         for key in ("model_sha256", "hand_basis_sha256", "split_metadata_sha256"):
             if manifest["binding"]["archive_binding"][key] != binding["archive_binding"][key]:
                 raise ValueError(f"Unchanged-shard reuse requires identical archive {key}")
@@ -288,15 +488,21 @@ def main():
             index = record["episode_index"]
             if before_records.get(index) != record:
                 continue
+            camera_certificate = camera_evidence.episode(record) if camera_evidence is not None else None
+            if camera_evidence is not None and camera_certificate is None:
+                continue
             descriptor = descriptors[index]
             # Zero-window shards have no template metadata and cost no FK.
             if descriptor["windows"] == 0:
                 continue
-            reuse_episode(old, root, descriptor, record, binding, archive.vision_cache.metadata, vision_sources=vision_sources)
+            reuse_episode(old, root, descriptor, record, binding, archive.vision_cache.metadata,
+                          vision_sources=vision_sources, camera_certificate=camera_certificate)
             reused.append(index)
             if len(reused) % 250 == 0:
                 print(f"Reused {len(reused)} unchanged episode shards", flush=True)
         archive.assert_current()
+        if camera_evidence is not None:
+            camera_evidence.assert_current()
         if file_sha256(manifest_path) != acceptance["cache_manifest_sha256"]:
             raise ValueError("Previous accepted manifest changed during reuse")
         if (file_sha256(args.previous_acceptance) != acceptance_sha256
@@ -306,6 +512,8 @@ def main():
         atomic_json(root / "reuse.json", {"state": "seeded_only_not_accepted", "episodes": reused,
                     "binding_sha256": digest(binding), "source_manifest_sha256": file_sha256(manifest_path),
                     "previous_acceptance_sha256": acceptance_sha256,
+                    "camera_quality_reuse": args.camera_quality_reuse,
+                    "camera_reviewed_source_pair": CAMERA_REUSE_SOURCE_PAIR if args.camera_quality_reuse else None,
                     "full_builder_and_independent_acceptance_required": True})
         print(f"Seeded {len(reused)} shards; run the full builder and independent acceptance", flush=True)
 

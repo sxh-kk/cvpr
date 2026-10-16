@@ -14,10 +14,34 @@ from ..visual_contract import training_visual_contract, validate_visual_resume
 from ..model import UniEgoMotion
 from ..mydiffusion.flow_matching import FlowMatching
 from ..utils.task_conditioning import TASKS, apply_task_conditioning
+from ..training_safety import TrainingSafety, TrainingSafetyError, collective_max, rng_state, write_failure
 
 
 TRAINING_PHASE_FORMAT = "motionexpert-training-phase-v1"
 _MISSING = object()
+
+
+class _SampledValidationDatasetProbe:
+    """Retain the current periodic probe identity without rereading any sample."""
+
+    def __init__(self, dataset, module):
+        self.dataset, self.module = dataset, module
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getattr__(self, name):
+        return getattr(self.dataset, name)
+
+    def get_sample(self, index, task):
+        self.module._safety_context = {
+            "mode": "val_sample", "batch_idx": int(index),
+            "sampling_seed": int(self.module.cfg.TRAIN.SEED) + int(index), "task": task,
+            "rng_before_step": rng_state(self.module.device),
+        }
+        sample = self.dataset.get_sample(index, task=task)
+        self.module._safety_context["batch"] = sample
+        return sample
 
 
 def _config_value(config, name, default=None):
@@ -114,6 +138,9 @@ class UEM_Module(pl.LightningModule):
         from ..dataset.normalization import MotionNormalizer
         self.normalizer = MotionNormalizer(cfg.DATA.STATS_PATH, clip=cfg.DATA.NORMALIZATION_CLIP)
         self.warm_start_provenance = None
+        self.training_safety = TrainingSafety(cfg.TRAIN)
+        self._safety_context = None
+        self._safety_microbatches = []
         self.flow = FlowMatching(
             num_steps=cfg.FLOW.NUM_STEPS, solver=cfg.FLOW.SOLVER,
             beta_alpha=cfg.FLOW.BETA_ALPHA, beta_beta=cfg.FLOW.BETA_BETA,
@@ -150,7 +177,7 @@ class UEM_Module(pl.LightningModule):
                 parameter.requires_grad = epoch >= shared_epoch
         if epoch == 0:
             logger.warning(
-                "Motion Expert shared/backbone/global parameters train from "
+                "Motion Expert shared/backbone parameters train from "
                 f"epoch {shared_epoch}; routed parameters train immediately."
             )
 
@@ -360,10 +387,42 @@ class UEM_Module(pl.LightningModule):
             noise_only_history=self._image_forecast_profile() and not self._joint_motion_supervision(),
             supervise_history=self._joint_motion_supervision())
 
-    def _step(self, batch, mode, conditioning=None):
+    def _stop_if_unsafe(self, result):
+        if not result["reasons"]:
+            return
+        # The decision has already been reduced across *all* ranks. Failure-only
+        # local I/O cannot leave a healthy rank entering DDP backward alone.
+        try:
+            location = write_failure(self, result, self._safety_context or {})
+        except Exception as error:
+            location = f"diagnostic write failed: {error!r}"
+        raise TrainingSafetyError(
+            f"MotionExpert safety stop before optimizer update: {', '.join(result['reasons'])}; "
+            f"epoch={int(self.current_epoch)} step={int(self.global_step)}; {location}"
+        )
+
+    def on_before_optimizer_step(self, optimizer):
+        # Lightning invokes this after AMP unscale and DDP reduction, before
+        # clipping. A norm measured after clipping would hide the failure.
+        decision = self.training_safety.check_gradients(optimizer, device=self.device)
+        self._stop_if_unsafe(decision)
+        self.log("train/unclipped_grad_norm", decision["global_unclipped_grad_norm_max"],
+                 on_step=True, on_epoch=False, sync_dist=False)
+        self._safety_context = None
+        self._safety_microbatches = []
+
+    def _step(self, batch, mode, conditioning=None, batch_idx=None):
         x = batch["misc"]["motion"]
+        context = {"batch": batch, "mode": mode, "batch_idx": batch_idx,
+                   "rng_before_step": rng_state(x.device)}
+        self._safety_context = context
+        if mode == "train":
+            self._safety_microbatches.append(context)
         y = self._task_conditioning(batch["y"], mode) if conditioning is None else conditioning
-        losses = self.flow.training_losses(self.model, x, model_kwargs={"y": y})
+        context["conditioning"] = y
+        losses = self.flow.training_losses(self.model, x, model_kwargs={"y": y}, return_diagnostics=True)
+        context["flow_diagnostics"] = {name: losses[name].detach() for name in
+                                       ("t", "x_t", "model_output", "target_velocity")}
         loss = losses["loss"].mean()
         aux = self.model.get_moe_auxiliary_loss()
         weight = float(self.cfg.MODEL.MOTION_EXPERT.LOAD_BALANCE_WEIGHT)
@@ -371,12 +430,21 @@ class UEM_Module(pl.LightningModule):
         if aux is not None:
             metrics["moe_aux_loss"] = aux
             loss = loss + weight * aux
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"Non-finite {mode} loss in {batch['misc'].get('seq_name')}")
         metrics["loss"] = loss
         for name, value in losses.items():
             if name.endswith("_mse") or name.endswith("_valid_count"):
                 metrics[name] = value.float()
+        safety_metrics = dict(metrics, per_sample_flow_loss=losses["loss"])
+        context["metrics"] = {name: value.detach() for name, value in safety_metrics.items()}
+        context["activation_rms"] = getattr(self.model, "_safety_activation_rms", None)
+        decision = self.training_safety.check_forward(
+            safety_metrics, device=x.device, activation_rms=context["activation_rms"],
+            prediction=losses["model_output"],
+            training=mode == "train")
+        self._stop_if_unsafe(decision)
+        if mode == "train":
+            self.log("train/activation_rms_max", decision["global_activation_rms_max"],
+                     on_step=True, on_epoch=False, sync_dist=False, batch_size=x.shape[0])
         if mode == "train" and getattr(self.cfg.TRAIN, "BATCHED_METRIC_SYNC", False):
             self._log_training_metrics(metrics, x.shape[0])
         else:
@@ -398,7 +466,7 @@ class UEM_Module(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
-        return self._step(batch, "train")
+        return self._step(batch, "train", batch_idx=batch_idx)
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["motionexpert_architecture"] = architecture_metadata(self.cfg)
@@ -406,6 +474,7 @@ class UEM_Module(pl.LightningModule):
         checkpoint["motionexpert_normalization_clip"] = self.normalizer.clip
         checkpoint["motionexpert_training_phase"] = _training_phase_for_model_config(self.cfg.MODEL)
         checkpoint["motionexpert_visual_conditioning"] = training_visual_contract(self.cfg)
+        checkpoint["motionexpert_training_safety"] = self.training_safety.state_dict()
         if self.warm_start_provenance is not None:
             checkpoint["motionexpert_warm_start"] = deepcopy(self.warm_start_provenance)
 
@@ -421,6 +490,8 @@ class UEM_Module(pl.LightningModule):
             if not isinstance(provenance, Mapping) or provenance.get("format") != WARM_START_FORMAT:
                 raise ValueError("Invalid checkpoint warm-start provenance")
         self.warm_start_provenance = deepcopy(provenance)
+        if "motionexpert_training_safety" in checkpoint:
+            self.training_safety.load_state_dict(checkpoint["motionexpert_training_safety"])
 
     def on_validation_epoch_start(self):
         self._validation_source_metrics = {}
@@ -444,43 +515,67 @@ class UEM_Module(pl.LightningModule):
         interval = int(getattr(self.cfg.TRAIN, "SAMPLE_VAL_EVERY_N_EPOCHS", 0))
         limit = int(getattr(self.cfg.TRAIN, "SAMPLE_VAL_MAX_SAMPLES", 16))
         if (interval > 0 and limit > 0 and not self.trainer.sanity_checking
-                and (int(self.current_epoch) + 1) % interval == 0
-                and self.trainer.is_global_zero):
+                and (int(self.current_epoch) + 1) % interval == 0):
             from ..evaluate import sampled_validation
-            dataset = self.trainer.datamodule.val_dataset
+            sampled, sampling_error = {}, None
             training = self.model.training
-            self.model.eval()
-            try:
-                with torch.no_grad():
-                    sampled = sampled_validation(
-                        self, dataset, max_samples=limit,
-                        forecast_prefix=int(self.cfg.DATA.FORECAST_PREFIX),
-                        tasks=((self.cfg.DATA.TRAIN_TASK,) if getattr(self.cfg.DATA, "TRAIN_TASK", None)
-                               is not None else TASKS))
-                for name, value in sampled.items():
-                    self.log(f"val_sample/{name}", torch.as_tensor(value, device=self.device, dtype=torch.float32),
-                             sync_dist=False)
-            finally:
-                self.model.train(training)
+            self._safety_context = {"mode": "val_sample"}
+            if self.trainer.is_global_zero:
+                self.model.eval()
+                try:
+                    dataset = _SampledValidationDatasetProbe(self.trainer.datamodule.val_dataset, self)
+                    with torch.no_grad():
+                        values = sampled_validation(
+                            self, dataset, max_samples=limit,
+                            forecast_prefix=int(self.cfg.DATA.FORECAST_PREFIX),
+                            tasks=((self.cfg.DATA.TRAIN_TASK,) if getattr(self.cfg.DATA, "TRAIN_TASK", None)
+                                   is not None else TASKS))
+                    sampled = {name: float(value) for name, value in values.items()}
+                    if any(not math.isfinite(value) for value in sampled.values()):
+                        raise FloatingPointError("Periodic sampled validation returned non-finite metrics")
+                    for name, value in sampled.items():
+                        self.log(f"val_sample/{name}", torch.tensor(value, device=self.device, dtype=torch.float32),
+                                 sync_dist=False)
+                except Exception as error:
+                    sampling_error = {"type": type(error).__name__, "message": str(error)}
+                finally:
+                    self.model.train(training)
+            # Other ranks wait at this one periodic collective. The rank-zero
+            # sampler must not throw while peers proceed to training backward.
+            failed = collective_max(torch.tensor([sampling_error is not None], device=self.device,
+                                                  dtype=torch.float32)).item()
+            if failed:
+                self._safety_context["sampling_error"] = sampling_error
+                self._stop_if_unsafe({"stage": "periodic_sampled_validation",
+                                      "reasons": ["periodic sampled validation failed or returned non-finite metrics"],
+                                      "rank_zero_exception": sampling_error,
+                                      "rank_zero_diagnostics_required": True})
+            self._safety_context = None
 
     def validation_step(self, batch, batch_idx):
         y = self._task_conditioning(batch["y"], "val")
-        loss = self._step(batch, "val", conditioning=y)
-        if self.cfg.MODEL.GLOBAL_TOKEN_COUNT:
-            x = batch["misc"]["motion"]
-            generator = torch.Generator(device=x.device).manual_seed(int(self.cfg.TRAIN.SEED) + batch_idx)
-            noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
-            t = torch.ones(x.shape[0], device=x.device)
-            _, hidden, global_hidden = self.model(noise, t, y, return_features=True)
-            valid = y["valid_frames"].bool()
-            diagnostics = {
-                "global_t1_norm": global_hidden.float().norm(dim=-1).mean(),
-                "global_t1_batch_std": global_hidden.float().std(dim=0, unbiased=False).mean(),
-                "hidden_t1_norm": (hidden.float().norm(dim=-1) * valid).sum() / valid.sum().clamp_min(1),
-            }
-            for name, value in diagnostics.items():
-                self.log(f"val/{name}", value, on_step=False, on_epoch=True,
-                         sync_dist=True, batch_size=x.shape[0])
+        loss = self._step(batch, "val", conditioning=y, batch_idx=batch_idx)
+        x = batch["misc"]["motion"]
+        generator = torch.Generator(device=x.device).manual_seed(int(self.cfg.TRAIN.SEED) + batch_idx)
+        noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
+        t = torch.ones(x.shape[0], device=x.device)
+        prediction, hidden, global_hidden = self.model(noise, t, y, return_features=True)
+        activation = torch.cat((hidden.detach().float().square().mean(-1).sqrt().reshape(-1),
+                                global_hidden.detach().float().square().mean(-1).sqrt().reshape(-1)))
+        self._safety_context["validation_t1_noise"] = noise.detach()
+        self._safety_context["activation_rms"] = activation
+        self._stop_if_unsafe(self.training_safety.check_forward({}, device=x.device,
+                                                               activation_rms=activation, prediction=prediction))
+        # Pooling uses all eleven motion tokens, independent of label masks.
+        diagnostics = {
+            "global_t1_norm": global_hidden.float().norm(dim=-1).mean(),
+            "global_t1_batch_std": global_hidden.float().std(dim=0, unbiased=False).mean(),
+            "hidden_t1_norm": hidden.float().norm(dim=-1).mean(),
+        }
+        for name, value in diagnostics.items():
+            self.log(f"val/{name}", value, on_step=False, on_epoch=True,
+                     sync_dist=True, batch_size=x.shape[0])
+        self._safety_context = None
         return loss
 
     def sample(self, y, B=None, cond_scale=None, return_all_pred_xstart=False,

@@ -240,20 +240,12 @@ class MotionExpert:
             if "initial_floor_transform" not in parameters:
                 raise ValueError("Forecast world decode requires the last-observed initial_floor_transform")
             parameters["start_frame"] = prefix
-        has_global = self.cfg.MODEL.GLOBAL_TOKEN_COUNT == 1
         result = self.flow.sample_loop(
             self.model, noise.shape, model_kwargs={"y": y, "cond_scale": cond_scale},
             noise=noise, progress=False, return_all_pred_xstart=return_all_pred_xstart,
-            return_one_step_hidden=not has_global, return_one_step_features=has_global,
+            return_one_step_features=True,
         )
-        if has_global:
-            output = result
-        elif return_all_pred_xstart:
-            motion, all_pred_xstart, hidden = result
-            output = {"motion": motion, "one_step_hidden": hidden, "pred_xstart": all_pred_xstart}
-        else:
-            motion, hidden = result
-            output = {"motion": motion, "one_step_hidden": hidden}
+        output = result
         if denormalize or decode:
             output["motion_denormalized"] = self.normalizer.denormalize(output["motion"])
         if decode:
@@ -313,12 +305,8 @@ class MotionExpert:
             normalized=normalized, output_frames=output_frames,
         )
         t = torch.ones(noise.shape[0], device=self.device, dtype=torch.float32)
-        if self.cfg.MODEL.GLOBAL_TOKEN_COUNT:
-            _, hidden, global_hidden = self.model(noise, t, y, cond_scale=cond_scale, return_features=True)
-            output = {"one_step_hidden": hidden, "one_step_global": global_hidden}
-        else:
-            _, hidden = self.model(noise, t, y, cond_scale=cond_scale, return_hidden=True)
-            output = {"one_step_hidden": hidden}
+        _, hidden, global_hidden = self.model(noise, t, y, cond_scale=cond_scale, return_features=True)
+        output = {"one_step_hidden": hidden, "one_step_global": global_hidden}
         output.update(self._feature_metadata(y, task=task, seed=seed, cond_scale=cond_scale))
         return output
 

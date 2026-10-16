@@ -189,6 +189,11 @@ class SMPLHMotionDataset(Dataset):
         for key, value in expected.items():
             if stats.get(key) != value:
                 raise ValueError(f"SMPL-H training statistics {key} mismatch")
+        from .camera_revision_acceptance import REVISION_FORMAT
+        if (self.window_cache is not None
+                and self.archive.info.get("quality_revision", {}).get("format") == REVISION_FORMAT):
+            from ..readiness import validate_cached_statistics_provenance
+            validate_cached_statistics_provenance(stats, self.window_cache.root)
 
     def _assert_archive_current(self, record=None):
         self.archive.assert_current(record)

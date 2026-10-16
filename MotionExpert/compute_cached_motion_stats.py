@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-import json
 import logging
 import os
 from pathlib import Path
@@ -23,11 +22,12 @@ from .compute_joint_motion_stats import _accumulate, _finalize_accumulators, _up
 from .config import load_config
 from .dataset.motion_layout import SMPLH_REPRE_TYPE, motion_layout
 from .dataset.smplh_motion_dataset import SMPLHMotionDataset
-from .dataset.window_cache import CONTRACT, file_sha256
+from .dataset.window_cache import CONTRACT
+from .readiness import (CACHED_STATISTICS_PROVENANCE_FORMAT,
+    WINDOW_CACHE_ACCEPTANCE_FORMAT as ACCEPTANCE_FORMAT,
+    RAW_WINDOW_CACHE_ACCEPTANCE_FORMAT as RAW_ACCEPTANCE_FORMAT, window_cache_acceptance_binding)
 
 LOGGER = logging.getLogger(__name__)
-ACCEPTANCE_FORMAT = "motionexpert-window-cache-acceptance-v1"
-RAW_ACCEPTANCE_FORMAT = "motionexpert-raw-window-cache-acceptance-v1"
 
 
 def _require_finite_block(values, valid, finite, *, field, episode, first_window):
@@ -46,23 +46,7 @@ def _require_finite_block(values, valid, finite, *, field, episode, first_window
 
 
 def _acceptance_binding(cache, acceptance_path):
-    path = Path(acceptance_path).resolve(strict=True)
-    report = json.loads(path.read_text())
-    report_format = report.get("format")
-    if (report_format not in {ACCEPTANCE_FORMAT, RAW_ACCEPTANCE_FORMAT} or report.get("state") != "complete"
-            or report.get("passed") is not True or report.get("diagnostic") is not False
-            or report.get("error") or not report.get("finished_at")):
-        raise ValueError("Cached train statistics require completed non-diagnostic formal cache acceptance or explicit raw-phase acceptance")
-    if (report_format == RAW_ACCEPTANCE_FORMAT
-            and (report.get("scope") != "all" or report.get("checks_passed") is not True)):
-        raise ValueError("Raw-phase acceptance must declare full scope and passing checks")
-    if Path(report.get("cache_root", "")).resolve() != cache.root:
-        raise ValueError("Acceptance names a different window cache")
-    expected = file_sha256(cache.manifest_path)
-    if report.get("cache_manifest_sha256") != expected:
-        raise ValueError("Acceptance window-cache manifest SHA256 differs")
-    return {"acceptance_path": str(path), "acceptance_sha256": file_sha256(path),
-            "cache_root": str(cache.root), "cache_manifest_sha256": expected}
+    return window_cache_acceptance_binding(cache.root, acceptance_path)
 
 
 def compute_cached_stats(dataset, *, acceptance_path, block_windows=1024, progress=True):
@@ -143,7 +127,9 @@ def compute_cached_stats(dataset, *, acceptance_path, block_windows=1024, progre
     if _acceptance_binding(cache, acceptance_path) != binding:
         raise ValueError("Bound cache acceptance changed during statistics computation")
     raw.update(num_windows=scanned, source_valid_frames=dict(source_frames), sequence_qc=sequence_qc)
-    return _finalize_accumulators(raw)
+    statistics = _finalize_accumulators(raw)
+    statistics["window_cache_provenance"] = {"format": CACHED_STATISTICS_PROVENANCE_FORMAT, **binding}
+    return statistics
 
 
 def validate_output(output, *, archive_root, cache_root):

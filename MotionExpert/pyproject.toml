@@ -9,6 +9,9 @@ description = "SMPL-H K12 motion expert with explicit hands21 supervision"
 requires-python = ">=3.10"
 dynamic = ["dependencies"]
 
+[project.optional-dependencies]
+audit = ["mcap>=1.2,<2", "protobuf", "scipy"]
+
 [project.scripts]
 motionexpert-train = "MotionExpert.train:main"
 motionexpert-infer = "MotionExpert.infer:main"

@@ -22,7 +22,6 @@ class TinyGroupedModel(torch.nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.global_token = torch.nn.Parameter(torch.zeros(768))
         self.backbone = torch.nn.Linear(2, 2)
         self.block = torch.nn.Module()
         self.block.ff = torch.nn.Module()

@@ -226,7 +226,7 @@ class MoEDecoderBlock(nn.Module):
     def __init__(self, dim, heads, dropout, ff_mult, num_experts=11, top_k=2, router_jitter=0.0, **moe_kwargs):
         super().__init__()
         self.attn1 = Attention(dim, heads, dropout)
-        self.attn2 = Attention(dim, heads, dropout)
+        self.attn2 = Attention(dim, heads, dropout, cross_attention=True)
         self.ff = MoEFeedForward(
             dim,
             dim * ff_mult,
@@ -246,10 +246,13 @@ class MoEDecoderBlock(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads, dropout):
+    """Pre-normalized Q/K/V with an independent cross-attention context norm."""
+
+    def __init__(self, dim, heads, dropout, *, cross_attention=False):
         super().__init__()
         assert dim % heads == 0
         self.heads = heads
+        self.cross_attention = cross_attention
         self.norm = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
         self.out_dropout = nn.Dropout(dropout)
@@ -257,9 +260,18 @@ class Attention(nn.Module):
     def forward(self, x, kv_x, mask=None):
         # mask B x 1 x 1 x N denotes which elements of kv_x are valid
 
-        x = self.norm(x)
+        query = self.norm(x)
+        if self.cross_attention:
+            # Visual/time context has a different distribution from the motion
+            # residual. Normalize it independently, without sharing the query's
+            # learned affine transform or introducing ambiguous old weights.
+            keys = F.layer_norm(kv_x, self.norm.normalized_shape, eps=self.norm.eps)
+        else:
+            # All three projections consume the same normalized self-attention
+            # state; raw residual magnitude must not enter K/V.
+            keys = query
         if mask is not None:
             mask = mask.squeeze([1, 2]).bool().logical_not()
-        out = self.attn(x, kv_x, kv_x, key_padding_mask=mask)[0]
+        out = self.attn(query, keys, keys, key_padding_mask=mask, need_weights=False)[0]
         out = self.out_dropout(out)
         return out

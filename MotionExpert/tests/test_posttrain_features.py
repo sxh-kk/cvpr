@@ -14,7 +14,7 @@ from MotionExpert.tests.fixtures import InspectDecoder
 def expert():
     torch.set_num_threads(1)
     result = tiny_expert()
-    # Exercise the real image/time/global projections without allocating MoEs.
+    # Exercise real image/time projections and motion pooling without MoEs.
     with patch.object(model_module, "MoEDecoderBlock", InspectDecoder):
         result.model = model_module.UniEgoMotion(result.cfg, dropout=0).eval()
     return result
@@ -31,6 +31,9 @@ def test_forward_features_updates_motion_parameters_and_observed_images(expert):
     assert expert.training
     assert output["one_step_hidden"].shape == (1, 11, 768)
     assert output["one_step_global"].shape == (1, 768)
+    torch.testing.assert_close(output["one_step_global"], output["one_step_hidden"].mean(1),
+                               rtol=0, atol=0)
+    assert not any("global_token" in name for name, _ in expert.model.named_parameters())
     noise, time, y = forward.call_args.args
     assert noise.shape == (1, 11, 245)
     torch.testing.assert_close(time, torch.ones(1))
@@ -44,7 +47,6 @@ def test_forward_features_updates_motion_parameters_and_observed_images(expert):
     assert images.grad is not None and torch.isfinite(images.grad).all()
     assert images.grad.abs().sum() > 0
     assert expert.model.embed_clip_cond.weight.grad.abs().sum() > 0
-    assert expert.model.global_token.grad.abs().sum() > 0
     optimizer.step()
     assert not torch.equal(expert.model.embed_clip_cond.weight, previous)
 

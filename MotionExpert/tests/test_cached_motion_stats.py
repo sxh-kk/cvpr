@@ -15,6 +15,8 @@ from MotionExpert.config import smplh_motion_expert_config
 from MotionExpert.dataset.smplh_archive import SMPLHParameterArchive
 from MotionExpert.dataset.smplh_motion_dataset import SMPLHMotionDataset
 from MotionExpert.dataset.window_cache import file_sha256
+from MotionExpert.readiness import (CACHED_STATISTICS_PROVENANCE_FORMAT,
+    validate_cached_statistics_provenance, window_cache_acceptance_binding)
 from MotionExpert.tests.fixtures import owned_archive, smplh_stats
 from MotionExpert.tests.test_vision_profile_cache import write_cache
 
@@ -41,12 +43,12 @@ def cached_archive(owned_archive, tmp_path, monkeypatch):
     return cfg
 
 
-def _dataset(cfg, *, cached, normalized, split="train"):
+def _dataset(cfg, *, cached, normalized, split="train", verified_archive=None):
     return SMPLHMotionDataset(archive_root=cfg.DATA.ARCHIVE_ROOT, split=split,
         stats_path=cfg.DATA.STATS_PATH, do_normalization=normalized, cond_img_feat=False,
         vision_profile_root=cfg.DATA.VISION_PROFILE_ROOT, image_profile=cfg.DATA.IMAGE_PROFILE,
         min_valid_image_fraction=cfg.DATA.MIN_VALID_IMAGE_FRACTION,
-        window_cache_root=cfg.DATA.WINDOW_CACHE_ROOT if cached else None)
+        window_cache_root=cfg.DATA.WINDOW_CACHE_ROOT if cached else None, verified_archive=verified_archive)
 
 
 def accepted(cfg, tmp_path):
@@ -84,15 +86,66 @@ def test_packed_stats_match_original_full_train_metadata_counts_and_values(cache
     raw_report.update(format=RAW_ACCEPTANCE_FORMAT, scope="all", checks_passed=True)
     report.write_text(json.dumps(raw_report))
     raw_phase = compute_cached_stats(cached, acceptance_path=report, block_windows=2, progress=False)
-    assert_same_stats(expected, small)
-    assert_same_stats(expected, large)
-    assert_same_stats(expected, raw_phase)
+    for stats in (small, large, raw_phase):
+        assert_same_stats(expected, {key: value for key, value in stats.items() if key != "window_cache_provenance"})
+    assert small["window_cache_provenance"] == large["window_cache_provenance"]
+    assert raw_phase["window_cache_provenance"] == {
+        "format": CACHED_STATISTICS_PROVENANCE_FORMAT,
+        **window_cache_acceptance_binding(cached.window_cache.root, report)}
+    validate_cached_statistics_provenance(raw_phase, cached.window_cache.root)
+    # The earlier statistics retain their actual proof, even after a new report
+    # accepts the same manifest. Evidence identity is not silently rebound.
+    with pytest.raises(ValueError, match="provenance differs"):
+        validate_cached_statistics_provenance(small, cached.window_cache.root)
     # Every overlapping window still contributes all eleven supervised frames.
     assert sum(large["source_valid_frames"].values()) == large["num_windows"] * 11
     torch.testing.assert_close(large["motion_mean"][108:117], large["traj_mean"][9:18], rtol=0, atol=0)
     torch.testing.assert_close(large["motion_std"][108:117], large["traj_std"][9:18], rtol=0, atol=0)
     assert not large["motion_mean"][243:245].any()
     assert torch.equal(large["motion_std"][243:245], torch.ones(2))
+
+
+def test_v4_normalized_cache_requires_its_statistics_provenance_but_raw_source_remains_compatible(
+        cached_archive, tmp_path):
+    cfg = cached_archive
+    raw = _dataset(cfg, cached=True, normalized=False)
+    # Reuse the verified tiny archive, changing only the in-memory publication
+    # kind to exercise the v4 gate without rebuilding a production revision.
+    raw.archive.info["quality_revision"] = {"format": "smplh-camera-quality-revision-v1"}
+    with pytest.raises(ValueError, match="versioned window-cache provenance"):
+        _dataset(cfg, cached=True, normalized=True, verified_archive=raw.archive)
+    _dataset(cfg, cached=False, normalized=True, verified_archive=raw.archive)
+    report = accepted(cfg, tmp_path)
+    statistics = compute_cached_stats(raw, acceptance_path=report, progress=False)
+    torch.save(statistics, cfg.DATA.STATS_PATH)
+    _dataset(cfg, cached=True, normalized=True, verified_archive=raw.archive)
+    statistics["window_cache_provenance"]["cache_manifest_sha256"] = "old-v4-cache"
+    torch.save(statistics, cfg.DATA.STATS_PATH)
+    with pytest.raises(ValueError, match="provenance differs"):
+        _dataset(cfg, cached=True, normalized=True, verified_archive=raw.archive)
+
+
+@pytest.mark.parametrize("changed", ["cache_manifest", "acceptance_sha", "acceptance_cache_manifest"])
+def test_statistics_proof_cannot_pair_another_cache_or_an_edited_acceptance(cached_archive, tmp_path, changed):
+    raw = _dataset(cached_archive, cached=True, normalized=False)
+    report = accepted(cached_archive, tmp_path)
+    statistics = compute_cached_stats(raw, acceptance_path=report, progress=False)
+    if changed == "cache_manifest":
+        # Re-accept a new same-archive manifest. The old stats must remain bound
+        # to their original cache, even when the new report is internally valid.
+        manifest = raw.window_cache.root / "manifest.json"
+        manifest.write_text(manifest.read_text() + "\n")
+        value = json.loads(report.read_text())
+        value["cache_manifest_sha256"] = file_sha256(manifest)
+        report.write_text(json.dumps(value))
+    elif changed == "acceptance_sha":
+        report.write_text(report.read_text() + "\n")
+    else:
+        value = json.loads(report.read_text())
+        value["cache_manifest_sha256"] = "other-v4-cache"
+        report.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="provenance differs|manifest SHA256"):
+        validate_cached_statistics_provenance(statistics, raw.window_cache.root)
 
 
 def test_rejects_missing_or_mismatched_formal_acceptance(cached_archive, tmp_path):

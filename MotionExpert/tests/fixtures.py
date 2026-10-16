@@ -53,7 +53,6 @@ class TinyFeatureModel(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.level = torch.nn.Parameter(torch.tensor(.2))
-        self.global_token = torch.nn.Parameter(torch.zeros(768))
         self.calls = 0
         self.last_y = None
 

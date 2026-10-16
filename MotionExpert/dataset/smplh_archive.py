@@ -24,7 +24,9 @@ PARAMETER_SCHEMA_VERSION = SMPLH_SCHEMA
 PARENTS = np.array([-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19])
 DINO_COLUMN = "observation.features.dino"
 OPTIONAL_COLUMNS = {"smplh.pose_hand_pca": ("float32", 90), "smplh.valid.hand_pose": ("bool", 2),
-                    "source.capture_timestamp_ns": ("int64", 1), "source.video_frame_index": ("int64", 1)}
+                    "source.capture_timestamp_ns": ("int64", 1), "source.video_frame_index": ("int64", 1),
+                    "observation.valid.camera_tracking": ("bool", 1),
+                    "observation.valid.camera_transition": ("bool", 1)}
 
 
 def _specs():
@@ -311,8 +313,9 @@ class SMPLHParameterArchive:
         if revision and not self.allow_unpublished:
             from .revision_acceptance import REVISION_FORMAT
             from .fit_revision_acceptance import REVISION_FORMAT as FIT_REVISION_FORMAT
+            from .camera_revision_acceptance import REVISION_FORMAT as CAMERA_REVISION_FORMAT
             declaration = self.info["quality_revision"]
-            if not isinstance(declaration, dict) or declaration.get("format") not in {REVISION_FORMAT, FIT_REVISION_FORMAT}:
+            if not isinstance(declaration, dict) or declaration.get("format") not in {REVISION_FORMAT, FIT_REVISION_FORMAT, CAMERA_REVISION_FORMAT}:
                 raise ValueError("SMPL-H quality revision declaration is invalid")
             if not isinstance(report_path, str) or not report_path:
                 raise ValueError("SMPL-H quality revisions require owned independent acceptance")
@@ -337,6 +340,13 @@ class SMPLHParameterArchive:
         from .revision_acceptance import ACCEPTANCE_FORMAT, check_revision_acceptance
         from .fit_revision_acceptance import (ACCEPTANCE_FORMAT as FIT_ACCEPTANCE_FORMAT,
                                               check_fit_revision_acceptance)
+        from .camera_revision_acceptance import (ACCEPTANCE_FORMAT as CAMERA_ACCEPTANCE_FORMAT,
+                                                 check_camera_revision_acceptance)
+        if report.get("format") == CAMERA_ACCEPTANCE_FORMAT:
+            if not revision or self.info["quality_revision"].get("format") != "smplh-camera-quality-revision-v1":
+                raise ValueError("SMPL-H camera acceptance requires its declared quality revision")
+            check_camera_revision_acceptance(self, report, path)
+            return
         if report.get("format") == FIT_ACCEPTANCE_FORMAT:
             if not revision or self.info["quality_revision"].get("format") != "smplh-fit-quality-revision-v1":
                 raise ValueError("SMPL-H final-FK acceptance requires its declared quality revision")
@@ -606,6 +616,34 @@ class SMPLHParameterArchive:
                 raise ValueError("SMPL-H modality interpolation exceeds validity")
         return arrays
 
+    def camera_transition_valid(self, record, selected):
+        """Share native-span qualification between source reads and cache blocks."""
+        selected = np.asarray(selected)
+        if (selected.ndim != 1 or not len(selected) or selected.dtype.kind not in "iu"
+                or selected[0] < 0 or selected[-1] >= record["length"] or np.any(np.diff(selected) <= 0)):
+            raise ValueError("Camera transition indices must be increasing native frame indices")
+        from ..camera_quality import selected_transition_valid
+        path = self.data_path(record["episode_index"])
+        available = set(self.reader._file(path)[1][0].schema_arrow.names)
+        quality_columns = {"observation.valid.camera_tracking", "observation.valid.camera_transition"}
+        if bool(quality_columns & available) and not quality_columns <= available:
+            raise ValueError("Native camera quality requires both point and transition columns")
+        if quality_columns <= available:
+            names = sorted(quality_columns)
+        else:
+            names = ["observation.valid.camera_position", "observation.valid.camera_rotation",
+                     "observation.valid.head_reference_position", "observation.valid.head_reference_rotation",
+                     "observation.valid.head_reference_basis"]
+        native_span = np.arange(selected[0], selected[-1]+1)
+        native = self.reader.read(path, native_span, names)
+        if quality_columns <= available:
+            point = native["observation.valid.camera_tracking"]
+            edge = native["observation.valid.camera_transition"]
+        else:
+            point = np.logical_and.reduce([native[name] for name in names])
+            edge = point.copy(); edge[1:] &= point[:-1]
+        return selected_transition_valid(point, edge, selected-native_span[0])
+
     def read_window(self, episode_index, *, start_frame=0, num_frames=11, fps=5, forecast_prefix=6, load_dino=True):
         if type(episode_index) is not int or not 0 <= episode_index < len(self._records):
             raise ValueError("SMPL-H episode index outside archive")
@@ -621,6 +659,7 @@ class SMPLHParameterArchive:
         if selected[-1] >= record["length"]:
             raise ValueError("SMPL-H training requires a complete window without tail padding")
         arrays = self._motion(record, selected)
+        arrays["observation.valid.head_reference_transition"] = self.camera_transition_valid(record, selected)
         p, q = self.model.decode(arrays)
         for component, value in (("position", p), ("rotation", q)):
             valid = arrays[f"estimated.valid.body_{component}"]

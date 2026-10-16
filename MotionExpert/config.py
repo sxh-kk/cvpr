@@ -14,6 +14,9 @@ IMAGE_FEATURE_DIM = 1024
 SMPLH_REPRESENTATION_VERSION = "smplh12_rot6d_hands21_contacts_v1"
 SMPLH_MODEL_SHA256 = "be42bff1ff0589cf0467893bcfbbeb3f9b533ba151031c8cdfb64ca1dcb34947"
 SMPLH_SCHEMA = "egomotion-smplh16-bodyparams-hands21-camera-floor-dino5-v1"
+MODEL_ARCHITECTURE_VERSION = "e7_smplh12_hands21_meanpool_qkvnorm_v2"
+GLOBAL_READOUT = "motion_hidden_mean"
+ATTENTION_NORM_VERSION = "qkv_prenorm_v2"
 
 
 def _ns(**values):
@@ -23,7 +26,7 @@ def _ns(**values):
 
 def smplh_motion_expert_config():
     """SMPL-H245, 5Hz historical6 to future5, with shared-image DINO conditioning."""
-    archive = "/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v3-fit-quality"
+    archive = "/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality"
     data = _ns(
         DATA_DIR=archive, ARCHIVE_ROOT=archive, DATASET_NAME="mixegomotion_smplh",
         REPRE_TYPE=SMPLH_REPRESENTATION_VERSION, COND_BETAS=False,
@@ -32,7 +35,7 @@ def smplh_motion_expert_config():
         TRAIN_TASK="fore", REQUIRE_FULL_WINDOW=True, TRAJECTORY_CONDITION_PROB=0.5,
         MOTION_SUPERVISION="joint",
         SPLIT_MANIFEST=archive + "/meta/splits.json",
-        STATS_PATH="/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_fit-quality-v3.pt", STATS_MODE="smplh_masked",
+        STATS_PATH="/gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_camera-quality-v4.pt", STATS_MODE="smplh_masked",
         NORMALIZATION_CLIP=None, ROW_GROUP_CACHE_MB=128, PARQUET_FILE_CACHE=8,
         VISION_PROFILE_ROOT=archive + "/vision_profiles/psi0_256x480_v1_30hz", IMAGE_PROFILE="256x480",
         WINDOW_CACHE_ROOT=None,
@@ -57,7 +60,8 @@ def smplh_motion_expert_config():
         WARM_START_EXPECTED_COMPLETED_EPOCHS=None, WARM_START_SHA256=None,
         GENERATIVE_TYPE="flow", LEARN_TRAJ=False, ENCODER_TSFM=None,
         MOTION_EXPERT=expert, OUTPUT_BRANCH_MODE="single", ZERO_MASK_TOKEN=False,
-        PREDICT_XSTART=True, GLOBAL_TOKEN_COUNT=1,
+        PREDICT_XSTART=True, GLOBAL_TOKEN_COUNT=0,
+        GLOBAL_READOUT=GLOBAL_READOUT, ATTENTION_NORM_VERSION=ATTENTION_NORM_VERSION,
         INPUT_FEATS=MOTION_DIM, TRAJ_DIM=TRAJECTORY_DIM,
         IMAGE_TOKENS=IMAGE_TOKEN_COUNT, IMAGE_DIM=IMAGE_FEATURE_DIM,
     )
@@ -67,7 +71,7 @@ def smplh_motion_expert_config():
         GLOBAL_FEATURE_START=108, GLOBAL_FEATURE_END=117,
     )
     train = _ns(
-        EXP_PATH="/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_fit_quality_v3_from_scratch", LR=1e-4, SEED=62,
+        EXP_PATH="/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch", LR=1e-4, SEED=62,
         USE_CKPT_LR=True, FUSED_ADAMW=False, BATCHED_METRIC_SYNC=False, WEIGHT_DECAY=0.01,
         NUM_EPOCHS=200, NUM_GPUS=8, PRECISION="bf16-mixed",
         ACCUMULATE_GRAD_BATCHES=1, GRADIENT_CLIP_VAL=1.0, EMA_DECAY=0.992028,
@@ -76,11 +80,30 @@ def smplh_motion_expert_config():
         NUM_SANITY_VAL_STEPS=0, LOG_EVERY_N_STEPS=10, PROGRESS_REFRESH_RATE=10,
         CHECK_VAL_EVERY_N_EPOCHS=5, SAVE_EVERY_N_EPOCHS=20,
         SAMPLE_VAL_EVERY_N_EPOCHS=5, SAMPLE_VAL_MAX_SAMPLES=16,
+        SAFETY_ENABLED=True, SAFETY_MAX_LOSS=100., SAFETY_MAX_GRAD_NORM=1000.,
+        SAFETY_MAX_ACTIVATION_RMS=100., SAFETY_ROLLING_WINDOW=128,
+        SAFETY_ROLLING_WARMUP_STEPS=32, SAFETY_ROLLING_MULTIPLIER=50.,
+        SAFETY_ROLLING_MIN_LOSS=1., SAFETY_SAVE_BATCH=True,
     )
     return _ns(DATA=data, SPARSE_JOINTS=_ns(ENABLED=True, INDICES=list(K12_JOINTS)),
                MODEL=model, FLOW=flow, TRAIN=train)
 
 def validate_architecture(cfg):
+    for key in ("SAFETY_ENABLED", "SAFETY_SAVE_BATCH"):
+        if type(getattr(cfg.TRAIN, key, None)) is not bool:
+            raise ValueError(f"TRAIN.{key} must be a boolean")
+    for key in ("SAFETY_MAX_LOSS", "SAFETY_MAX_GRAD_NORM", "SAFETY_MAX_ACTIVATION_RMS",
+                "SAFETY_ROLLING_MULTIPLIER", "SAFETY_ROLLING_MIN_LOSS"):
+        value = getattr(cfg.TRAIN, key, None)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            raise ValueError(f"TRAIN.{key} must be finite and positive")
+    for key in ("SAFETY_ROLLING_WINDOW", "SAFETY_ROLLING_WARMUP_STEPS"):
+        value = getattr(cfg.TRAIN, key, None)
+        if type(value) is not int or value < 1:
+            raise ValueError(f"TRAIN.{key} must be a positive integer")
+    if cfg.TRAIN.SAFETY_ROLLING_WARMUP_STEPS > cfg.TRAIN.SAFETY_ROLLING_WINDOW:
+        raise ValueError("SAFETY_ROLLING_WARMUP_STEPS cannot exceed SAFETY_ROLLING_WINDOW")
     vision_root = getattr(cfg.DATA, "VISION_PROFILE_ROOT", None)
     image_profile = getattr(cfg.DATA, "IMAGE_PROFILE", None)
     if vision_root is not None and (not isinstance(vision_root, str) or not vision_root.strip()):
@@ -104,6 +127,8 @@ def validate_architecture(cfg):
         "MODEL.PREDICT_XSTART": True, "MODEL.INPUT_FEATS": dim,
         "MODEL.TRAJ_DIM": TRAJECTORY_DIM, "MODEL.IMAGE_TOKENS": IMAGE_TOKEN_COUNT,
         "MODEL.IMAGE_DIM": IMAGE_FEATURE_DIM,
+        "MODEL.GLOBAL_READOUT": GLOBAL_READOUT,
+        "MODEL.ATTENTION_NORM_VERSION": ATTENTION_NORM_VERSION,
         "MODEL.MOTION_EXPERT.ENABLED": True,
         "MODEL.MOTION_EXPERT.NUM_EXPERTS": 12,
         "MODEL.MOTION_EXPERT.NUM_ROUTED_EXPERTS": 11,
@@ -120,8 +145,8 @@ def validate_architecture(cfg):
         if actual != value:
             raise ValueError(f"SMPL-H MotionExpert requires {path}={value!r}, got {actual!r}")
     count = cfg.MODEL.GLOBAL_TOKEN_COUNT
-    if type(count) is not int or count != 1:
-        raise ValueError("GLOBAL_TOKEN_COUNT must be 1")
+    if type(count) is not int or count != 0:
+        raise ValueError("GLOBAL_TOKEN_COUNT must be 0: use all eleven motion hidden states with mean pooling")
     if cfg.DATA.FPS != 5 or getattr(cfg.DATA, "TRAIN_TASK", None) != "fore":
         raise ValueError("MotionExpert supports the 5Hz forecasting protocol")
     if getattr(cfg.DATA, "MOTION_SUPERVISION", None) != "joint":
@@ -161,9 +186,14 @@ def architecture_metadata(cfg):
     validate_architecture(cfg)
     count = cfg.MODEL.GLOBAL_TOKEN_COUNT
     metadata = {
-        "architecture": "e7_smplh12_hands21_global_v1",
+        "architecture": MODEL_ARCHITECTURE_VERSION,
         "representation": cfg.DATA.REPRE_TYPE, "global_token_count": count,
         "num_prefix_tokens": 1 + count, "hidden_dim": 768,
+        "global_readout": cfg.MODEL.GLOBAL_READOUT,
+        "global_pooling": {"reduction": "mean", "token_axis": 1,
+                           "scope": "all_motion_hidden", "token_count": cfg.DATA.WINDOW,
+                           "uses_label_validity": False},
+        "attention_normalization": cfg.MODEL.ATTENTION_NORM_VERSION,
         "motion_dim": cfg.MODEL.INPUT_FEATS, "trajectory_dim": TRAJECTORY_DIM,
         "joint_indices": list(cfg.SPARSE_JOINTS.INDICES), "hand_joint_count": 21,
         "rotation_encoding": "matrix_first_two_rows", "fps": cfg.DATA.FPS,

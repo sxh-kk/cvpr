@@ -48,13 +48,13 @@ def checkpoint_config(checkpoint):
     metadata = checkpoint.get("motionexpert_architecture")
     if not isinstance(metadata, Mapping) or "hyper_parameters" not in checkpoint:
         raise ValueError("SMPL-H checkpoints require architecture metadata and hyper_parameters; use motionexpert-export")
+    from .config import MODEL_ARCHITECTURE_VERSION
+    if metadata.get("architecture") != MODEL_ARCHITECTURE_VERSION or "global_token" in state:
+        raise ValueError("Checkpoint uses a legacy GLOBAL-token/attention architecture; "
+                         "ordinary resume, weight initialization and warm start are incompatible "
+                         "with mean-pooled qkv_prenorm_v2. Preserve the source and start a new run.")
     cfg = config_from_dict(checkpoint["hyper_parameters"])
     validate_architecture(cfg)
-    has_global = "global_token" in state
-    if bool(cfg.MODEL.GLOBAL_TOKEN_COUNT) != has_global:
-        raise ValueError("Checkpoint global_token weights and architecture configuration disagree")
-    if has_global and tuple(state["global_token"].shape) != (768,):
-        raise ValueError("Checkpoint global_token must have shape [768]")
     expected = architecture_metadata(cfg)
     if any(metadata.get(key) != value for key, value in expected.items()):
         raise ValueError("Checkpoint architecture metadata does not match its configuration and weights")

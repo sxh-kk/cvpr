@@ -21,6 +21,7 @@ from .ema import EMA
 from .module.uem_module import UEM_Module, restore_training_phase
 from .precision import trainer_precision_options
 from .warm_start import apply_warm_start
+from .training_safety import validate_safety_precision
 
 
 class PeriodicModelCheckpoint(ModelCheckpoint):
@@ -113,6 +114,7 @@ def main():
             parser.error("--warm-start-weights requires a warm-start checkpoint")
         cfg.MODEL.WARM_START_WEIGHTS = args.warm_start_weights
     validate_architecture(cfg)
+    validate_safety_precision(cfg.TRAIN, use_gpu=int(cfg.TRAIN.NUM_GPUS) > 0)
     if resume:
         checkpoint = read_checkpoint(cfg.MODEL.CKPT_PATH)
         validate_checkpoint_architecture(cfg, checkpoint)

@@ -89,11 +89,13 @@ def protocol_from_config(cfg):
 
 def source_code_binding():
     from . import representation, smplh_representation, smplh_archive
+    from .. import camera_quality
     from ..utils import rotation_conversions
     from .smplh_motion_dataset import SMPLHMotionDataset
     return {module.__name__: file_sha256(module.__file__) for module in (
-        representation, smplh_representation, smplh_archive, rotation_conversions)} | {
-        "window_index": hashlib.sha256(inspect.getsource(SMPLHMotionDataset._index_record).encode()).hexdigest()}
+        representation, smplh_representation, smplh_archive, rotation_conversions, camera_quality)} | {
+        "window_index": hashlib.sha256(inspect.getsource(SMPLHMotionDataset._index_record).encode()).hexdigest(),
+        "window_builder": file_sha256(Path(__file__).resolve().parents[1] / "build_window_cache.py")}
 
 
 def cache_binding(archive, protocol):

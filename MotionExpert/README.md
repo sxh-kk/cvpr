@@ -169,13 +169,13 @@ FP16＋fused AdamW因不能保证pre-step时已unscale而拒绝；当前BF16＋�
 | GPU／batch／workers | 8卡，每卡256，全局2048；每卡24workers |
 | 优化器 | AdamW，LR1e-4，weight decay0.01，梯度裁剪1.0 |
 | 精度 | BF16 mixed |
-| 周期 | 200 epochs；20轮warmup，然后cosine至1e-5 |
+| 周期 | 200 epochs；正式配置显式设置10轮warmup，然后cosine至1e-5 |
 | 保存／验证 | 每20轮保存，结束保存final；每5轮验证 |
 | 模型 | hidden768、12层、1 shared＋11 routed experts、Top-2 |
 | 生成 | x0 Flow Matching，10步Euler；EMA0.992028 |
 | 提速开关 | fused AdamW和批量指标同步保持关闭 |
 
-本次只修复和验收，不启动正式训练。全部验收通过后，用户可手动执行：
+归档、缓存、统计与GPU验收已完成，用户已授权按以下配置从头启动正式训练：
 
 ```bash
 cd /root/workspace/wbc/guanzerong/cvpr
@@ -223,7 +223,8 @@ Robust使用 `stage="robust"`；DINO始终冻结。外部nn.Module／DDP应把 `
 新增或修改路径的CPU回归位于 `MotionExpert/tests/`，不重复已通过的数据数值验收。
 GPU检查包括真实模型BF16连续更新、11hidden均值与反传、CFG、未来标签隔离、10步采样、
 八卡参数一致性及单卡异常全卡停止。短检不代表200轮收敛或全量吞吐验收。
-本次状态和报告位置由 `.pipeline/current_motionexpert_repair.json` 记录，正式训练保持关闭。
+验收状态和报告位置由 `.pipeline/current_motionexpert_repair.json` 记录。
+当前训练PID、日志及配置快照由 `.pipeline/current_motionexpert_training.json` 记录。
 
 2026-10-16本轮验收：
 

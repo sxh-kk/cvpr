@@ -1,4 +1,4 @@
-# 相机原生帧质量修订、11个motion hidden均值、QKV归一化；仅验收，不自动训练。
+# 相机原生帧质量修订、11个motion hidden均值、QKV归一化；已验收，按用户授权启动训练。
 # 归档、窗口缓存、新统计和GPU验收全部通过后，才可手动使用--from-scratch。
 # 复用原生30Hz DINO；旧GLOBAL/旧注意力checkpoint不兼容，保留追溯。
 DATA:
@@ -38,6 +38,7 @@ TRAIN:
   LR: 1.0e-4
   NUM_EPOCHS: 200
   SCHEDULER_TOTAL_EPOCHS: 200
+  WARMUP_EPOCHS: 10
   SAVE_EVERY_N_EPOCHS: 20
   PRECISION: bf16-mixed
   FUSED_ADAMW: false

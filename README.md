@@ -32,10 +32,11 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 异常保护检查逐样本加权flow loss、每层token RMS及unscale后／clip前梯度；DDP统一判决，更新前停止。
 未加权分组MSE单独检查NaN/Inf并记录，不与实际加权loss共用幅值门限。
 异常时保存各卡batch、mask、来源、RNG与中间量，不额外保存大型checkpoint，正常步不写诊断文件。
-新任务仍为8卡、每卡256、每卡24workers、LR1e-4、BF16、200轮（20轮warmup）、每20轮保存。
-**本次仅修复与验收，不启动正式训练，也不启动自动训练守护。**
+新任务为8卡、每卡256、每卡24workers、LR1e-4、BF16、200轮（10轮warmup）、每20轮保存。
+**验收已完成，用户已授权按当前配置从头启动正式训练。**
 配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。
 修复流程状态位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_repair.json`。
+当前训练PID、日志和启动配置位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_training.json`。
 
 环境迁移见 [MIGRATION.md](docs/MIGRATION.md)。数据、权重、缓存、checkpoint和环境不随Git分发。
 第三方代码沿用各目录原许可与版权。

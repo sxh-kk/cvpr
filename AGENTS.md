@@ -47,7 +47,7 @@
 - 训练目标为继承双来源最终FK验收并完成相机原生质量修订的SMPL-H参数归档：
   `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`
 - 新归档、窗口缓存及全量train统计验收完成后才能启动训练；原v1/v2/v3与现有checkpoint保留追溯。
-- 当前架构为e7_smplh12_hands21_meanpool_qkvnorm_v2；删除可学习GLOBAL，11个motion hidden直接mean pooling。self-attention Q/K/V全归一化，cross context独立归一化。旧GLOBAL/旧注意力checkpoint不兼容，旧第60轮专用配置已移除；从头新任务200轮，20轮warmup。本轮只验收，不启动正式训练。
+- 当前架构为e7_smplh12_hands21_meanpool_qkvnorm_v2；删除可学习GLOBAL，11个motion hidden直接mean pooling。self-attention Q/K/V全归一化，cross context独立归一化。旧GLOBAL/旧注意力checkpoint不兼容，旧第60轮专用配置已移除；正式配置显式设置从头新任务200轮、10轮warmup、峰值LR1e-4。归档、缓存、统计及GPU验收已完成，用户已授权八卡、每卡256、24worker正式训练。
 - HM检查原始MPS质量及closed/open-loop连续性；EgoSuite没有源confidence，不伪造。5Hz参考增量必须检查中间所有30Hz点及边。相机质量失败不删除独立world观测或DINO。
 - 训练更新前检查全卡loss/activation、unscale后clip前梯度，异常一致停止并保存batch/RNG诊断；正式就绪绑定新缓存、全train统计和当前架构GPU验收。
 - 保留双手各21点、相机轨迹、地面、有效 mask 和原始分割。

@@ -33,6 +33,8 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 未加权分组MSE单独检查NaN/Inf并记录，不与实际加权loss共用幅值门限。
 异常时保存各卡batch、mask、来源、RNG与中间量，不额外保存大型checkpoint，正常步不写诊断文件。
 新任务为8卡、每卡256、每卡24workers、LR1e-4、BF16、200轮（10轮warmup）、每20轮保存。
+单机正式启动显式启用NCCL P2P／共享内存，不使用 `--ddp-socket`；指标每10步合并同步，
+保留完整epoch均值和每步异常保护。普通AdamW与其余训练参数保持不变。
 **验收已完成，用户已授权按当前配置从头启动正式训练。**
 配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。
 修复流程状态位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_repair.json`。

@@ -173,19 +173,43 @@ FP16＋fused AdamW因不能保证pre-step时已unscale而拒绝；当前BF16＋�
 | 保存／验证 | 每20轮保存，结束保存final；每5轮验证 |
 | 模型 | hidden768、12层、1 shared＋11 routed experts、Top-2 |
 | 生成 | x0 Flow Matching，10步Euler；EMA0.992028 |
-| 提速开关 | fused AdamW和批量指标同步保持关闭 |
+| 跨卡通信 | 单机启用P2P／NVLink及共享内存；IB关闭，loopback用于连接建立及必要的回退 |
+| 指标同步 | `BATCHED_METRIC_SYNC=true`；每10步合并同步，epoch均值保留全部训练样本 |
+| 优化器融合 | `FUSED_ADAMW=false`，继续使用普通AdamW |
 
 归档、缓存、统计与GPU验收已完成，用户已授权按以下配置从头启动正式训练：
 
 ```bash
 cd /root/workspace/wbc/guanzerong/cvpr
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=0 NCCL_SOCKET_IFNAME=lo \
 /gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python \
-  -m MotionExpert.train --config MotionExpert/configs/smplh_k12_psi0_pretrain.yaml --from-scratch --ddp-socket
+  -m MotionExpert.train --config MotionExpert/configs/smplh_k12_psi0_pretrain.yaml --from-scratch
 ```
 
 输出位于 `training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch`，在MixEgoMotion根目录。
 Lightning启动DDP，无需另套torchrun。后续同架构续训须使用同一统计与视觉身份。
+上述通信设置适用于当前单机八卡；显式覆盖继承的P2P／SHM禁用环境，正式命令不再使用
+`--ddp-socket`。该选项仍保留为通信兼容性回退，会关闭P2P和共享内存。
+启动设置允许P2P不代表一定采用，须结合NCCL日志中的 `via P2P/IPC` 验证实际传输路径。
+合并指标只改变日志通信：`train/loss_step` 保留日志时刻的全局batch均值，
+`train/loss_epoch` 按样本数汇总整轮，包含最后一个日志周期之后的尾批。
+逐步loss／激活／梯度异常保护、梯度同步和动态空专家检查继续启用。
+
+2026-10-16八卡BF16验证使用同一批已验收的真实数据，每卡256，连续32次更新；
+剔除前4步，以各步最慢rank的耗时求平均：
+
+| 通信／指标方式 | 固定batch平均耗时 |
+| --- | --- |
+| socket／原指标同步 | 1.232秒／步 |
+| socket／合并指标同步 | 1.254秒／步 |
+| P2P／合并指标同步 | 0.411秒／步 |
+
+三组均通过loss、梯度和激活有限性检查，模型及EMA的全量hash在八卡一致；
+仅改变指标同步时，更新后的模型与EMA还与原方式逐字节相同。
+单独合并指标未测出独立吞吐收益，组合收益主要来自通信。
+约3倍是固定batch的短时结果，不含DataLoader等待，不代表整轮或全训练提速倍数。
+验证记录位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_optimization.json` 所指任务目录。
 
 ## 一步hidden与在线共享图像
 

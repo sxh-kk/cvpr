@@ -50,6 +50,7 @@
 - 当前架构为e7_smplh12_hands21_meanpool_qkvnorm_v2；删除可学习GLOBAL，11个motion hidden直接mean pooling。self-attention Q/K/V全归一化，cross context独立归一化。旧GLOBAL/旧注意力checkpoint不兼容，旧第60轮专用配置已移除；正式配置显式设置从头新任务200轮、10轮warmup、峰值LR1e-4。归档、缓存、统计及GPU验收已完成，用户已授权八卡、每卡256、24worker正式训练。
 - HM检查原始MPS质量及closed/open-loop连续性；EgoSuite没有源confidence，不伪造。5Hz参考增量必须检查中间所有30Hz点及边。相机质量失败不删除独立world观测或DINO。
 - 训练更新前检查全卡loss/activation、unscale后clip前梯度，异常一致停止并保存batch/RNG诊断；正式就绪绑定新缓存、全train统计和当前架构GPU验收。
+- 当前单机八卡启用NCCL P2P／共享内存（IB关闭），正式启动不用 `--ddp-socket`；批量指标同步开启，普通AdamW与逐步异常保护保留。通信改动须验证实际P2P/IPC路径及连续多步跨卡参数一致性。
 - 保留双手各21点、相机轨迹、地面、有效 mask 和原始分割。
 - MotionExpert 使用5Hz、11帧：
   历史5帧＋当前帧，预测未来5帧。

@@ -11,6 +11,7 @@ dynamic = ["dependencies"]
 
 [project.optional-dependencies]
 audit = ["mcap>=1.2,<2", "protobuf", "scipy"]
+plot = ["matplotlib>=3.7,<4"]
 
 [project.scripts]
 motionexpert-train = "MotionExpert.train:main"

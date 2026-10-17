@@ -39,6 +39,9 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。
 修复流程状态位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_repair.json`。
 当前训练PID、日志和启动配置位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_training.json`。
+`MotionExpert/watch_loss.py` 每完成1轮，独立更新训练目录 `plots/loss_curve.png`，
+展示从第1轮到当前完整轮次的训练均值与已有验证loss，同时保存CSV。
+绘图只读取TensorBoard，不占训练GPU；[运行方式](MotionExpert/README.md#每轮更新loss曲线)。
 
 环境迁移见 [MIGRATION.md](docs/MIGRATION.md)。数据、权重、缓存、checkpoint和环境不随Git分发。
 第三方代码沿用各目录原许可与版权。

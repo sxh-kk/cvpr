@@ -211,6 +211,35 @@ Lightning启动DDP，无需另套torchrun。后续同架构续训须使用同一
 约3倍是固定batch的短时结果，不含DataLoader等待，不代表整轮或全训练提速倍数。
 验证记录位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_optimization.json` 所指任务目录。
 
+## 每轮更新loss曲线
+
+`watch_loss.py` 独立读取TensorBoard日志，不加载模型、checkpoint或运动数据，不修改训练进程。
+默认每完成1轮，更新从第1轮到当前已完成轮次的曲线；启动时先绘制已有完整历史。
+训练曲线使用 `train/loss_epoch` 的真实整轮均值，验证曲线使用已有的 `val/loss`，
+不把每10步记录的batch loss当作整轮均值。没有整轮记录的当前轮不会提前画入。
+
+直接执行文件，避免导入训练包；绘图需要TensorBoard及可选依赖 `matplotlib>=3.7,<4`。
+当前单独CPU环境的运行命令为：
+
+```bash
+/root/.cache/cvpr-loss-plot/bin/python -u \
+  /root/workspace/wbc/guanzerong/cvpr/MotionExpert/watch_loss.py \
+  --every-epochs 1 --poll-seconds 30
+```
+
+默认从 `.pipeline/current_motionexpert_training.json` 解析训练目录，并在启动时绑定该任务。
+输出位于训练目录的 `plots/`，数据及图片均不进入Git：
+
+- `loss_curve.png`：每轮覆盖更新的完整历史曲线，轮数从1开始。
+- `loss_history.csv`：每轮训练均值和已有验证值，保留缺失项。
+- `status.json`：绘图进程、最近完成轮数、输出路径和更新时间。
+
+用 `--run-dir /绝对路径` 可查看指定任务，`--output-dir` 可指定输出位置；
+`--once` 只刷新一次后退出。相同输出目录仅允许一个绘图进程，停止绘图不影响训练。
+日志晚写入的epoch或验证值会在后续扫描补上；不会将另一个训练任务混入当前曲线。
+当前绘图守护状态及日志位置见
+`/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_loss_plot.json`。
+
 ## 一步hidden与在线共享图像
 
 `forward_features()` 保留autograd；默认没有CFG，单次 `t=1` 前向：

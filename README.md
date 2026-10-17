@@ -35,8 +35,9 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 新任务为8卡、每卡256、每卡24workers、LR1e-4、BF16、200轮（10轮warmup）、每20轮保存。
 单机正式启动显式启用NCCL P2P／共享内存，不使用 `--ddp-socket`；指标每10步合并同步，
 保留完整epoch均值和每步异常保护。普通AdamW与其余训练参数保持不变。
-归档与训练路径验收已完成。当前原训练已在第100轮保存后停止，WD对照在第30轮结束；
-按最新安排暂不继续训练MotionExpert，先比较20／100轮的冻结一步global特征与DINO基线。
+归档与训练路径验收已完成，WD对照在第30轮结束，20／100轮冻结先验验证已完成。
+2026-10-17按用户最新安排，从原正式任务第100轮checkpoint完整恢复，目标累计200轮；
+保留优化器、EMA和原200轮学习率日程，八卡每卡256／24workers，其余参数不变。
 独立GPU诊断入口为 `python -m MotionExpert.probe_prior`，只拟合小读出头，按EgoSuite／HM分别报告；
 具体命令、采样与解释边界见 [冻结运动先验验证](MotionExpert/README.md#冻结运动先验验证)。
 配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。

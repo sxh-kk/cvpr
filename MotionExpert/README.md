@@ -189,6 +189,22 @@ NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=0 NCCL_SOCKET_IFNAME=lo \
 
 输出位于 `training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch`，在MixEgoMotion根目录。
 Lightning启动DDP，无需另套torchrun。后续同架构续训须使用同一统计与视觉身份。
+2026-10-17按用户最新安排，从第100轮checkpoint完整续训，目标累计200轮：
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=0 NCCL_SOCKET_IFNAME=lo \
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python \
+  -m MotionExpert.train --config MotionExpert/configs/smplh_k12_psi0_pretrain.yaml \
+  --resume /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=99-step=48700.ckpt \
+  --max-epochs 200
+```
+
+完整恢复优化器、EMA、调度和step计数，从第101轮继续；不重新warmup，不额外训练200轮。
+恢复点学习率约5.84e-5，沿用原200轮日程至1e-5；每20轮保存和每5轮验证保持不变。
+原20—100轮checkpoint与冻结先验验证产物保留，当前PID及日志以 `.pipeline/current_motionexpert_training.json` 为准。
+
 上述通信设置适用于当前单机八卡；显式覆盖继承的P2P／SHM禁用环境，正式命令不再使用
 `--ddp-socket`。该选项仍保留为通信兼容性回退，会关闭P2P和共享内存。
 启动设置允许P2P不代表一定采用，须结合NCCL日志中的 `via P2P/IPC` 验证实际传输路径。

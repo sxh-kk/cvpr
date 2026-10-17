@@ -271,6 +271,49 @@ Robust使用 `stage="robust"`；DINO始终冻结。外部nn.Module／DDP应把 `
 只用hidden时输出head不参与梯度，DDP需处理未使用参数，如 `find_unused_parameters=True`。
 冻结特征用 `extract_features()`；完整预测用 `predict_future()`，返回未来 `[B,5,245]` 和完整 `[B,11,245]`。
 
+## 冻结运动先验验证
+
+`probe_prior` 比较第20轮、第100轮的 `t=1`、11个hidden均值与历史DINO基线。
+MotionExpert全程EMA／FP32／eval／禁止梯度，只训练独立的线性ridge读出；不会恢复运动训练。
+直接读取已验收train／val packed mmap及按需DINO，不扫描原始归档、解码Parquet或执行FK。
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python -u \
+  -m MotionExpert.probe_prior \
+  --checkpoint20 /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=19-step=9740.ckpt \
+  --checkpoint100 /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=99-step=48700.ckpt \
+  --output /gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/prior-probe-new-run \
+  --gpus 0,1,2,3,4,5,6,7
+```
+
+输出目录必须全新且位于仓库外。默认每来源train最多1024个episode、val最多256个，
+每episode最多16窗，窗口起点相距至少60个原生帧；三组使用相同样本、标签及逐窗噪声。
+输入仅历史6帧图像和历史图像有效性，不输入相机轨迹、真实运动或未来标签mask。
+
+标签为当前帧固定相机地面系中的未来腕位移、参考XY位移与yaw，以及脚接触和相对当前接触状态变化。
+腕使用显式hands21的第0点；相机参考链中任一坏边阻断依赖该链的位移标签。
+接触监督保持独立。yaw以sin/cos拟合、环绕角误差评分。
+
+DINO保留6×5×1024时序后仅在train拟合PCA768，记录解释方差；三个读出均为相同维度。
+正则强度只在原train内部按人物／录制连通组选择，原val仅评分。
+结果分EgoSuite／HM报告，包含episode宏平均、有效覆盖和按原连通组配对bootstrap区间。
+接触读出采用线性最小二乘与0.5阈值，未经概率校准。
+
+`plan.json`、`selection.json`、`gpu-check-*.json`、`metrics.json`、`report.md`、冻结特征及
+小读出权重均保存于输出目录。附带256个val窗口的三份噪声特征，用于判断噪声敏感性。
+`--stage extract` 仅提取；`--stage fit` 在已提取的同一输出目录拟合读出。
+该验证衡量冻结pooled特征的运动信息可读性，不直接等同于下游注入收益；DINO压缩也可能丢失信息。
+
+2026-10-17首次验证：8张A100、每卡B128、两份EMA、FP32；train 30,704窗／val 7,604窗。
+各来源train 1024个episode、val 256个episode，验证连通组EgoSuite 114／HM 59。
+20／100轮各卡B4与公开特征接口严格一致，MotionExpert无可训练参数或梯度；20项新增CPU检查通过。
+EgoSuite的100−20轮腕位移误差为−0.311cm（组95%区间−0.545至−0.068），参考XY为−0.428cm
+（−0.652至−0.212）；HM主要差值区间跨0。没有证据说明100轮的冻结线性读出泛化退化。
+但EgoSuite的零位移参照仍优于两组腕／参考位移读出；接触变化读出F1为0，不能把高接触F1当作变化预测能力。
+DINO PCA768保留87.57%特征方差，不代表保留同等比例运动信息。结果不能替代下游对照或证明续训到200轮有收益。
+完整报告与GPU记录：`/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-frozen-prior20-100-20261017T153935Z/`。
+
 ## 检查记录
 
 新增或修改路径的CPU回归位于 `MotionExpert/tests/`，不重复已通过的数据数值验收。

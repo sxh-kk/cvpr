@@ -24,6 +24,7 @@ from diffusers.models.attention_processor import Attention, JointAttnProcessor2_
 from diffusers.models.attention import FeedForward, _chunked_feed_forward
 # from dit_policy.data4robotics.models.diffusion import _TimeNetwork
 from psi.config.config import LaunchConfig
+from psi.models.vlm_features import VLMFeatures, masked_mean_vlm_tokens
 from transformers import Qwen3VLForConditionalGeneration, AutoConfig, AutoProcessor, Qwen2TokenizerFast, Qwen3VLProcessor
 from qwen_vl_utils import process_vision_info
 
@@ -51,6 +52,8 @@ class HumanFoundationModelOutput(BaseOutput):
     vlm_feat_norm: Optional["torch.Tensor"] = None  # noqa: F821
     # Fraction of the batch whose proprio state was dropped (state_as_action_token, train-time).
     state_drop_frac: Optional[float] = None
+    # Optional observation-prefix tokens and their parameter-free p_V summary.
+    vlm_features: Optional[VLMFeatures] = None
 
     def to_tuple(self):
         return (None, self.action)
@@ -1836,6 +1839,31 @@ class Psi0Model(nn.Module):
             return all_hidden_states[-1].unsqueeze(1)
         return torch.stack([all_hidden_states[i] for i in self.vlm_layer_indices], dim=1)
 
+    def extract_vlm_features(
+        self, input_ids, attention_mask, pixel_values, image_grid_thw
+    ) -> VLMFeatures:
+        """Extract the existing action-context tokens and a masked-mean p_V.
+
+        Inputs must be the observation prefix (images, instruction and template),
+        without teacher-forced action answers. Layer selection, normalization,
+        grad mode and model train/eval mode are unchanged. No feature is cached.
+        """
+        all_hidden_states = self.vlm_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            output_hidden_states=True,
+            return_dict=True,
+        ).hidden_states
+        views = self._select_vlm_views(all_hidden_states)
+        return VLMFeatures(
+            tokens=views,
+            pooled_tokens=masked_mean_vlm_tokens(views, attention_mask),
+            attention_mask=attention_mask,
+            last_hidden_state=all_hidden_states[-1],
+        )
+
     def forward(
         self,
         input_ids,
@@ -1849,19 +1877,17 @@ class Psi0Model(nn.Module):
         pooled_projections: Optional[torch.Tensor] = None,
         return_dict: bool = True,
         skip_layers: Optional[List[int]] = None,
+        return_vlm_features: bool = False,
     ) -> Union[List[torch.Tensor], HumanFoundationModelOutput]:
 
-        # extract vision + language features (keep all layers for layerwise VLM fusion conditioning)
-        all_hidden_states = self.vlm_model(
+        vlm_features = self.extract_vlm_features(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
-            output_hidden_states=True,
-            return_dict=True
-        ).hidden_states
-        vlm_hidden_states = all_hidden_states[-1]     # last layer, for logging (norm)
-        views = self._select_vlm_views(all_hidden_states)  # (B, V, N, D): V=1 or n_blocks
+        )
+        vlm_hidden_states = vlm_features.last_hidden_state
+        views = vlm_features.tokens
 
         # Mean per-token L2 norm of the VLM feature right before it is handed to the
         # action header, for logging/monitoring. Detached + fp32; masked to valid tokens
@@ -1881,6 +1907,7 @@ class Psi0Model(nn.Module):
             joint_attention_kwargs=dict(
                 action_hidden_embeds=action_samples, # (B,Tp,Da)
                 views=views,  # (B,V,N,D)  V=1 (last layer) or n_blocks (layerwise VLM fusion)
+                vlm_features=vlm_features,  # separate p_V branch; legacy header ignores it
                 obs=states,  # (B,1,M)
                 traj2ds=traj2ds,  # (B, C, 3, H, W)
             ),
@@ -1888,7 +1915,8 @@ class Psi0Model(nn.Module):
             return_dict=return_dict,
         )
         return HumanFoundationModelOutput(action=model_output.action, vlm_feat_norm=vlm_feat_norm,
-                                          state_drop_frac=getattr(self.action_header, "last_state_drop_frac", None))
+                                          state_drop_frac=getattr(self.action_header, "last_state_drop_frac", None),
+                                          vlm_features=vlm_features if return_vlm_features else None)
 
     def _collate_vlm_batch(self, batch_input_ids: List[torch.Tensor]):
         """Right-pad mixed-length samples like training's PaddedCollatorForTogether
@@ -1911,8 +1939,9 @@ class Psi0Model(nn.Module):
         traj2ds,
         goal_images: List[List[Image.Image]] | None = None,  # B * List of PIL goal images
         pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
+        return_vlm_features: bool = False,
         **kwargs: str
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
 
         bsz = states.shape[0]
         batch_input_ids = []
@@ -1966,21 +1995,12 @@ class Psi0Model(nn.Module):
         batch_image_grid_thw = torch.cat(batch_image_grid_thw, dim=0)
 
         with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
-            # extract vision + language features
-            output = self.vlm_model(
+            vlm_features = self.extract_vlm_features(
                 input_ids=batch_input_ids,
                 attention_mask=batch_attention_mask,
                 pixel_values=batch_pixel_values,
                 image_grid_thw=batch_image_grid_thw,
-                output_hidden_states=True,
-                return_dict=True
             )
-            vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
-            
-
-            # use hidden states from the last layer
-            vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
-            vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
 
             # generate action from noise
             action_samples = torch.randn(
@@ -1996,7 +2016,8 @@ class Psi0Model(nn.Module):
                     pooled_projections=pooled_projections,  # (B, D) for combined_temb
                     joint_attention_kwargs=dict(
                         action_hidden_embeds=action_samples, # (B,Tp,Da)
-                        views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
+                        views=vlm_features.tokens,
+                        vlm_features=vlm_features,
                         obs=states,  # (B,1,M)
                         traj2ds=traj2ds,  # (B, C, 3, H, W)
                     ),
@@ -2009,6 +2030,8 @@ class Psi0Model(nn.Module):
                     model_output=model_pred, timestep=timestep, sample=action_samples # type: ignore
                 ).prev_sample
 
+        if return_vlm_features:
+            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features)
         return action_samples.float()
 
     @torch.inference_mode()
@@ -2024,8 +2047,9 @@ class Psi0Model(nn.Module):
         max_delay: int = 0,
         goal_images: List[List[Image.Image]] | None = None,  # B * List of PIL goal images
         pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
+        return_vlm_features: bool = False,
         **kwargs: str
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
 
         ## RTC related ##
         H = self.action_horizon
@@ -2107,21 +2131,12 @@ class Psi0Model(nn.Module):
         batch_image_grid_thw = torch.cat(batch_image_grid_thw, dim=0)
 
         with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
-            # extract vision + language features
-            output = self.vlm_model(
+            vlm_features = self.extract_vlm_features(
                 input_ids=batch_input_ids,
                 attention_mask=batch_attention_mask,
                 pixel_values=batch_pixel_values,
                 image_grid_thw=batch_image_grid_thw,
-                output_hidden_states=True,
-                return_dict=True
             )
-            vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
-            
-
-            # use hidden states from the last layer
-            vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
-            vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
 
             # generate action from noise
             action_samples = torch.randn(
@@ -2146,7 +2161,8 @@ class Psi0Model(nn.Module):
                     pooled_projections=pooled_projections,  # (B, D) for combined_temb
                     joint_attention_kwargs=dict(
                         action_hidden_embeds=action_samples, # (B,Tp,Da)
-                        views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
+                        views=vlm_features.tokens,
+                        vlm_features=vlm_features,
                         obs=states,  # (B,1,M)
                         traj2ds=traj2ds,  # (B, C, 3, H, W)
                     ),
@@ -2163,6 +2179,8 @@ class Psi0Model(nn.Module):
                 # if i == len(self.noise_scheduler.timesteps) - 1:
                 #     action_samples = torch.where(prefix_mask[:, :, None], prev_actions, action_samples)
 
+        if return_vlm_features:
+            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features)
         return action_samples.float()
 
     @torch.no_grad()
@@ -2183,8 +2201,9 @@ class Psi0Model(nn.Module):
         mask_schedule: str = "exponential",
         guidance_weight: float = 5.0,  # DEPRECATED, see the guidance scaling note below
         guidance_alpha: float = 0.9,
+        return_vlm_features: bool = False,
         **kwargs: str
-    ) -> np.ndarray:
+    ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
 
         ## RTC related ##
         H = self.action_horizon
@@ -2256,20 +2275,12 @@ class Psi0Model(nn.Module):
         batch_image_grid_thw = torch.cat(batch_image_grid_thw, dim=0)
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            # extract vision + language features
-            output = self.vlm_model(
+            vlm_features = self.extract_vlm_features(
                 input_ids=batch_input_ids,
                 attention_mask=batch_attention_mask,
                 pixel_values=batch_pixel_values,
                 image_grid_thw=batch_image_grid_thw,
-                output_hidden_states=True,
-                return_dict=True
             )
-            vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
-
-            # use hidden states from the last layer
-            vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
-            vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
 
             # generate action from noise
             action_samples = torch.randn(
@@ -2291,7 +2302,8 @@ class Psi0Model(nn.Module):
                         pooled_projections=pooled_projections,  # (B, D) for combined_temb
                         joint_attention_kwargs=dict(
                             action_hidden_embeds=action_samples_grad, # (B,Tp,Da)
-                            views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
+                            views=vlm_features.tokens,
+                            vlm_features=vlm_features,
                             obs=states,  # (B,1,M)
                             traj2ds=traj2ds,  # (B, C, 3, H, W)
                         ),
@@ -2332,6 +2344,8 @@ class Psi0Model(nn.Module):
                     model_output=model_pred, timestep=timestep, sample=action_samples # type: ignore
                 ).prev_sample
 
+        if return_vlm_features:
+            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features)
         return action_samples.float()
 
     def predict_action_with_rtc_flow_naive_inpaint(
@@ -2346,8 +2360,9 @@ class Psi0Model(nn.Module):
         execution_horizon: int = 0,
         mask_schedule: str = "exponential",
         guidance_weight: float = 5.0,
+        return_vlm_features: bool = False,
         **kwargs: str
-    ) -> np.ndarray:
+    ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
         with torch.no_grad():
 
             ## RTC related ##
@@ -2413,21 +2428,12 @@ class Psi0Model(nn.Module):
             batch_image_grid_thw = torch.stack(batch_image_grid_thw) # (B, 3)
 
             with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
-                # extract vision + language features
-                output = self.vlm_model(
+                vlm_features = self.extract_vlm_features(
                     input_ids=batch_input_ids,
                     attention_mask=batch_attention_mask,
                     pixel_values=batch_pixel_values,
                     image_grid_thw=batch_image_grid_thw,
-                    output_hidden_states=True,
-                    return_dict=True
                 )
-                vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
-                
-
-                # use hidden states from the last layer
-                vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
-                vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
 
                 # generate action from noise
                 action_samples = torch.randn(
@@ -2457,7 +2463,8 @@ class Psi0Model(nn.Module):
                         timestep=batched_timestep,
                         joint_attention_kwargs=dict(
                             action_hidden_embeds=action_samples, # (B,Tp,Da)
-                            views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
+                            views=vlm_features.tokens,
+                            vlm_features=vlm_features,
                             obs=states,  # (B,1,M)
                             traj2ds=traj2ds,  # (B, C, 3, H, W)
                         ),
@@ -2475,6 +2482,8 @@ class Psi0Model(nn.Module):
                         # Last step: use clean prev_actions (tau = 0)
                         action_samples[:, :d, :] = prev_actions[:, :d, :]
 
+            if return_vlm_features:
+                return HumanFoundationModelOutput(action=action_samples, vlm_features=vlm_features)
             return action_samples
 
     def _create_soft_mask(self, H, d, s, schedule="exponential", device="cpu"):

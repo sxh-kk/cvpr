@@ -635,6 +635,19 @@
       "VLMExpert/third_party/SIMPLE/third_party/decoupled_wbc/sim2mujoco/.gitattributes"
     ]
   },
+  "local_extensions": [
+    {
+      "date": "2026-10-18",
+      "change": "对原action expert输入tokens做masked mean pooling，新增p_V提取接口；完整tokens和checkpoint参数结构保留，暂不修改action block",
+      "paths": [
+        "VLMExpert/src/psi/models/psi0.py",
+        "VLMExpert/src/psi/models/vlm_features.py",
+        "VLMExpert/tests/test_vlm_features.py",
+        "VLMExpert/README.md"
+      ],
+      "note": "上述文件在初始快照基础上扩展；快照一致性和初始验收计数仍描述导入时状态"
+    }
+  ],
   "sanitization": [
     {
       "path": "VLMExpert/src/psi/utils/utils.py",

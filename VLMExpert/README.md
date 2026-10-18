@@ -1,3 +1,49 @@
+## 本仓库扩展：VLM tokens 池化
+
+`Psi0Model` 在原来传入 action expert 的完整 hidden tokens 上增加 masked mean pooling，
+得到 `p_V`。输入包含图像、指令及聊天模板的有效 tokens，padding 不参与均值；不重新选择层、
+不增加归一化或可学习参数。FP16／BF16 输入使用 FP32 累加，输出保持输入 dtype，训练时保留梯度。
+
+```python
+features = model.extract_vlm_features(
+    input_ids=input_ids,
+    attention_mask=attention_mask,
+    pixel_values=pixel_values,
+    image_grid_thw=image_grid_thw,
+)
+full_tokens = features.tokens  # [B, V, N, D]，原 action expert 的输入
+p_v = features.p_v            # 默认 [B, D]
+```
+
+`N` 是完整多模态序列长度，`D` 由所加载的 VLM 决定。默认取原来的最后一层，`V=1`；
+显式配置 `vlm_layer_indices` 时，`V` 是选中的层数，逐层池化，不混合各层。
+`features.pooled_tokens` 始终是 `[B,V,D]`；`p_v` 在 `V>1` 时也是 `[B,V,D]`。
+`attention_mask` 为 `[B,N]` 的 0/1 或 bool；传 `None` 表示全部有效，每个样本至少需一个有效 token。
+
+`forward` 和四个 `predict_action*` 方法共用该提取接口，每个观察输入只提取／池化一次。
+默认输出保持原样；传入 `return_vlm_features=True` 可通过返回对象的 `.action`、
+`.vlm_features.p_v` 同时取得动作与摘要。完整 tokens 仍进入原注意力，特征对象另存于
+`joint_attention_kwargs["vlm_features"]`，供后续 action expert 改造使用。
+现有 action block 暂不消费 `p_V`，原 CLIP `pooled_projections` 路径保留。
+
+提取使用当前实例加载的 VLM 权重；使用 EgoDex 微调结果时需先加载对应权重。
+输入必须是观察 prefix，不能包含 teacher forcing 的真实 FAST 动作答案。
+本步不增加 GLOBAL token，不改 checkpoint 参数结构，不连接 MotionExpert，也不启动微调。
+
+轻量回归验证（PyTorch、pytest；接线检查用实际方法和模型替身，无需下载权重）：
+
+```bash
+cd VLMExpert
+CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. \
+  python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py
+```
+
+本次 CPU／单卡 BF16 检查的范围及限制见 [验证记录](../docs/vlm_pooling_validation.json)。
+
+以下保留官方上游说明；源码快照来源见 [版本记录](../docs/psi0_upstream.json)。
+
+---
+
 <h1 align="center">[RSS'26] Ψ₀: An Open Foundation Model <br/> Towards Universal Humanoid Loco-Manipulation
 </h1>
 

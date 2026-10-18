@@ -37,8 +37,10 @@ DINO提取还需原始MCAP／MP4及DINO预训练权重，修改record中的原�
 
 `VLMExpert` 于2026-10-18整体替换为 [官方Psi0](https://github.com/physical-superintelligence-lab/Psi0)
 `main` 的固定版本 `cda3fdfafe47cb6fa75400d013de1bd36e3cea05`，Python包名仍为 `psi`。
-除移除上游遗留的一行凭据注释外，源代码、配置和官方README保持该版本内容；此前GLOBAL token／WBT定制及其专用入口已退役，
-可从替换前的Git提交恢复。本次没有将官方Ψ₀与MotionExpert或ImageProcess接线。
+初始快照除移除上游遗留的一行凭据注释外保持该版本内容；此前GLOBAL token／WBT定制及其专用入口已退役，
+可从替换前的Git提交恢复。当前在该快照上增加了 VLM tokens 的 masked mean pooling 接口及其测试，
+模块README说明了本地接口，后附官方说明。完整 action 输入 tokens 保留，池化摘要 `p_V` 尚未接入 action block。
+当前没有将官方Ψ₀与MotionExpert或ImageProcess接线。
 版本、展开依赖和排除文件记录见 [psi0_upstream.json](psi0_upstream.json)。
 `docs/inventory` 仍是初次迁移的历史快照，不用于核对本次更新。
 

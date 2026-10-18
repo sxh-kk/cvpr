@@ -1,0 +1,68 @@
+{
+  "date_utc": "2026-10-18",
+  "scope": "对原action expert输入的完整VLM tokens做masked mean pooling，独立输出p_V；暂不改action block或接入MotionExpert",
+  "source_sha256": {
+    "VLMExpert/src/psi/models/psi0.py": "94d2e954307d91fa9053d70fd7f8d2bfe6c81c95004e9991e9dfa48f63c6abd5",
+    "VLMExpert/src/psi/models/vlm_features.py": "c14c1d30f0a72f8128420e5f50ac69d7832b953363f561ceba10a0e2ce466223",
+    "VLMExpert/tests/test_vlm_features.py": "f513ef8837e37deb6191149eb9273ef0622e0dffb18e1eac8d47aeece2c428c8"
+  },
+  "environment": {
+    "python": "3.10.12（现有独立检查环境；官方完整运行环境要求3.11）",
+    "torch": "2.6.0+cu118",
+    "dependencies_installed_or_changed": false
+  },
+  "cpu": {
+    "passed": 25,
+    "duration_seconds": 50.22,
+    "gpu_count": 0,
+    "working_directory": "VLMExpert",
+    "command": "CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py",
+    "coverage": [
+      "完整有效token均值，NaN/Inf padding排除、padding梯度为0",
+      "FP16/BF16/FP32/FP64输出dtype、FP32累加防半精度求和溢出、FP64保真",
+      "默认p_V [B,D]；layerwise [B,V,D]，不混合V维",
+      "提取接口原样传递VLM输入，取层及训练/梯度模式保留",
+      "forward保留完整tokens、旧CLIP条件和norm日志；新增摘要可反传",
+      "四种采样入口return_vlm_features开关在同seed下动作相同，每个chunk只执行一次VLM提取",
+      "普通采样和training RTC混合长度batch的padding与池化mask一致"
+    ],
+    "method": "直接导入实际池化函数；AST执行Psi0Model实际方法和装饰器，VLM/processor/action header/scheduler使用轻量替身"
+  },
+  "gpu": {
+    "gpu_count": 1,
+    "device": "NVIDIA A100-SXM4-80GB",
+    "batch": 2,
+    "token_shapes": [
+      [
+        2,
+        1,
+        17,
+        2048
+      ],
+      [
+        2,
+        3,
+        17,
+        2048
+      ]
+    ],
+    "dtype": "bfloat16",
+    "method": "实际池化函数接小型上游Linear，SGD更新一次；不加载预训练权重",
+    "checks_passed": [
+      "池化输出与独立FP32参考均值逐值相同",
+      "排除NaN padding；有效token梯度非零，padding梯度为0",
+      "loss、token梯度和上游参数梯度有限",
+      "上游参数经优化器更新"
+    ]
+  },
+  "static": {
+    "python_ast_files": 3,
+    "git_diff_check": "通过"
+  },
+  "review": "池化实现、训练和4个采样路径、接口文档及测试已独立只读复核，未发现阻断问题",
+  "limitations": [
+    "未加载真实EgoDex微调checkpoint，未验收完整Qwen/diffusers推理、模型训练或DDP",
+    "p_V仅提供独立分支，当前action block尚未消费该摘要",
+    "不构成完整模型精度、吞吐或下游效果结论"
+  ]
+}

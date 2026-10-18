@@ -1,7 +1,8 @@
 ## 本仓库扩展：双来源 Action Expert
 
-`action_architecture="dual_source_v1"` 实现双来源串行结构。VLM 与 MotionExpert 固定权重并保持
-`eval()`；action expert 的输入投影、融合网络、调制头、注意力及输出头可训练。
+`action_architecture="dual_source_v1"` 实现双来源串行结构。当前 UnifoLM 配方设置
+`tune_vlm=True, tune_motion=True`，联合更新 VLM、MotionExpert 与新 action expert；DINO 保持冻结。
+两套 expert 也可分别通过 `tune_vlm=False`（不设置 `tune_mm_*`）、`tune_motion=False` 固定为 `eval/no_grad`。
 原官方架构仍用 `action_architecture="psi0_joint"`，默认值保留以便读取旧模型。
 
 每个 block 执行 `Action Self-Attention → Cross-Attention VLM → Cross-Attention Motion → FFN`。
@@ -27,7 +28,13 @@ cfg = Psi0ModelConfig(
     action_architecture="dual_source_v1",
     model_name_or_path="/absolute/path/to/egodex-vlm",
     motion_checkpoint="/absolute/path/to/motion.ckpt",
-    motion_use_ema=True,  # 按所选权重身份明确设置
+    motion_use_ema=True,  # 初始化采用所选权重身份；之后该网络参与联合训练
+    tune_vlm=True,
+    tune_motion=True,
+    lang_backbone_lr=1e-6,
+    vision_tower_lr=1e-5,
+    mm_projector_lr=1e-4,
+    motion_expert_lr=1e-5,
     view_feature_dim=vlm.config.text_config.hidden_size,
     n_conditions=0,
 )
@@ -51,18 +58,48 @@ Motion checkpoint 的视觉协议，跨尺寸适配须显式声明。接口不�
 现有单帧数据源不会自动得到历史，缺失时明确报错，不复制当前图或读取未来标签。
 
 训练每个 batch、四种 `predict_action*` 采样及三个 trainer 的评估入口均只提取一次两路特征；
-去噪循环复用它们。`motion_feature_seed=0` 默认使用独立 RNG 生成固定噪声，不改 action 的全局 RNG；
-相同 batch 布局和输入可复现，重排 batch 会改变样本对应的噪声位置。
+去噪循环复用它们。`motion_feature_seed=0` 仅用独立 RNG 生成固定初始运动噪声；
+联合训练中的 dropout／router jitter 仍正常消耗训练 RNG；
+初始运动噪声在相同 batch 布局下可复现，重排 batch 会改变样本对应的噪声位置。
 需要复用时可先调用 `extract_motion_features(motion_img_embs=...)`，再传 `motion_features=...`；
-`forward` 也接收本模型 `extract_vlm_features()` 产生的冻结 `vlm_features`。
-复用特征必须属于同一观察窗口，两套参数与提取上下文仍保持冻结，训练 block 在其外执行。
+`forward` 也接收本模型 `extract_vlm_features()` 产生的 `vlm_features`。
+复用特征必须属于同一观察窗口。联合训练时 tokens 与均值都保留 source graph，禁止用
+`detach/no_grad/inference_mode` 的缓存替代可训练来源；每次 optimizer 更新后重新提取，不能复用旧图。
+采样遵守外部 `no_grad/inference_mode`，各去噪步仍共用同一次观察提取。
 
-新模式拒绝 layerwise VLM、VLM 解冻、旧 DiT／CLIP／FiLM／traj2ds 条件。
+新模式拒绝 layerwise VLM、旧 DiT／CLIP／FiLM／traj2ds 条件。
 state dropout 大于零时需启用 `state_null_token=True`，缺失 state 使用专门的 null token。
 新 head 的 tensor 架构签名可随 safetensors 保存；旧 joint head、缺参数或配置不匹配的权重会被拒绝，
 包括 `strict=False`。新任务从头训练新 head，不恢复旧 optimizer。
-完整 checkpoint 包含冻结的 Motion 网络权重；恢复时仍需显式原 Motion checkpoint 来重建其配置和统计协议。
+完整 checkpoint 包含联合更新后的 Motion 网络权重；恢复时仍需显式原 Motion checkpoint 来重建其配置和统计协议。
 从本目录直接运行需 `PYTHONPATH=src:..`，或在专用环境安装仓库根目录的 MotionExpert 包。
+
+### UnifoLM 联合训练配方
+
+使用 [posttrain-dual-source-unifolm.sh](scripts/train/psi0/posttrain-dual-source-unifolm.sh)，
+必须显式提供 EgoDex VLM、Motion checkpoint 和已准备好的 UnifoLM 历史数据路径／ID；
+脚本的 `--dry-run` 可先打印命令，不启动训练；`MOTION_USE_EMA=1/0` 指定初始化权重选择。
+数据仍需实际提供对齐的 `motion_img_embs` 与共享当前 RGB，
+直接使用原始单帧 UnifoLM 数据不会自动生成这些字段。
+
+| 参数组 | 初始学习率 | 来源 |
+| --- | --- | --- |
+| 新 action expert | `1e-4` | Ψ₀ UnifoLM |
+| VLM 语言主干 | `1e-6` | Ψ₀ UnifoLM |
+| VLM 视觉主干 | `1e-5` | Ψ₀ UnifoLM |
+| VLM 多模态投影 | `1e-4` | Ψ₀ UnifoLM |
+| MotionExpert | `1e-5` | 本仓库新增的初始设定，可调 |
+
+参考 [Ψ₀ 官方 UnifoLM 配方](https://github.com/physical-superintelligence-lab/Psi0/blob/cda3fdfafe47cb6fa75400d013de1bd36e3cea05/scripts/train/psi0/posttrain-psix-unifolm-g1-sonic1.1.sh)，
+沿用 posttrain、40,000 步、1,000 步 warmup、每卡 batch 16、累积2步和 BF16，
+动作80维、state45维、horizon30；action expert 保留本图的6个双来源 block、VLM最后一层、无CLIP。
+官方单帧随机增强在这里关闭，增强需在共享历史窗口上完成。
+只使用 action flow loss 联合反传，没有额外增加 Motion 重建损失。
+VLM 最后 norm 参与所选最后 hidden 的计算，保持可训；独立词表输出头不读 logits，保持冻结。
+Motion 仅冻结当前 hidden 接口不使用的运动输出头、被完整遮蔽的轨迹输入投影和未来图像 mask token；
+注意力、图像投影、时间编码、路由器、共享／路由专家均可训练。MoE 并非每批命中全部专家，
+该模式 DDP 使用 `find_unused_parameters=True, static_graph=False`。
+新 head 从头初始化，不能沿用冻结阶段或原 joint head 的 optimizer 状态。
 
 本轮不启动训练或安装环境。现有 HTTP／机器人服务还没有历史 DINO 请求字段，双来源模型应先通过
 上述 Python 接口使用；服务部署及数据集历史生成尚需按真实数据来源另行接线。
@@ -72,17 +109,19 @@ cd VLMExpert
 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:..:. \
   python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py \
-    tests/test_dual_source_action.py tests/test_dual_source_integration.py tests/test_dual_source_data.py
+    tests/test_dual_source_action.py tests/test_dual_source_integration.py tests/test_dual_source_data.py \
+    tests/test_dual_source_joint_training.py
 ```
 
-本次验证范围见 [双来源验证记录](../docs/dual_source_action_validation.json)。
+原冻结基线见 [历史验证](../docs/dual_source_action_validation.json)；本轮联合训练验证见
+[联合训练验证记录](../docs/dual_source_joint_validation.json)。
 
 ## VLM tokens 池化接口
 
 `Psi0Model` 在原来传入 action expert 的完整 hidden tokens 上增加 masked mean pooling，
 得到 `p_V`。输入包含图像、指令及聊天模板的有效 tokens，padding 不参与均值；不重新选择层、
 不增加归一化或可学习参数。FP16／BF16 输入使用 FP32 累加，输出保持输入 dtype；
-`psi0_joint` 保留调用方的梯度模式，`dual_source_v1` 按本轮方案冻结提取。
+两种架构均保留可训练来源的梯度；`dual_source_v1` 根据显式冻结开关决定是否禁用来源梯度。
 
 ```python
 features = model.extract_vlm_features(

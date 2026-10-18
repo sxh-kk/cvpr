@@ -639,6 +639,24 @@
     {
       "date": "2026-10-18",
       "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
+      "change": "按UnifoLM主配方解冻VLM并联合训练MotionExpert与新action head；保留token及池化autograd、组件学习率、MoE动态unused DDP与冻结开关",
+      "paths": [
+        "VLMExpert/src/psi/models/psi0.py",
+        "VLMExpert/src/psi/models/frozen_motion.py",
+        "VLMExpert/src/psi/config/model_psi0.py",
+        "VLMExpert/src/psi/trainers/posttrain.py",
+        "VLMExpert/src/psi/trainers/finetune.py",
+        "VLMExpert/src/psi/trainers/sonic.py",
+        "VLMExpert/scripts/train.py",
+        "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh",
+        "VLMExpert/tests/test_dual_source_joint_training.py"
+      ],
+      "validation": "docs/dual_source_joint_validation.json",
+      "note": "VLM仅取最后一层，Motion仍完整11tokens，DINO冻结；Motion LR1e-5是本仓库初值。未启动正式训练，真实EgoDex VLM和UnifoLM历史数据端到端仍需单独验收。历史冻结验收记录保留。"
+    },
+    {
+      "date": "2026-10-18",
+      "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
       "change": "新增dual_source_v1：冻结最后层VLM和完整11-token MotionExpert，逐block串行SA/CA-VLM/CA-Motion/FFN，由p_V/p_M/action时间融合生成12d调制；保留psi0_joint",
       "paths": [
         "VLMExpert/src/psi/models/dual_source_action.py",

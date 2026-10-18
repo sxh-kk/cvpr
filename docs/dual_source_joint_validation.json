@@ -1,0 +1,229 @@
+{
+  "date_utc": "2026-10-18",
+  "baseline_commit": "5893c17b537c935359c177402edd85be3094a517",
+  "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
+  "scope": "联合训练VLM最后层、完整11-token MotionExpert和新action expert；source tokens与pool保留autograd；DINO冻结",
+  "learning_rates": {
+    "action_header": 0.0001,
+    "lang_backbone": 1e-06,
+    "vision_tower": 1e-05,
+    "mm_projector": 0.0001,
+    "motion_expert": 1e-05
+  },
+  "learning_rate_note": "前四组参考固定上游UnifoLM主配方；Motion LR是本仓库的初始选择，不属于原Psi0",
+  "source_sha256": {
+    "VLMExpert/scripts/train.py": "fe72005b26c07a3ab12538bf9d7e1cdafe75343dff8c6835e394a3766f262718",
+    "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh": "33187784874be73ffa8c8362c2730a6c3093213ecb7f965f1c9f63c8bb631e1e",
+    "VLMExpert/src/psi/config/model_psi0.py": "566a589894cd2051f8bff72f34782a1e95d3a77cced6244c1e5de73548274f0d",
+    "VLMExpert/src/psi/models/dual_source_action.py": "778446e10c96a5c92c50438ae9cad081a80a6dcd3d0228d75227f929aa5cfdc5",
+    "VLMExpert/src/psi/models/frozen_motion.py": "e155f190b9d5969499212f87402c88216f4e4cd6ad6bd1995df7e892a36f0f14",
+    "VLMExpert/src/psi/models/psi0.py": "f0d40bad503dd9f4748d7b0dc267fdafc5d5abf9f4d49bfa5c0b2a6609be01e4",
+    "VLMExpert/src/psi/trainers/finetune.py": "26c7ef55fff3f515e6a264ab2f283260d6762505161d5376f22a6c87d0ee3662",
+    "VLMExpert/src/psi/trainers/posttrain.py": "069a668b4a2272ab1d26728c237243667758232afa1e0c37624ac3c33d33be1c",
+    "VLMExpert/src/psi/trainers/sonic.py": "d3bff76d22e3f97b5423d191f4b9cb69c6149e44fdd4b035f807f8753bc48780",
+    "VLMExpert/tests/test_dual_source_integration.py": "0ec6844595de5aa85dc2246a6c8310d72d8925ca9113e04aa4fc08778a762c7c",
+    "VLMExpert/tests/test_dual_source_joint_training.py": "a49ac81c7eb06b560d7424cb144f95ddb277bd74188e466dce1c3cbd9b013331",
+    "VLMExpert/tests/test_vlm_features.py": "2f91d7ae4978b4a357fea1eed40bb3c49dc31630aa34cfd145b4fbf46048a3d9"
+  },
+  "cpu": {
+    "passed": 104,
+    "duration_seconds": 85.07,
+    "gpu_count": 0,
+    "environment": "Python3.10.12/PyTorch2.6.0+cu118；已有独立环境，未安装或修改依赖",
+    "working_directory": "VLMExpert",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:..:. /gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/dino-torch260-cu118/bin/python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py tests/test_dual_source_action.py tests/test_dual_source_integration.py tests/test_dual_source_data.py tests/test_dual_source_joint_training.py",
+    "counts": {
+      "vlm_pooling_and_legacy": 25,
+      "head": 16,
+      "frozen_integration": 22,
+      "data": 17,
+      "joint_training": 24
+    },
+    "coverage": [
+      "VLM语言/视觉/merger/finalnorm与Motion主干接收有限非零梯度并更新；p_V/p_M及完整11token反传，padding排除且DINO无梯度",
+      "独立冻结开关与4采样入口遵守no_grad/inference、单观察两来源各提取一次、训练拒detached/inference缓存",
+      "冻结DINO的inference tensor输入可训练Motion，无输入梯度",
+      "三trainer实际优化器覆盖全部可训参数各一次、5组LR正确并实际更新；Sonic旧组顺序/冻结参数成员保留",
+      "实际from_pretrained和tiny safetensors保留untied词表头及tied缺alias恢复，action/Motion权重恢复",
+      "保留原head数学、精度、签名与共享窗口数据路径回归"
+    ],
+    "method": "真实纯Torchhead/pooling/conditioner；执行源文件实际Psi0/trainer方法AST，Qwen/Motion生产者与scheduler使用轻量替身"
+  },
+  "single_gpu_real_motion": {
+    "passed": true,
+    "gpu_count": 1,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "batch": 2,
+    "python": "3.10.12",
+    "torch": "2.6.0+cu118",
+    "checkpoint": "/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=99-step=48700.ckpt",
+    "use_ema": false,
+    "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
+    "head_width": 64,
+    "head_blocks": 2,
+    "motion_tokens": [
+      2,
+      11,
+      768
+    ],
+    "vlm_tokens": [
+      2,
+      1,
+      17,
+      2048
+    ],
+    "action_shape": [
+      2,
+      4,
+      3
+    ],
+    "parameter_dtype": "float32",
+    "autocast_dtype": "bfloat16",
+    "loss": 0.7011124491691589,
+    "flow_times_action": [
+      [
+        0.0,
+        300.0,
+        600.0,
+        999.0
+      ],
+      [
+        0.0,
+        400.0,
+        700.0,
+        1000.0
+      ]
+    ],
+    "motion_flow_time": 1,
+    "diagnostic_modulation": "gate biases=0.15 and mod_head weights N(0,0.005); production initialization unchanged",
+    "sources": "real MotionExpert; VLM last-layer tokens simulated by one trainable nn.Parameter; synthetic DINO/state/action inputs",
+    "feature_gradients": {
+      "motion_hidden": {
+        "finite": true,
+        "norm": 0.004376240074634552
+      },
+      "p_m": {
+        "finite": true,
+        "norm": 0.0002604818728286773
+      },
+      "p_v": {
+        "finite": true,
+        "norm": 0.0014461880782619119
+      },
+      "vlm_tokens": {
+        "finite": true,
+        "norm": 0.00837261974811554
+      }
+    },
+    "parameters": {
+      "motion_input": {
+        "gradient_norm": 0.06566824018955231,
+        "max_parameter_change": 0.00010000169277191162
+      },
+      "motion_visual": {
+        "gradient_norm": 0.4252966046333313,
+        "max_parameter_change": 0.00010000169277191162
+      },
+      "motion_router": {
+        "gradient_norm": 0.003841307247057557,
+        "max_parameter_change": 9.99990152195096e-05
+      },
+      "motion_traj_mask": {
+        "gradient_norm": 0.006698200944811106,
+        "max_parameter_change": 0.00010000169277191162
+      },
+      "vlm_tokens": {
+        "gradient_norm": 0.00837261974811554,
+        "max_parameter_change": 0.00010013580322265625
+      },
+      "head_vlm_context": {
+        "gradient_norm": 0.6650009751319885,
+        "max_parameter_change": 0.0001000002957880497
+      },
+      "head_motion_context": {
+        "gradient_norm": 0.6749263405799866,
+        "max_parameter_change": 0.00010000169277191162
+      },
+      "head_fuse": {
+        "gradient_norm": 0.012809207662940025,
+        "max_parameter_change": 0.00010000169277191162
+      },
+      "head_output": {
+        "gradient_norm": 2.0697693824768066,
+        "max_parameter_change": 0.00010000169277191162
+      }
+    },
+    "dino_input_gradient_is_none": true,
+    "inactive_motion_parameters": [
+      "embed_traj_cond.weight",
+      "embed_traj_cond.bias",
+      "embed_traj_valid.weight",
+      "mask_tokens.clip",
+      "output_process.weight",
+      "output_process.bias"
+    ],
+    "inactive_unchanged": true,
+    "sparse_moe_requires_find_unused_parameters": true,
+    "unused_motion_parameter_count": 444,
+    "global_gradient_norm": 2.72597833608135,
+    "peak_allocated_bytes": 5256910336,
+    "peak_reserved_bytes": 5834276864,
+    "training_mode_followed": true,
+    "eval_no_grad_followed": true,
+    "limits": "One single-GPU synthetic action-loss backward/update and eval check; no real Qwen, DDP, data throughput or full training acceptance.",
+    "unused_parameters_all_routed_experts": true,
+    "unused_parameter_names_sha256": "f6c85f084df9af80b1a5378874afcf5dd933353a4d8ac3c9e5ab3336567c023c"
+  },
+  "two_gpu_ddp": {
+    "gpu_count": 2,
+    "batch_per_gpu": 2,
+    "gradient_accumulation_steps": 2,
+    "steps": 4,
+    "precision": "FP32 master parameters + BF16 autocast",
+    "source": "real Psi0 methods via AST + real dual-source head; small VLM and dynamic sparse Motion doubles",
+    "launcher_kwargs": {
+      "find_unused_parameters": true,
+      "static_graph": false
+    },
+    "rows": [
+      {
+        "step": 0,
+        "loss": 0.2491782009601593,
+        "max_parameter_difference": 0.0
+      },
+      {
+        "step": 1,
+        "loss": 0.1591401994228363,
+        "max_parameter_difference": 0.0
+      },
+      {
+        "step": 2,
+        "loss": 0.08552064374089241,
+        "max_parameter_difference": 0.0
+      },
+      {
+        "step": 3,
+        "loss": 0.04514738544821739,
+        "max_parameter_difference": 0.0
+      }
+    ],
+    "all_routed_experts_updated": true,
+    "vlm_motion_head_updated": true,
+    "dino_input_gradient": false,
+    "peak_allocated_bytes": 20471296
+  },
+  "other_checks": [
+    "Bash语法及recipe dry-run，显式必填env、空格路径、EMA/raw参数选择、非法值拒绝；没有启动训练workers",
+    "三trainer实际clip/LR/grad日志AST检查，Motion不混入VLM指标；仅正常Motion路由专家的gradNone跳过critical",
+    "真实公共Accelerator初始化方法AST验证：仅dual+tune_motion+DDP设置find_unused_parameters=True/static_graph=False；其kwargs用于上述2GPU连续检查",
+    "独立review并修复：双来源finalnorm训练、DINO inference常量转换、Sonic旧optimizer成员布局、untied词表头完整恢复",
+    "修改Python/JSON语法及git diff --check"
+  ],
+  "limits": [
+    "未加载真实EgoDex Qwen3VL或运行完整UnifoLM数据；不是端到端数据/机器人验收",
+    "真实Motion单卡检查使用合成DINO/state/action与小head64宽2层，VLM由可训tokens替代；未验证完整6层1536宽joint训练的显存和吞吐",
+    "2GPU检查使用真实Psi0方法/真实head与小VLM和动态稀疏Motion替身，验证DDP连续4次更新/每次累积2微批次、跨卡参数差0，不是完整大模型DDP性能验收",
+    "数据集需自行实际提供对齐history与共享RGB，HTTP/机器人服务历史字段仍未接线",
+    "未启动正式训练，未停止或修改已有MotionExpert训练；原冻结验收记录保留"
+  ]
+}

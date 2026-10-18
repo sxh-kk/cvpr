@@ -1,4 +1,4 @@
-"""Action-only residual blocks conditioned on frozen VLM and motion memories.
+"""Action residual blocks conditioned on VLM and motion memories with autograd.
 
 This is a new architecture, not a numerically equivalent rewrite of Psi0's
 joint attention. Its tensor-only checkpoint signature rejects legacy heads,

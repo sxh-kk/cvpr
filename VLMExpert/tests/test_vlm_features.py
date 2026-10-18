@@ -19,7 +19,9 @@ from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
 from psi.models.vlm_features import VLMFeatures, masked_mean_vlm_tokens
-from psi.models.frozen_motion import FrozenMotionConditioner, FrozenMotionFeatures
+from psi.models.frozen_motion import (
+    FrozenMotionConditioner, FrozenMotionFeatures, MotionConditioner, MotionFeatures,
+)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
@@ -182,7 +184,8 @@ def build_psi0_harness(*, include_init=False, extra_globals=None):
     namespace = dict(__name__=__name__, torch=torch, nn=nn, dataclass=dataclass, BaseOutput=object,
                      VLMFeatures=VLMFeatures, masked_mean_vlm_tokens=masked_mean_vlm_tokens,
                      nullcontext=nullcontext, FrozenMotionConditioner=FrozenMotionConditioner,
-                     FrozenMotionFeatures=FrozenMotionFeatures,
+                     FrozenMotionFeatures=FrozenMotionFeatures, MotionConditioner=MotionConditioner,
+                     MotionFeatures=MotionFeatures,
                      pad_sequence=pad_sequence, process_vision_info=_vision_info,
                      overwatch=SimpleNamespace(warning=lambda *args, **kwargs: None,
                                                info=lambda *args, **kwargs: None))

@@ -210,11 +210,6 @@ class PosttrainTrainer(Trainer):
 
         Ported from FinetuneTrainer: this trainer used to hard-freeze the whole VLM.
         """
-        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
-            self.model.vlm_model.requires_grad_(False)
-            self.model.vlm_model.eval()
-            overwatch.info("dual_source_v1 keeps the VLM frozen in eval mode")
-            return set()
         trainable_components = self.vlm_trainable_components()
         for name, p in self.model.vlm_model.named_parameters():
             p.requires_grad = self._vlm_group_of(name) in trainable_components
@@ -223,11 +218,12 @@ class PosttrainTrainer(Trainer):
             overwatch.info("VLM parameters are frozen (tune_vlm=False, no tune_mm_* set)")
         else:
             overwatch.info(f"VLM trainable components: {sorted(trainable_components)}")
-            # Freeze the final norm layer since we don't use it (we extract hidden_states[-1])
-            if hasattr(self.model.vlm_model.model, "language_model") and hasattr(self.model.vlm_model.model.language_model, "norm"):
+            # Preserve legacy joint freezing; dual consumes the normalized final hidden state.
+            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1"
+                    and hasattr(self.model.vlm_model.model, "language_model") and hasattr(self.model.vlm_model.model.language_model, "norm")):
                 for p in self.model.vlm_model.model.language_model.norm.parameters():
                     p.requires_grad = False
-                overwatch.info("VLM final norm layer frozen (not used in forward pass)")
+                overwatch.info("VLM final norm layer frozen (legacy joint policy)")
             # We never read the logits, so an UNTIED lm_head receives no gradient
             # and DDP errors on the reduction that never comes.
             lm_head = self.model.vlm_model.lm_head
@@ -260,8 +256,6 @@ class PosttrainTrainer(Trainer):
     def vlm_trainable_components(self) -> set[str]:
         """Which VLM components to finetune. tune_mm_* select individually and imply
         a tuned VLM; otherwise tune_vlm means "train the whole VLM"."""
-        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
-            return set()
         selected = set()
         if self.model_cfg.tune_mm_vision:
             selected.add("vision_tower")
@@ -403,6 +397,8 @@ class PosttrainTrainer(Trainer):
                 # applied tune_vlm / tune_mm_* per component, so a vision-only run
                 # simply yields no lang_backbone group.
                 group = self._vlm_group_of(name)
+            elif name.startswith("motion_conditioner."):
+                group = "motion_expert"
             else:
                 group = "other"
             grouped.setdefault(group, []).append(param)
@@ -414,10 +410,11 @@ class PosttrainTrainer(Trainer):
             "lang_backbone": self.model_cfg.lang_backbone_lr,
             "vision_tower": self.model_cfg.vision_tower_lr,
             "mm_projector": self.model_cfg.mm_projector_lr,
+            "motion_expert": getattr(self.model_cfg, "motion_expert_lr", 1e-5),
         }
         # Fixed order so the optimizer state_dict layout is deterministic across
         # runs/resumes, and group 0 stays the action header (see get_lr()).
-        group_order = ["action_header", "other", "lang_backbone", "vision_tower", "mm_projector"]
+        group_order = ["action_header", "other", "lang_backbone", "vision_tower", "mm_projector", "motion_expert"]
 
         param_groups = []
         for group_name in group_order:
@@ -730,6 +727,9 @@ class PosttrainTrainer(Trainer):
                     # is expensive.
                     for name, param in self.model.named_parameters():
                         if param.requires_grad and param.grad is None:
+                            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+                                    and "motion_conditioner." in name and ".routed_experts." in name):
+                                continue  # A routed expert may legitimately be inactive on this rank/batch.
                             overwatch.critical(f"[Unused] {name} did not receive a gradient.")
 
             self.optimizer.step()
@@ -778,7 +778,7 @@ class PosttrainTrainer(Trainer):
         motion_kwargs = motion_model_kwargs(self.model_cfg, repacked_batch)
         context_kwargs = motion_kwargs
         if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
-            # evaluate() supplies the unwrapped model; both frozen sources run once per chunk.
+            # evaluate() supplies the unwrapped model; both sources run once per chunk under no_grad.
             context_kwargs = dict(
                 vlm_features=eval_model.extract_vlm_features(
                     input_ids=repacked_batch["input_ids"],

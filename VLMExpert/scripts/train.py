@@ -31,7 +31,7 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.data_loader import (
     DataLoaderStateMixin as AcceleratorDataLoaderStateMixin,
 )
-from accelerate.utils import DataLoaderConfiguration, ProjectConfiguration
+from accelerate.utils import DataLoaderConfiguration, ProjectConfiguration, DistributedDataParallelKwargs
 import random, numpy as np
 
 MAX_TRAINING_EPOCHS = 1_000_000
@@ -65,6 +65,16 @@ def _initialize_accelerator(trainer: Trainer) -> Accelerator:
         deepspeed_plugin = DeepSpeedPlugin(zero_stage=3, hf_ds_config=ds_config_path)
     
 
+    # MotionExpert selects routed experts independently on each rank/batch.
+    # A static set of active parameters would leave some DDP reductions pending.
+    model_cfg = trainer.cfg.model
+    sparse_motion_training = (
+        getattr(model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+        and getattr(model_cfg, "tune_motion", True)
+    )
+    ddp_handlers = ([DistributedDataParallelKwargs(find_unused_parameters=True, static_graph=False)]
+                    if sparse_motion_training and trainer.cfg.train.data_parallel == "ddp" else [])
+
     accelerator = Accelerator(
         gradient_accumulation_steps=trainer.cfg.train.gradient_accumulation_steps,
         mixed_precision=trainer.cfg.train.mixed_precision,
@@ -73,6 +83,7 @@ def _initialize_accelerator(trainer: Trainer) -> Accelerator:
         project_config=accelerator_project_config,
         fsdp_plugin=fsdp_plugin,
         deepspeed_plugin=deepspeed_plugin,
+        kwargs_handlers=ddp_handlers,
         dataloader_config=DataLoaderConfiguration(
             dispatch_batches=False,
         )

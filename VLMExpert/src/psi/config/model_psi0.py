@@ -8,11 +8,14 @@ from pydantic import Field, model_validator
 class Psi0ModelConfig(ModelConfig):
     ######################### hfm_action ############################
     action_architecture: Literal["psi0_joint", "dual_source_v1"] = "psi0_joint"
-    # The frozen motion source always supplies all 11 tokens of width 768.
+    # The motion source always supplies all 11 tokens of width 768.
     # Leave the checkpoint unset for dependency injection; actual use must resolve it.
     motion_checkpoint: Optional[str] = None
     motion_use_ema: bool = True
     motion_feature_seed: int = 0
+    tune_motion: bool = True
+    # Initial choice for our new branch; the original Psi0 has no MotionExpert LR.
+    motion_expert_lr: float = Field(default=1e-5, gt=0, allow_inf_nan=False)
     # pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-3-medium-diffusers"
     resnet_store_path: str | None = None # = "cache/checkpoints/resnet18/IN_1M_resnet18.pth"
     pretrained_action_header_path: str | None = None
@@ -160,8 +163,7 @@ class Psi0ModelConfig(ModelConfig):
         if self.action_architecture != "dual_source_v1":
             return self
         incompatible = [
-            name for name in ("tune_vlm", "tune_mm_llm", "tune_mm_vision", "tune_mm_mlp",
-                              "combined_temb", "use_dit", "use_film")
+            name for name in ("combined_temb", "use_dit", "use_film")
             if getattr(self, name)
         ]
         if self.vlm_layer_indices is not None:
@@ -171,7 +173,7 @@ class Psi0ModelConfig(ModelConfig):
         if self.n_conditions != 0:
             incompatible.append("n_conditions (must be 0)")
         if incompatible:
-            raise ValueError("dual_source_v1 requires frozen VLM and independent motion conditioning; "
+            raise ValueError("dual_source_v1 requires last-layer VLM and independent motion conditioning; "
                              "incompatible settings: " + ", ".join(incompatible))
         if not 0 <= self.state_drop_prob <= 1:
             raise ValueError("dual_source_v1 state_drop_prob must be between 0 and 1")

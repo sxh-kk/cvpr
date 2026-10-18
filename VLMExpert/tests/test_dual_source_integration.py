@@ -48,16 +48,19 @@ def dual_harness():
     })
 
 
-def _build_model(dual_harness, **overrides):
+def _build_model(dual_harness, *, vlm_model=None, motion_expert=None, **overrides):
     config = dict(action_architecture="dual_source_v1", use_dit=False, combined_temb=False,
-                  use_film=False, tune_vlm=False, vlm_layer_indices=None, n_conditions=0,
+                  use_film=False, tune_vlm=False, tune_motion=False, vlm_layer_indices=None, n_conditions=0,
                   pooled_text_encoder=None, action_dim=2, action_chunk_size=4,
                   hidden_dim=16, num_blocks=2, nhead=2, view_feature_dim=4, odim=3,
                   time_dim=8, qk_norm="rms_norm", state_drop_prob=0.0,
                   state_null_token=False, dropout=0.0, motion_feature_seed=17)
     config.update(overrides)
-    expert = _MotionExpert()
-    model = dual_harness(SimpleNamespace(**config), _VLM(), motion_expert=expert)
+    expert = _MotionExpert() if motion_expert is None else motion_expert
+    model_cfg = SimpleNamespace(**config)
+    model = dual_harness(model_cfg, _VLM() if vlm_model is None else vlm_model,
+                         motion_expert=expert)
+    model.test_model_cfg = model_cfg
     model.device = torch.device("cpu")
     model.vlm_processor = _Processor()
     model.noise_scheduler = _Scheduler()
@@ -209,7 +212,7 @@ def test_reusable_motion_features_skip_extraction_and_preserve_default_forward_a
 
 @pytest.mark.parametrize("inputs, exception, message", [
     ({}, ValueError, "requires motion_img_embs"),
-    ({"motion_features": torch.zeros(1, 11, 768)}, TypeError, "FrozenMotionFeatures"),
+    ({"motion_features": torch.zeros(1, 11, 768)}, TypeError, "MotionFeatures"),
     ({"motion_img_embs": torch.zeros(1, 6, 5, 1024),
       "motion_features": FrozenMotionFeatures(torch.zeros(1, 11, 768))}, ValueError, "either"),
     ({"motion_img_embs": torch.zeros(1, 11, 5, 1024)}, ValueError, "observed DINO"),
@@ -242,8 +245,7 @@ def test_complete_model_checkpoint_roundtrip_contains_frozen_experts_and_archite
 
 @pytest.mark.parametrize("override, message", [
     ({"vlm_layer_indices": [0, 2]}, "final VLM layer"),
-    ({"tune_vlm": True}, "frozen VLM"),
-    ({"combined_temb": True}, "frozen VLM"),
+    ({"combined_temb": True}, "legacy"),
     ({"n_conditions": 1}, "n_conditions=0"),
 ])
 def test_actual_psi0_constructor_rejects_configuration_that_breaks_dual_contract(dual_harness, override, message):
@@ -271,7 +273,8 @@ def test_motion_conditioner_freezes_expert_and_uses_complete_hidden_mean():
     assert torch.equal(rng, torch.random.get_rng_state())
     for call in expert.calls:
         assert set(call["conditioning"]) == {"img_embs"}
-        assert call["conditioning"]["img_embs"] is images
+        torch.testing.assert_close(call["conditioning"]["img_embs"], images, rtol=0, atol=0)
+        assert not call["conditioning"]["img_embs"].requires_grad
         assert not call["grad_enabled"] and not call["training"]
         assert call["seed"] == 17 and call["task"] == "fore"
         assert call["forecast_prefix"] == 6 and call["output_frames"] == 11

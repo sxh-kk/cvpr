@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import math
 import json
 import torch
 import wandb
@@ -49,6 +50,8 @@ class SonicTrainer(Trainer):
             stacklevel=2,
         )
         super().__init__(cfg, device)
+        self._grad_norms: dict[str, float] = {}
+        self._grad_norm_act: float | None = None
 
         self.noise_scheduler_name = self.model_cfg.noise_scheduler
         self.train_diffusion_steps = self.model_cfg.train_diffusion_steps
@@ -100,11 +103,16 @@ class SonicTrainer(Trainer):
     
     def init_qwen3vl_models(self):
         from huggingface_hub.errors import HFValidationError
+        # Match the other trainers' FP32 master weights for tuned dual-source VLMs.
+        vlm_dtype = (torch.float32
+                     if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+                     and self.vlm_trainable_components() and self.train_cfg.data_parallel != "deepspeed"
+                     else torch.bfloat16)
         try:
             vlm_model = Qwen3VLForConditionalGeneration.from_pretrained(
                 self.model_cfg.model_name_or_path,
                 attn_implementation="flash_attention_2",
-                dtype=torch.bfloat16
+                dtype=vlm_dtype
             )
         except HFValidationError as e:
             overwatch.error(f"Failed to load pretrained VLM model from {self.model_cfg.model_name_or_path}")
@@ -166,73 +174,157 @@ class SonicTrainer(Trainer):
             self.model.config = vlm_model.config
             self.model.config.hidden_size = vlm_model.config.text_config.hidden_size
 
-        # Set VLM parameters trainability based on tune_vlm flag
-        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
-            self.model.vlm_model.requires_grad_(False)
-            self.model.vlm_model.eval()
-            overwatch.info("dual_source_v1 keeps the VLM frozen in eval mode")
-        elif not self.model_cfg.tune_vlm:
-            for p in self.model.vlm_model.parameters():
-                p.requires_grad = False
-            overwatch.info("VLM parameters are frozen (tune_vlm=False)")
-        else:
-            for p in self.model.vlm_model.parameters():
-                p.requires_grad = True
-            # Freeze the final norm layer since we don't use it (we extract hidden_states[-1])
-            if hasattr(self.model.vlm_model.model, 'language_model') and hasattr(self.model.vlm_model.model.language_model, 'norm'):
-                for p in self.model.vlm_model.model.language_model.norm.parameters():
-                    p.requires_grad = False
-                overwatch.info("VLM final norm layer frozen (not used in forward pass)")
-            overwatch.info("VLM parameters are trainable (tune_vlm=True)")
+        self.apply_vlm_trainability()
 
         num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         overwatch.info(f"Model has {num_parameters:,} trainable parameters")
 
 
+    def apply_vlm_trainability(self) -> set[str]:
+        """Freeze/unfreeze the VLM per component; returns the tuned components.
+
+        Ported from FinetuneTrainer: this trainer used to hard-freeze the whole VLM.
+        """
+        trainable_components = self.vlm_trainable_components()
+        for name, p in self.model.vlm_model.named_parameters():
+            p.requires_grad = self._vlm_group_of(name) in trainable_components
+
+        if not trainable_components:
+            overwatch.info("VLM parameters are frozen (tune_vlm=False, no tune_mm_* set)")
+        else:
+            overwatch.info(f"VLM trainable components: {sorted(trainable_components)}")
+            # Preserve legacy joint freezing; dual consumes the normalized final hidden state.
+            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1"
+                    and hasattr(self.model.vlm_model.model, "language_model") and hasattr(self.model.vlm_model.model.language_model, "norm")):
+                for p in self.model.vlm_model.model.language_model.norm.parameters():
+                    p.requires_grad = False
+                overwatch.info("VLM final norm layer frozen (legacy joint policy)")
+            # We never read the logits, so an UNTIED lm_head receives no gradient
+            # and DDP errors on the reduction that never comes.
+            lm_head = self.model.vlm_model.lm_head
+            if lm_head.weight is not self.model.vlm_model.get_input_embeddings().weight:
+                lm_head.weight.requires_grad = False
+                overwatch.info("Untied VLM lm_head frozen (action loss does not use logits)")
+
+        if trainable_components and self.model_cfg.gradient_checkpointing:
+            self.model.vlm_model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            self.model.vlm_model.enable_input_require_grads()
+            self.model.vlm_model.config.use_cache = False
+            if hasattr(self.model.vlm_model.config, "text_config"):
+                self.model.vlm_model.config.text_config.use_cache = False
+            overwatch.info("VLM gradient checkpointing enabled; KV cache disabled")
+        return trainable_components
+
+    @staticmethod
+    def _vlm_group_of(name: str) -> str:
+        """Which VLM sub-group a `vlm_model.*` parameter belongs to: the patch
+        merger(s) are the multimodal projector, everything else under `visual` is
+        the vision tower."""
+        if "merger" in name:
+            return "mm_projector"
+        if "visual" in name:
+            return "vision_tower"
+        return "lang_backbone"
+
+    def vlm_trainable_components(self) -> set[str]:
+        """Which VLM components to finetune. tune_mm_* select individually and imply
+        a tuned VLM; otherwise tune_vlm means "train the whole VLM"."""
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1":
+            return {"vision_tower", "mm_projector", "lang_backbone"} if self.model_cfg.tune_vlm else set()
+        selected = set()
+        if self.model_cfg.tune_mm_vision:
+            selected.add("vision_tower")
+        if self.model_cfg.tune_mm_mlp:
+            selected.add("mm_projector")
+        if self.model_cfg.tune_mm_llm:
+            selected.add("lang_backbone")
+        if selected:
+            if not self.model_cfg.tune_vlm:
+                overwatch.info(
+                    f"tune_mm_* selected {sorted(selected)}; treating the VLM as tuned "
+                    "even though tune_vlm=False"
+                )
+            return selected
+        if self.model_cfg.tune_vlm:
+            return {"vision_tower", "mm_projector", "lang_backbone"}
+        return set()
+
     def create_optimizers(self):
-        # Separate parameters into groups
-        action_header_params = []
-        vlm_model_params = []
-        other_params = []
+        # Dual-source groups contain only trainable parameters. Legacy Sonic
+        # retains its original membership, including frozen parameters, so old
+        # optimizer checkpoints preserve their group lengths and ordering.
+        dual_source = getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+        grouped: dict[str, list[torch.nn.Parameter]] = {}
         for name, param in self.model.named_parameters():
-            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
-                    and not param.requires_grad):
+            if dual_source and not param.requires_grad:
                 continue
             if name.startswith("action_header."):
-                action_header_params.append(param)
+                group = "action_header"
             elif name.startswith("vlm_model."):
-                if self.model_cfg.tune_vlm:
-                    vlm_model_params.append(param)
+                if not dual_source and not self.model_cfg.tune_vlm:
+                    continue
+                # Dual uses the applied per-component trainability; legacy
+                # keeps all VLM parameters in its single lang-LR group.
+                group = self._vlm_group_of(name) if dual_source else "vlm_model"
+            elif dual_source and name.startswith("motion_conditioner."):
+                group = "motion_expert"
             else:
-                other_params.append(param)
+                group = "other"
+            grouped.setdefault(group, []).append(param)
+
+        base_lr = self.cfg.train.learning_rate
+        lr_by_group = {
+            "action_header": base_lr,
+            "other": base_lr,  # Default group
+            "vlm_model": self.model_cfg.lang_backbone_lr,  # Legacy Sonic has one VLM group.
+            "lang_backbone": self.model_cfg.lang_backbone_lr,
+            "vision_tower": self.model_cfg.vision_tower_lr,
+            "mm_projector": self.model_cfg.mm_projector_lr,
+            "motion_expert": getattr(self.model_cfg, "motion_expert_lr", 1e-5),
+        }
+        # Fixed order so the optimizer state_dict layout is deterministic across
+        # runs/resumes, and group 0 stays the action header (see get_lr()).
+        group_order = [
+            "action_header", "other",
+            "lang_backbone", "vision_tower", "mm_projector",
+            "motion_expert",
+        ]
+
+        if not dual_source:
+            group_order = ["action_header", "vlm_model", "other"]
 
         param_groups = []
-        if action_header_params:
+        for group_name in group_order:
+            params = grouped.get(group_name)
+            if not params:
+                continue
             param_groups.append({
-                'params': action_header_params,
-                'lr': self.cfg.train.learning_rate,
-                'group_name': 'action_header'
+                "params": params,
+                "lr": lr_by_group[group_name],
+                "group_name": group_name,
             })
-        if vlm_model_params:
-            param_groups.append({
-                'params': vlm_model_params,
-                'lr': self.model_cfg.lang_backbone_lr,
-                'group_name': 'vlm_model'
-            })
-        if other_params:
-            param_groups.append({
-                'params': other_params,
-                'lr': self.cfg.train.learning_rate,  # Default group
-                'group_name': 'other'
-            })
+            overwatch.info(
+                f"optimizer group '{group_name}': lr={lr_by_group[group_name]:.2e}, "
+                f"{sum(p.numel() for p in params):,} params"
+            )
 
         optimizer_kwargs = dict(self.cfg.train.lr_scheduler_kwargs)
         if self.cfg.train.optimizer_foreach is not None:
             optimizer_kwargs["foreach"] = self.cfg.train.optimizer_foreach
+        # AdamW's *default* lr matters even though every group sets its own:
+        # transformers' `cosine_with_min_lr` computes the decay floor as
+        # min_lr / optimizer.defaults["lr"] (optimization.py:373). Without this
+        # it silently used torch's 1e-3 default, so `min_lr` was off by
+        # learning_rate/1e-3 for every group.
+        if dual_source:
+            optimizer_kwargs.setdefault("lr", base_lr)
         self.optimizer = torch.optim.AdamW(
             param_groups,
             **optimizer_kwargs, # type: ignore
         )
+        return self.optimizer
 
     def create_lr_schedulers(
         self,
@@ -334,7 +426,7 @@ class SonicTrainer(Trainer):
 
         if self.train_cfg.data_parallel == "deepspeed":
             # Gradient Checkpoint Setup
-            if self.model_cfg.gradient_checkpointing and self.model_cfg.tune_vlm:
+            if self.model_cfg.gradient_checkpointing and self.vlm_trainable_components():
                 assert "DeepSpeedEngine" in self.model.__class__.__name__, "deepspeed is not properly initialized!"
                 if hasattr(self.model, "enable_input_require_grads"): 
                     self.model.vlm_model.enable_input_require_grads()
@@ -361,6 +453,65 @@ class SonicTrainer(Trainer):
         self.accelerator = accelerator
         return self.train_dataloader # type: ignore
 
+    VLM_GROUPS = ("lang_backbone", "vision_tower", "mm_projector")
+
+    def group_lrs(self) -> dict[str, float]:
+        """Current LR of every optimizer group, keyed `lr_<group_name>`.
+
+        `self.lr` only reports param_groups[0] (the action header), so without this
+        a misconfigured VLM LR is invisible in wandb.
+        """
+        param_groups = getattr(getattr(self, "optimizer", None), "param_groups", None)
+        if not param_groups:
+            return {}
+        return {
+            f"lr_{group.get('group_name', i)}": float(group["lr"])
+            for i, group in enumerate(param_groups)
+        }
+
+    def grad_norm_metrics(self) -> dict[str, float]:
+        """Pre-clip gradient norms for logging: action header vs VLM backbone."""
+        metrics = {
+            f"grad_norm_{name}": value
+            for name, value in self._grad_norms.items()
+            if name != "action_header"  # already reported as grad_norm_act
+        }
+        vlm = [v for name, v in self._grad_norms.items() if name in self.VLM_GROUPS]
+        if vlm:
+            metrics["grad_norm_vlm"] = math.sqrt(sum(v * v for v in vlm))
+        return metrics
+
+    def clip_grad_norms(self) -> dict[str, float]:
+        """Clip each optimizer group on its own budget; return pre-clip norms.
+
+        Only for ddp: fsdp needs the sharded all-reduce inside model.clip_grad_norm_,
+        which accelerate only takes when handed the full parameter list, and
+        deepspeed clips inside its own engine.
+        """
+        max_norm = self.train_cfg.max_grad_norm
+        if (self.train_cfg.data_parallel != "ddp"
+                or getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1"):
+            if self.train_cfg.data_parallel == "deepspeed":
+                return {}  # engine-side, via `gradient_clipping` in the ds config
+            norm = (
+                self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm)
+                if max_norm is not None
+                else self.get_total_grad_norm(self.model.parameters())
+            )
+            return {} if norm is None else {"global": float(norm)}
+
+        norms: dict[str, float] = {}
+        for group in self.optimizer.param_groups:
+            params = group["params"]
+            norm = (
+                self.accelerator.clip_grad_norm_(params, max_norm)
+                if max_norm is not None
+                else self.get_total_grad_norm(params)
+            )
+            if norm is not None:
+                norms[group.get("group_name", "params")] = float(norm)
+        return norms
+
     def training_step(
         self,
         batch: dict[str, Union[torch.Tensor, Any]],
@@ -377,17 +528,16 @@ class SonicTrainer(Trainer):
 
             self.accelerator.backward(losses["loss"])
             if self.accelerator.sync_gradients:
-                if self.train_cfg.max_grad_norm is not None:
-                    self._grad_norm_act = self.accelerator.clip_grad_norm_(
-                        self.model.parameters(), self.cfg.train.max_grad_norm
-                    )
-                else:
-                    self._grad_norm_act = self.get_total_grad_norm(self.model.parameters())
+                self._grad_norms = self.clip_grad_norms()
+                self._grad_norm_act = self._grad_norms.get("action_header", self._grad_norms.get("global"))
 
                 if self.train_cfg.data_parallel == "ddp":
                     # NOTE: It is normal that param.grad is None for deepspeed and fsdp
                     for name, param in self.model.named_parameters():
                         if param.requires_grad and param.grad is None:
+                            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+                                    and "motion_conditioner." in name and ".routed_experts." in name):
+                                continue  # A routed expert may legitimately be inactive on this rank/batch.
                             overwatch.critical(f"[Unused] {name} did not receive a gradient.")  
 
             self.optimizer.step()
@@ -421,8 +571,10 @@ class SonicTrainer(Trainer):
         self.train_loss_tracker = step_loss = losses["loss"].detach().item()
 
         return (self.accelerator.sync_gradients, {
-            "lr_act": self.lr, 
-            "grad_norm_act": self._grad_norm_act, # type: ignore
+            "lr_act": self.lr,
+            **self.group_lrs(),
+            "grad_norm_act": self._grad_norm_act,
+            **self.grad_norm_metrics(), # type: ignore
             "loss": step_loss
         })
 

@@ -380,11 +380,6 @@ class FinetuneTrainer(Trainer):
 
     def apply_vlm_trainability(self) -> set[str]:
         """Freeze/unfreeze the VLM per component; returns the tuned components."""
-        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
-            self.model.vlm_model.requires_grad_(False)
-            self.model.vlm_model.eval()
-            overwatch.info("dual_source_v1 keeps the VLM frozen in eval mode")
-            return set()
         trainable_components = self.vlm_trainable_components()
         for name, p in self.model.vlm_model.named_parameters():
             p.requires_grad = self._vlm_group_of(name) in trainable_components
@@ -393,11 +388,12 @@ class FinetuneTrainer(Trainer):
             overwatch.info("VLM parameters are frozen (tune_vlm=False, no tune_mm_* set)")
         else:
             overwatch.info(f"VLM trainable components: {sorted(trainable_components)}")
-            # Freeze the final norm layer since we don't use it (we extract hidden_states[-1])
-            if hasattr(self.model.vlm_model.model, 'language_model') and hasattr(self.model.vlm_model.model.language_model, 'norm'):
+            # Preserve legacy joint freezing; dual consumes the normalized final hidden state.
+            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1"
+                    and hasattr(self.model.vlm_model.model, 'language_model') and hasattr(self.model.vlm_model.model.language_model, 'norm')):
                 for p in self.model.vlm_model.model.language_model.norm.parameters():
                     p.requires_grad = False
-                overwatch.info("VLM final norm layer frozen (not used in forward pass)")
+                overwatch.info("VLM final norm layer frozen (legacy joint policy)")
             # We never read the logits, so an UNTIED lm_head receives no gradient
             # and DDP errors on the reduction that never comes.
             lm_head = self.model.vlm_model.lm_head
@@ -440,8 +436,6 @@ class FinetuneTrainer(Trainer):
         `vision_tower_lr`. When none of them is set, `tune_vlm` keeps its legacy
         meaning of "train the whole VLM".
         """
-        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
-            return set()
         selected = set()
         if self.model_cfg.tune_mm_vision:
             selected.add("vision_tower")
@@ -476,6 +470,8 @@ class FinetuneTrainer(Trainer):
                 # already applied tune_vlm / tune_mm_* per component, so a
                 # vision-only run simply yields no lang_backbone group.
                 group = self._vlm_group_of(name)
+            elif name.startswith("motion_conditioner."):
+                group = "motion_expert"
             else:
                 group = "other"
             grouped.setdefault(group, []).append(param)
@@ -487,12 +483,14 @@ class FinetuneTrainer(Trainer):
             "lang_backbone": self.model_cfg.lang_backbone_lr,
             "vision_tower": self.model_cfg.vision_tower_lr,
             "mm_projector": self.model_cfg.mm_projector_lr,
+            "motion_expert": getattr(self.model_cfg, "motion_expert_lr", 1e-5),
         }
         # Fixed order so the optimizer state_dict layout is deterministic across
         # runs/resumes, and group 0 stays the action header (see get_lr()).
         group_order = [
             "action_header", "other",
             "lang_backbone", "vision_tower", "mm_projector",
+            "motion_expert",
         ]
 
         param_groups = []
@@ -825,6 +823,9 @@ class FinetuneTrainer(Trainer):
                     # Only check on step 0 — iterating 2.6B params every step is expensive.
                     for name, param in self.model.named_parameters():
                         if param.requires_grad and param.grad is None:
+                            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+                                    and "motion_conditioner." in name and ".routed_experts." in name):
+                                continue  # A routed expert may legitimately be inactive on this rank/batch.
                             overwatch.critical(f"[Unused] {name} did not receive a gradient.")
 
             if not skip_step:

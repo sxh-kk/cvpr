@@ -42,6 +42,36 @@ def event(job, stage, **values):
     print(json.dumps(value, ensure_ascii=False), flush=True)
 
 
+def record_failure(job, error, status_path=None):
+    """Best-effort failure evidence; never hide the operation's exception.
+
+    Preparation may fail before a plan can identify the shared status file.
+    Even with a plan, update that file only while it still names this job.
+    """
+    recording_errors = []
+    try:
+        Path(job).mkdir(parents=True, exist_ok=True)
+        event(job, "failed", error=repr(error), traceback=traceback.format_exc())
+    except BaseException as recording_error:
+        recording_errors.append(recording_error)
+    if status_path is not None:
+        try:
+            current = json.loads(Path(status_path).read_text())
+            owner = current.get("job_dir")
+            if isinstance(owner, str) and Path(owner).resolve() == Path(job).resolve():
+                atomic_json(status_path, {"state": "failed", "job_dir": str(job), "error": repr(error),
+                                          "motionexpert_training_started": False})
+        except FileNotFoundError:
+            pass
+        except BaseException as recording_error:
+            recording_errors.append(recording_error)
+    for recording_error in recording_errors:
+        try:
+            print(f"Unable to record probe failure: {recording_error!r}", file=sys.stderr, flush=True)
+        except BaseException:
+            pass
+
+
 def noise_seed(seed, archive_fingerprint, episode, start, draw=0):
     payload = json.dumps([int(seed), archive_fingerprint, int(episode), int(start), int(draw)],
                          separators=(",", ":")).encode()
@@ -105,6 +135,125 @@ def make_shards(entries, gpus):
     for shard in shards:
         shard.sort(key=lambda item: (item["split"], item["index"]))
     return shards
+
+
+def assert_reuse_current(plan):
+    """Only check recorded identities; never rescan/revalidate source payloads."""
+    reuse = plan.get("reuse_job")
+    if not reuse:
+        return
+    base = Path(reuse["job_dir"])
+    for name, expected in reuse["artifact_stamps"].items():
+        if file_stamp(base / name) != expected:
+            raise ValueError(f"Reused probe artifact changed: {name}")
+    for name, expected in reuse["metadata_sha256"].items():
+        if hashlib.sha256((base / name).read_bytes()).hexdigest() != expected:
+            raise ValueError(f"Reused probe metadata changed: {name}")
+
+
+def prepare_reuse(base_dir, cache, checkpoint160, job, gpus, batch_size):
+    """Bind an incremental evaluation to an accepted, immutable 20/100 job.
+
+    Existing payloads are linked for read-only consumers. The extraction and
+    fitting paths are explicitly limited to epoch160, so those links are never
+    opened for writing. No selection, labels or DINO PCA are regenerated.
+    """
+    base, job = Path(base_dir).resolve(strict=True), Path(job).resolve()
+    if base == job or job.is_relative_to(base):
+        raise ValueError("Incremental probe output must be outside its baseline job")
+    metadata = ("plan.json", "selection.json", "metrics.json", "review.json", "extraction-complete.json")
+    initial = {name: file_stamp(base / name) for name in metadata}
+    raw = {name: (base / name).read_bytes() for name in metadata}
+    old = json.loads(raw["plan.json"])
+    metrics = json.loads(raw["metrics.json"])
+    if (json.loads(raw["review.json"]).get("passed") is not True
+            or json.loads(raw["extraction-complete.json"]).get("passed") is not True):
+        raise ValueError("Reuse requires a completed, independently accepted baseline job")
+    if (old.get("format") != "motionexpert-frozen-prior-probe-v1"
+            or old.get("reuse_job") or set(old.get("checkpoints", {})) != {"20", "100"}
+            or old.get("precision") != "float32" or old.get("weights") != "ema"):
+        raise ValueError("Baseline job does not implement the original frozen 20/100 protocol")
+    if gpus != old["gpus"]:
+        raise ValueError("Reuse requires the same GPU layout for exact paired-input shard digests")
+    if (str(cache.root) != old["cache_root"] or str(cache.vision_root) != old["vision_root"]
+            or cache.manifest_sha256 != old["cache_manifest_sha256"]
+            or any(cache.binding[key] != old[key] for key in ("archive_fingerprint", "split_fingerprint"))):
+        raise ValueError("Baseline and current accepted cache/vision identities differ")
+    repo = Path(__file__).resolve().parents[1]
+    for name in ("MotionExpert/dataset/probe_cache.py", "MotionExpert/prior_probe_math.py"):
+        if hashlib.sha256((repo / name).read_bytes()).hexdigest() != old["source_files"].get(name):
+            raise ValueError(f"Baseline cache/label semantics differ: {name}")
+    entries = json.loads(raw["selection.json"])
+    if (not isinstance(entries, list) or len(entries) != old["windows"]
+            or any(row.get("row") != index for index, row in enumerate(entries))):
+        raise ValueError("Baseline selection rows differ from its declared population")
+    for row in entries:
+        split, index = row["split"], row["index"]
+        indices = cache.indices(split)
+        if type(index) is not int or not 0 <= index < len(indices):
+            raise ValueError("Reused selection contains an invalid packed index")
+        sequence, start = map(int, indices[index])
+        record = cache.records[split][sequence]
+        if (start != row["start_frame"] or any(row[key] != record[key] for key in
+                ("episode_index", "source", "source_key", "split_group_ids"))):
+            raise ValueError("Baseline selection identity/order differs from the accepted cache")
+    noise_rows = old.get("noise_rows", [])
+    if (not noise_rows or len(set(noise_rows)) != len(noise_rows)
+            or any(type(index) is not int or not 0 <= index < len(entries)
+                   or entries[index]["split"] != "val" for index in noise_rows)):
+        raise ValueError("Baseline noise rows do not identify its validation subset")
+    artifacts = ["selection.json", "targets.npz", "dino.npy", "dino-linear-probe.pt"]
+    for epoch in (20, 100):
+        artifacts += [f"epoch{epoch}.npy", f"noise-epoch{epoch}.npy", f"epoch{epoch}-linear-probe.pt"]
+        for gpu in gpus:
+            name = f"done-{epoch}-gpu{gpu}.json"
+            if json.loads((base / name).read_text()).get("passed") is not True:
+                raise ValueError("Baseline per-GPU extraction evidence is not accepted")
+            artifacts.append(name)
+    for name, width in (("epoch20", 768), ("epoch100", 768), ("dino", 30720)):
+        array = np.load(base / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+        if array.shape != (len(entries), width) or array.dtype != np.float32:
+            raise ValueError(f"Baseline feature header differs: {name}")
+        del array
+    for epoch in (20, 100):
+        array = np.load(base / f"noise-epoch{epoch}.npy", mmap_mode="r", allow_pickle=False)
+        if array.shape != (len(noise_rows), 3, 768) or array.dtype != np.float32:
+            raise ValueError("Baseline noise array header differs")
+        del array
+    with np.load(base / "targets.npz", allow_pickle=False) as labels:
+        if set(labels.files) != set(old["label_specs"]):
+            raise ValueError("Baseline target field membership differs")
+        for name, spec in old["label_specs"].items():
+            if list(labels[name].shape) != spec["shape"] or str(labels[name].dtype) != spec["dtype"]:
+                raise ValueError(f"Baseline target shape/dtype differs: {name}")
+    if not {"epoch20", "epoch100", "dino"} <= metrics.get("models", {}).keys():
+        raise ValueError("Baseline has no completed frozen readouts")
+    checkpoints = dict(old["checkpoints"])
+    stamps = dict(old["checkpoint_stamps"])
+    for epoch, path in checkpoints.items():
+        if file_stamp(path) != stamps[epoch]:
+            raise ValueError("Baseline frozen checkpoint identity changed")
+    checkpoints["160"] = str(Path(checkpoint160).resolve(strict=True))
+    stamps["160"] = file_stamp(checkpoints["160"])
+    plan = {**old, "job_dir": str(job), "checkpoints": checkpoints,
+            "checkpoint_stamps": stamps, "gpus": gpus, "batch_size": batch_size,
+            "extract_epochs": [160], "fit_models": ["epoch160"],
+            "reuse_job": {"job_dir": str(base),
+                "metadata_sha256": {name: hashlib.sha256(value).hexdigest() for name, value in raw.items()},
+                "artifact_stamps": {name: file_stamp(base / name) for name in set(artifacts) | set(metadata)},
+                "readout_models": ["epoch20", "epoch100", "dino"]},
+            "baseline_source_files": old["source_files"],
+            "source_files": {str(path.relative_to(repo)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (Path(__file__), repo / "MotionExpert/dataset/probe_cache.py",
+                             repo / "MotionExpert/prior_probe_math.py", repo / "MotionExpert/prior_probe_fit.py")}}
+    if any(file_stamp(base / name) != stamp for name, stamp in initial.items()):
+        raise ValueError("Baseline metadata changed while binding the incremental probe")
+    assert_reuse_current(plan)
+    # Only payloads consumed by read-only paths are inherited into the new job.
+    for name in artifacts:
+        if not name.startswith("done-"):
+            (job / name).symlink_to(base / name)
+    return plan, entries
 
 
 def condition_inputs(samples):
@@ -216,7 +365,8 @@ def run_rank(rank, gpu, shard, plan, cfg, normalizer, visual, checkpoint, cache,
             device = torch.device(f"cuda:{gpu}")
             expert = _expert_from_snapshot(cfg, normalizer, visual, plan["checkpoints"][str(epoch)], checkpoint, device)
             features = np.load(job / f"epoch{epoch}.npy", mmap_mode="r+")
-            dino = np.load(job / "dino.npy", mmap_mode="r+") if epoch == 20 else None
+            dino = np.load(job / "dino.npy", mmap_mode="r+") if epoch == 20 and not plan.get("reuse_job") else None
+            paired_dino = np.load(job / "dino.npy", mmap_mode="r") if plan.get("reuse_job") else None
             stability = np.load(job / f"noise-epoch{epoch}.npy", mmap_mode="r+")
             stable_lookup = {row: i for i, row in enumerate(plan["noise_rows"])}
             noise_digest, image_digest = hashlib.sha256(), hashlib.sha256()
@@ -225,6 +375,10 @@ def run_rank(rank, gpu, shard, plan, cfg, normalizer, visual, checkpoint, cache,
                 rows = shard[start:start + plan["batch_size"]]
                 samples = [cache.read(row["split"], row["index"], include_images=True) for row in rows]
                 conditions = condition_inputs(samples)
+                indices = [row["row"] for row in rows]
+                if paired_dino is not None and not np.array_equal(
+                        conditions["img_embs"].numpy().reshape(len(rows), -1), paired_dino[indices]):
+                    raise AssertionError("Incremental checkpoint historical images differ from the accepted baseline")
                 noise = make_noise(rows, plan["seed"], plan["archive_fingerprint"])
                 noise_digest.update(noise.numpy().tobytes())
                 image_digest.update(conditions["img_embs"].numpy().tobytes())
@@ -233,7 +387,6 @@ def run_rank(rank, gpu, shard, plan, cfg, normalizer, visual, checkpoint, cache,
                     atomic_json(job / f"gpu-check-{epoch}-{gpu}.json", acceptance)
                 with torch.inference_mode():
                     pooled, _, _ = forward_hidden(expert, conditions, noise)
-                indices = [row["row"] for row in rows]
                 features[indices] = pooled.cpu().numpy()
                 if dino is not None:
                     dino[indices] = conditions["img_embs"].numpy().reshape(len(rows), -1)
@@ -260,6 +413,7 @@ def run_rank(rank, gpu, shard, plan, cfg, normalizer, visual, checkpoint, cache,
             if dino is not None:
                 dino.flush()
             guard = cache.assert_current()
+            assert_reuse_current(plan)
             if any(p.grad is not None or p.requires_grad for p in expert.parameters()):
                 raise AssertionError("Frozen expert acquired gradients")
             result = {"passed": True, "epoch": epoch, "gpu": gpu, "windows": completed,
@@ -267,8 +421,9 @@ def run_rank(rank, gpu, shard, plan, cfg, normalizer, visual, checkpoint, cache,
                 "noise_sha256": noise_digest.hexdigest(), "dino_sha256": image_digest.hexdigest(),
                 "expert_trainable_parameters": 0, "expert_gradients": False, "acceptance": acceptance,
                 "guard": guard, "elapsed_seconds": time.monotonic() - started}
-            if epoch == 100:
-                previous = json.loads((job / f"done-20-gpu{gpu}.json").read_text())
+            if epoch != 20:
+                comparison_job = Path(plan["reuse_job"]["job_dir"]) if plan.get("reuse_job") else job
+                previous = json.loads((comparison_job / f"done-20-gpu{gpu}.json").read_text())
                 for name in ("rows_sha256", "noise_sha256", "dino_sha256", "windows"):
                     if result[name] != previous[name]:
                         raise AssertionError(f"Checkpoint comparisons differ in {name}")
@@ -285,9 +440,13 @@ def extract(plan, cache, entries):
     from .visual_contract import checkpoint_visual_contract, compare_visual_contracts
     job = Path(plan["job_dir"])
     count = len(entries)
-    for name, shape in (("epoch20", (count, 768)), ("epoch100", (count, 768)),
-                        ("dino", (count, 30720)), ("noise-epoch20", (len(plan["noise_rows"]), 3, 768)),
-                        ("noise-epoch100", (len(plan["noise_rows"]), 3, 768))):
+    epochs = plan.get("extract_epochs", [20, 100])
+    arrays = [(f"epoch{epoch}", (count, 768)) for epoch in epochs]
+    arrays += [(f"noise-epoch{epoch}", (len(plan["noise_rows"]), 3, 768)) for epoch in epochs]
+    if not plan.get("reuse_job"):
+        arrays.append(("dino", (count, 30720)))
+    assert_reuse_current(plan)
+    for name, shape in arrays:
         path = job / f"{name}.npy"
         if path.exists():
             raise FileExistsError(f"Refuse to overwrite prior probe artifacts: {path}")
@@ -297,7 +456,7 @@ def extract(plan, cache, entries):
     shards = make_shards(entries, plan["gpus"])
     context = mp.get_context("fork")
     normalizer, visual = None, None
-    for epoch in (20, 100):
+    for epoch in epochs:
         event(job, "extracting", epoch=epoch, windows=count, gpu_count=len(plan["gpus"]))
         checkpoint = read_checkpoint(plan["checkpoints"][str(epoch)])
         if checkpoint.get("epoch") != epoch - 1:
@@ -308,6 +467,19 @@ def extract(plan, cache, entries):
         candidate = MotionNormalizer(checkpoint["motionexpert_normalization"])
         validate_checkpoint_statistics(cfg, checkpoint, candidate)
         candidate_visual = checkpoint_visual_contract(checkpoint)
+        if plan.get("reuse_job"):
+            # Statistics and architecture from an inherited checkpoint are
+            # authoritative; the new training checkpoint must share both.
+            baseline = read_checkpoint(plan["checkpoints"]["20"])
+            baseline_cfg = checkpoint_config(baseline)
+            baseline_normalizer = MotionNormalizer(baseline["motionexpert_normalization"])
+            validate_checkpoint_statistics(cfg, checkpoint, baseline_normalizer)
+            compare_visual_contracts(checkpoint_visual_contract(baseline), candidate_visual)
+            from .config import architecture_metadata
+            if architecture_metadata(cfg) != architecture_metadata(baseline_cfg):
+                raise ValueError("Incremental checkpoint model architecture differs from the baseline")
+            del baseline, baseline_cfg, baseline_normalizer
+            gc.collect()
         if normalizer is not None:
             validate_checkpoint_statistics(cfg, checkpoint, normalizer)
             compare_visual_contracts(visual, candidate_visual)
@@ -350,42 +522,49 @@ def extract(plan, cache, entries):
             raise RuntimeError("Read-only checkpoint identity changed")
         del checkpoint, candidate
         gc.collect()
-    return {"passed": True, "windows": count, "gpu_count": len(plan["gpus"]), "epochs": [20, 100]}
+    assert_reuse_current(plan)
+    return {"passed": True, "windows": count, "gpu_count": len(plan["gpus"]), "epochs": epochs,
+            "reused_epochs": [20, 100] if plan.get("reuse_job") else []}
 
 
 def fit_and_record(job, device):
-    from .prior_probe_fit import fit_job
-    job = Path(job)
-    completed = json.loads((job / "extraction-complete.json").read_text())
-    plan = json.loads((job / "plan.json").read_text())
-    if completed.get("passed") is not True:
-        raise ValueError("Readout fitting requires completed GPU extraction")
-    for epoch, path in plan["checkpoints"].items():
-        if file_stamp(path) != plan["checkpoint_stamps"][epoch]:
-            raise ValueError("Frozen checkpoint changed since extraction")
-    status_path = Path(plan["cache_root"]).parent.parent / ".pipeline/current_motionexpert_prior_probe.json"
-    event(job, "fitting_frozen_readouts", device=device)
-    atomic_json(status_path, {"state": "fitting_frozen_readouts", "pid": os.getpid(),
-                              "job_dir": str(job), "motionexpert_training_started": False})
+    job = Path(job).resolve()
+    status_path = None
     try:
+        from .prior_probe_fit import fit_job
+        plan = json.loads((job / "plan.json").read_text())
+        if Path(plan["job_dir"]).resolve() != job:
+            raise ValueError("Probe plan belongs to another job")
+        status_path = Path(plan["cache_root"]).parent.parent / ".pipeline/current_motionexpert_prior_probe.json"
+        completed = json.loads((job / "extraction-complete.json").read_text())
+        if completed.get("passed") is not True:
+            raise ValueError("Readout fitting requires completed GPU extraction")
+        for epoch, path in plan["checkpoints"].items():
+            if file_stamp(path) != plan["checkpoint_stamps"][epoch]:
+                raise ValueError("Frozen checkpoint changed since extraction")
+        assert_reuse_current(plan)
+        event(job, "fitting_frozen_readouts", device=device)
+        atomic_json(status_path, {"state": "fitting_frozen_readouts", "pid": os.getpid(),
+                                  "job_dir": str(job), "motionexpert_training_started": False})
         result = fit_job(job, device=device)
+        assert_reuse_current(plan)
+        event(job, "complete", report=str(job / "report.md"), metrics=str(job / "metrics.json"))
+        atomic_json(status_path, {"state": "complete", "job_dir": str(job),
+            "report": str(job / "report.md"), "metrics": str(job / "metrics.json"),
+            "motionexpert_training_started": False})
     except BaseException as error:
-        event(job, "failed", error=repr(error), traceback=traceback.format_exc())
-        atomic_json(status_path, {"state": "failed", "job_dir": str(job), "error": repr(error),
-                                  "motionexpert_training_started": False})
+        record_failure(job, error, status_path)
         raise
-    event(job, "complete", report=str(job / "report.md"), metrics=str(job / "metrics.json"))
-    atomic_json(status_path, {"state": "complete", "job_dir": str(job),
-        "report": str(job / "report.md"), "metrics": str(job / "metrics.json"),
-        "motionexpert_training_started": False})
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="MotionExpert/configs/smplh_k12_psi0_pretrain.yaml")
-    parser.add_argument("--checkpoint20", required=True)
-    parser.add_argument("--checkpoint100", required=True)
+    parser.add_argument("--checkpoint20")
+    parser.add_argument("--checkpoint100")
+    parser.add_argument("--checkpoint160")
+    parser.add_argument("--reuse-job", help="Accepted original 20/100 probe; inherit all old inputs/readouts read-only")
     parser.add_argument("--output", required=True)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--batch-size", type=int, default=128)
@@ -402,6 +581,11 @@ def main():
     if args.stage == "fit":
         fit_and_record(job, device=f"cuda:{args.gpus.split(',')[0]}")
         return
+    if args.reuse_job:
+        if not args.checkpoint160 or args.checkpoint20 or args.checkpoint100:
+            parser.error("--reuse-job requires --checkpoint160; original checkpoints come from the baseline plan")
+    elif not args.checkpoint20 or not args.checkpoint100 or args.checkpoint160:
+        parser.error("Use --checkpoint20 and --checkpoint100, or --reuse-job with --checkpoint160")
     import torch
     from .config import load_config
     from .dataset.probe_cache import AcceptedProbeCache
@@ -411,46 +595,51 @@ def main():
     if not gpus or len(set(gpus)) != len(gpus) or args.batch_size < 4:
         raise ValueError("Use distinct GPU indices and batches of at least four windows")
     job.mkdir(parents=True, exist_ok=False)
-    event(job, "opening_accepted_cache")
-    cache = AcceptedProbeCache(cfg.DATA.WINDOW_CACHE_ROOT, cfg.DATA.VISION_PROFILE_ROOT)
-    entries = select_rows(cache, args.seed, args.train_episodes_per_source,
-                          args.val_episodes_per_source, args.windows_per_episode)
-    atomic_json(job / "selection.json", entries)
-    label_specs = prepare_labels(cache, entries, job)
-    noise_rows = []
-    for source in sorted({row["source"] for row in entries}):
-        candidates = [row for row in entries if row["source"] == source and row["split"] == "val"]
-        # One window per episode avoids a short contiguous block of one scene.
-        by_episode = {}
-        for row in candidates:
-            by_episode.setdefault(row["episode_index"], row["row"])
-        noise_rows.extend(list(by_episode.values())[:128])
-    checkpoints = {"20": str(Path(args.checkpoint20).resolve(strict=True)),
-                   "100": str(Path(args.checkpoint100).resolve(strict=True))}
-    counts = Counter((row["split"], row["source"]) for row in entries)
-    plan = {"format": "motionexpert-frozen-prior-probe-v1", "job_dir": str(job), "seed": args.seed,
-            "checkpoints": checkpoints, "checkpoint_stamps": {key: file_stamp(path) for key, path in checkpoints.items()},
-            "cache_root": str(cache.root), "vision_root": str(cache.vision_root),
-            "cache_manifest_sha256": cache.manifest_sha256,
-            "archive_fingerprint": cache.binding["archive_fingerprint"],
-            "split_fingerprint": cache.binding["split_fingerprint"],
-            "gpus": gpus, "batch_size": args.batch_size, "precision": "float32", "weights": "ema",
-            "windows": len(entries), "counts": {f"{split}/{source}": count for (split, source), count in counts.items()},
-            "label_specs": label_specs, "noise_rows": sorted(noise_rows), "noise_draws": 3,
-            "input": "six historical DINO frames only; all245 Gaussian channels; t=1; no trajectory",
-            "readout": "all eleven motion hidden states mean; no motion parameter optimization",
-            "sampling": {"train_episodes_per_source": args.train_episodes_per_source,
-                         "val_episodes_per_source": args.val_episodes_per_source,
-                         "max_windows_per_episode": args.windows_per_episode, "min_native_start_gap": 60},
-            "source_files": {str(path.relative_to(repo)): hashlib.sha256(path.read_bytes()).hexdigest()
-                             for path in (Path(__file__), repo / "MotionExpert/dataset/probe_cache.py",
-                                          repo / "MotionExpert/prior_probe_math.py",
-                                          repo / "MotionExpert/prior_probe_fit.py")}}
-    atomic_json(job / "plan.json", plan)
-    status_path = Path(cfg.DATA.ARCHIVE_ROOT).parent / ".pipeline/current_motionexpert_prior_probe.json"
-    atomic_json(status_path, {"state": "extracting", "pid": os.getpid(), "job_dir": str(job),
-                "log_path": str(job.parent / (job.name + ".log")), "motionexpert_training_started": False})
+    status_path = None
     try:
+        event(job, "opening_accepted_cache")
+        cache = AcceptedProbeCache(cfg.DATA.WINDOW_CACHE_ROOT, cfg.DATA.VISION_PROFILE_ROOT)
+        if args.reuse_job:
+            plan, entries = prepare_reuse(args.reuse_job, cache, args.checkpoint160, job, gpus, args.batch_size)
+        else:
+            entries = select_rows(cache, args.seed, args.train_episodes_per_source,
+                                  args.val_episodes_per_source, args.windows_per_episode)
+            atomic_json(job / "selection.json", entries)
+            label_specs = prepare_labels(cache, entries, job)
+            noise_rows = []
+            for source in sorted({row["source"] for row in entries}):
+                candidates = [row for row in entries if row["source"] == source and row["split"] == "val"]
+                # One window per episode avoids a short contiguous block of one scene.
+                by_episode = {}
+                for row in candidates:
+                    by_episode.setdefault(row["episode_index"], row["row"])
+                noise_rows.extend(list(by_episode.values())[:128])
+            checkpoints = {"20": str(Path(args.checkpoint20).resolve(strict=True)),
+                           "100": str(Path(args.checkpoint100).resolve(strict=True))}
+            counts = Counter((row["split"], row["source"]) for row in entries)
+            plan = {"format": "motionexpert-frozen-prior-probe-v1", "job_dir": str(job), "seed": args.seed,
+                "checkpoints": checkpoints, "checkpoint_stamps": {key: file_stamp(path) for key, path in checkpoints.items()},
+                "cache_root": str(cache.root), "vision_root": str(cache.vision_root),
+                "cache_manifest_sha256": cache.manifest_sha256,
+                "archive_fingerprint": cache.binding["archive_fingerprint"],
+                "split_fingerprint": cache.binding["split_fingerprint"],
+                "gpus": gpus, "batch_size": args.batch_size, "precision": "float32", "weights": "ema",
+                "windows": len(entries), "counts": {f"{split}/{source}": count for (split, source), count in counts.items()},
+                "label_specs": label_specs, "noise_rows": sorted(noise_rows), "noise_draws": 3,
+                "input": "six historical DINO frames only; all245 Gaussian channels; t=1; no trajectory",
+                "readout": "all eleven motion hidden states mean; no motion parameter optimization",
+                "extract_epochs": [20, 100], "fit_models": ["epoch20", "epoch100", "dino"],
+                "sampling": {"train_episodes_per_source": args.train_episodes_per_source,
+                             "val_episodes_per_source": args.val_episodes_per_source,
+                             "max_windows_per_episode": args.windows_per_episode, "min_native_start_gap": 60},
+                "source_files": {str(path.relative_to(repo)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                 for path in (Path(__file__), repo / "MotionExpert/dataset/probe_cache.py",
+                                              repo / "MotionExpert/prior_probe_math.py",
+                                              repo / "MotionExpert/prior_probe_fit.py")}}
+        atomic_json(job / "plan.json", plan)
+        status_path = Path(cfg.DATA.ARCHIVE_ROOT).parent / ".pipeline/current_motionexpert_prior_probe.json"
+        atomic_json(status_path, {"state": "extracting", "pid": os.getpid(), "job_dir": str(job),
+                    "log_path": str(job.parent / (job.name + ".log")), "motionexpert_training_started": False})
         acceptance = extract(plan, cache, entries)
         atomic_json(job / "extraction-complete.json", acceptance)
         event(job, "features_extracted", **acceptance)
@@ -460,9 +649,7 @@ def main():
             atomic_json(status_path, {"state": "features_extracted", "job_dir": str(job),
                                       "motionexpert_training_started": False})
     except BaseException as error:
-        event(job, "failed", error=repr(error), traceback=traceback.format_exc())
-        atomic_json(status_path, {"state": "failed", "job_dir": str(job), "error": repr(error),
-                                  "motionexpert_training_started": False})
+        record_failure(job, error, status_path)
         raise
 
 

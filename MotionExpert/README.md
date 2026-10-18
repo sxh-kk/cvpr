@@ -330,6 +330,28 @@ EgoSuite的100−20轮腕位移误差为−0.311cm（组95%区间−0.545至−0
 DINO PCA768保留87.57%特征方差，不代表保留同等比例运动信息。结果不能替代下游对照或证明续训到200轮有收益。
 完整报告与GPU记录：`/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-frozen-prior20-100-20261017T153935Z/`。
 
+新增第160轮对照时，复用上述已验收job，保持原窗口顺序、标签、DINO和逐窗噪声：
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python -u \
+  -m MotionExpert.probe_prior \
+  --reuse-job /gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-frozen-prior20-100-20261017T153935Z \
+  --checkpoint160 /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=159-step=77920.ckpt \
+  --output /gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/prior-probe-add160-new-run \
+  --gpus 0,1,2,3,4,5,6,7 --batch-size 128
+```
+
+输出目录必须全新，GPU布局须与原job一致。仅新增160轮特征与线性头，20／100轮读出和DINO PCA不重新拟合；
+原产物只读保留，并核对新旧逐卡窗口、噪声、历史图像摘要。报告增加160−20、160−100的分来源配对组区间。
+此项是train／val冻结先验验证；完整test动作指标另按原test协议评估，二者的预测目标与样本不能混同。
+
+2026-10-18增量验证已完成：仍为相同38,308窗，8卡各B128、EMA／FP32；20／100旧读出回放误差为0。
+160−100轮的EgoSuite腕／参考XY误差分别增加0.192／0.265cm，HM增加0.336／0.372cm；
+四项配对组95%区间均在0以上。HM接触切换F1从0.2361提高至0.2623，其余分量存在取舍。
+在这项冻结位移读出中，100轮为三者中较好的候选；结果不直接等同于完整test动作或下游收益。
+报告与新增GPU记录：`/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-frozen-prior20-100-160-20261018T050747947054Z/`。
+
 ## 检查记录
 
 新增或修改路径的CPU回归位于 `MotionExpert/tests/`，不重复已通过的数据数值验收。

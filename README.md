@@ -40,6 +40,8 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 保留优化器、EMA和原200轮学习率日程，八卡每卡256／24workers，其余参数不变。
 独立GPU诊断入口为 `python -m MotionExpert.probe_prior`，只拟合小读出头，按EgoSuite／HM分别报告；
 具体命令、采样与解释边界见 [冻结运动先验验证](MotionExpert/README.md#冻结运动先验验证)。
+支持在已验收20／100轮job上只读复用样本和基线，仅新增第160轮提取、读出及配对比较；
+冻结先验的train／val指标与全量test动作指标分别报告，原20／100轮结果保留。
 配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。
 修复流程状态位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_repair.json`。
 当前训练PID、日志和启动配置位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_training.json`。

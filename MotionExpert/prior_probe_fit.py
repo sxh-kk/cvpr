@@ -178,8 +178,11 @@ def _reports(prediction, target, entries):
     return report, rows
 
 
-def _bootstrap(rows_by_model, entries, groups, repetitions=1000, seed=271828):
+def _bootstrap(rows_by_model, entries, groups, repetitions=1000, seed=271828, contrasts=None):
     """Paired source-wise connected-group bootstrap of validation metrics."""
+    contrasts = (("epoch100", "epoch20"), ("epoch20", "dino"), ("epoch100", "dino")) if contrasts is None else contrasts
+    if any(left not in rows_by_model or right not in rows_by_model for left, right in contrasts):
+        raise ValueError("Paired bootstrap contrast references a missing model")
     source = np.asarray([entry["source"] for entry in entries])
     split = np.asarray([entry["split"] for entry in entries])
     rng = np.random.default_rng(seed)
@@ -212,22 +215,22 @@ def _bootstrap(rows_by_model, entries, groups, repetitions=1000, seed=271828):
                 specificity = np.divide(tn, tn + fp, out=np.full(repetitions, np.nan), where=tn + fp > 0)
                 metrics[binary + "_balanced_accuracy"] = .5 * (sensitivity + specificity)
             totals[model] = metrics
-        contrasts = {}
-        for left, right in (("epoch100", "epoch20"), ("epoch20", "dino"), ("epoch100", "dino")):
-            contrasts[left + "_minus_" + right] = {}
+        contrast_results = {}
+        for left, right in contrasts:
+            contrast_results[left + "_minus_" + right] = {}
             for metric in totals[left]:
                 delta = totals[left][metric] - totals[right][metric]
                 delta = delta[np.isfinite(delta)]
                 if len(delta):
                     observed_left = reduce_probe_metric_rows(rows_by_model[left], selected)
                     observed_right = reduce_probe_metric_rows(rows_by_model[right], selected)
-                    contrasts[left + "_minus_" + right][metric] = {
+                    contrast_results[left + "_minus_" + right][metric] = {
                         "mean_delta": float(delta.mean()), "ci95": np.quantile(delta, [.025, .975]).tolist(),
                         "defined_repetitions": len(delta), "lower_is_better": metric in ERROR_METRICS}
                     if metric in observed_left and metric in observed_right:
-                        contrasts[left + "_minus_" + right][metric]["observed_delta"] = observed_left[metric] - observed_right[metric]
+                        contrast_results[left + "_minus_" + right][metric]["observed_delta"] = observed_left[metric] - observed_right[metric]
         result[name] = {"independent_connected_groups": len(independent), "repetitions": repetitions,
-                        "contrasts": contrasts,
+                        "contrasts": contrast_results,
                         "limitation": "组数较少时置信区间不稳定；同一连通组内窗口不作为独立样本。"}
     return result
 
@@ -242,6 +245,57 @@ def _load_targets(path):
         result["current_contact"] = np.asarray(arrays["current_contact"], dtype=np.float32)
         result["current_contact_valid"] = np.asarray(arrays["current_contact_valid"], dtype=bool)
     return result
+
+
+def restore_frozen_readout(job, name, entries, targets, device, target_mean, target_std, target_count):
+    """Reconstruct paired per-window predictions without fitting old heads."""
+    artifact = torch.load(job / f"{name}-linear-probe.pt", map_location="cpu", weights_only=True)
+    if artifact.get("model") != name:
+        raise ValueError("Inherited linear readout model identity differs")
+    for key, expected in (("target_mean", target_mean), ("target_std", target_std), ("target_count", target_count)):
+        actual = artifact[key].to(device=expected.device)
+        if actual.shape != expected.shape:
+            raise ValueError(f"Inherited linear readout target statistics differ: {key}")
+        equal = torch.equal(actual, expected) if key == "target_count" else torch.allclose(actual, expected, atol=1e-7, rtol=1e-6)
+        if not equal:
+            raise ValueError(f"Inherited linear readout target statistics differ: {key}")
+    array = np.load(job / f"{name}.npy", mmap_mode="r", allow_pickle=False)
+    if array.shape != (len(entries), 768) or array.dtype != np.float32:
+        raise ValueError("Inherited linear readout features differ from selection")
+    mean, std, weights = (artifact[key].to(device) for key in ("feature_mean", "feature_std", "weights"))
+    if (mean.shape != (768,) or std.shape != (768,) or weights.shape != (769, 70)
+            or not bool(torch.isfinite(mean).all() & torch.isfinite(std).all() & torch.isfinite(weights).all())
+            or not bool((std > 0).all())):
+        raise ValueError("Inherited linear readout parameters are invalid")
+    features = torch.as_tensor(np.array(array), device=device)
+    if not bool(torch.isfinite(features).all()):
+        raise ValueError("Inherited linear readout features contain non-finite values")
+    prediction = (_predict((features - mean) / std, weights) * artifact["target_std"].to(device)
+                  + artifact["target_mean"].to(device)).cpu().numpy()
+    decoded = decode_targets(prediction)
+    report, rows = _reports(decoded, targets, entries)
+    return decoded, report, rows
+
+
+def _check_replayed_metrics(actual, expected):
+    """Allow GPU reduction rounding; publish the original baseline unchanged."""
+    largest = 0.
+    if actual.keys() != expected.keys():
+        raise ValueError("Replayed baseline metric membership differs")
+    for key, old in expected.items():
+        new = actual[key]
+        if isinstance(old, dict):
+            largest = max(largest, _check_replayed_metrics(new, old))
+        elif isinstance(old, int):
+            if type(new) is not int or new != old:
+                raise ValueError(f"Replayed baseline observation count differs: {key}={new} vs {old}")
+        elif isinstance(old, float):
+            if not np.isclose(new, old, rtol=2e-6, atol=2e-5):
+                raise ValueError(f"Replayed baseline metric differs: {key}={new} vs {old}")
+            largest = max(largest, abs(new - old))
+        elif new != old:
+            raise ValueError(f"Replayed baseline metadata differs: {key}")
+    return largest
 
 
 def noise_stability_statistics(noise_features, feature_mean, feature_std, weights,
@@ -349,7 +403,7 @@ def _write_report(path, results):
 
 
 def fit_job(job_dir, device="cuda:0"):
-    """Fit all three frozen feature readouts; save external artifacts/reports."""
+    """Fit frozen readouts, or only the newly extracted incremental readout."""
     job = Path(job_dir).resolve()
     started = time.monotonic()
     torch.set_num_threads(2)
@@ -370,8 +424,20 @@ def fit_job(job_dir, device="cuda:0"):
     train = split == "train"
     targets = _load_targets(job / "targets.npz")
     plan_path = job / "plan.json"
-    noise_rows = json.loads(plan_path.read_text()).get("noise_rows", []) if plan_path.exists() else []
-    if any((job / f"noise-{name}.npy").exists() for name in ("epoch20", "epoch100")) and not noise_rows:
+    plan = json.loads(plan_path.read_text()) if plan_path.exists() else {}
+    reuse = plan.get("reuse_job")
+    baseline = None
+    models_to_fit = plan.get("fit_models", ["epoch20", "epoch100", "dino"])
+    if reuse:
+        from .probe_prior import assert_reuse_current
+        assert_reuse_current(plan)
+        if models_to_fit != ["epoch160"] or plan.get("extract_epochs") != [160]:
+            raise ValueError("Incremental fitting may update only the new epoch160 readout")
+        baseline = json.loads((Path(reuse["job_dir"]) / "metrics.json").read_text())
+    elif models_to_fit != ["epoch20", "epoch100", "dino"]:
+        raise ValueError("Original frozen probe must fit its complete baseline set")
+    noise_rows = plan.get("noise_rows", [])
+    if any((job / f"noise-{name}.npy").exists() for name in models_to_fit if name != "dino") and not noise_rows:
         raise ValueError("Noise arrays require plan.json noise_rows provenance")
     values, masks = encode_targets(targets)
     if len(values) != len(entries):
@@ -408,7 +474,24 @@ def fit_job(job_dir, device="cuda:0"):
     output["internal_split"] = {"fitting_rows": np.flatnonzero(fitting).tolist(),
                                 "holdout_rows": np.flatnonzero(holdout).tolist()}
     rows_by_model, decoded_by_model = {}, {}
-    for name in ("epoch20", "epoch100", "dino"):
+    if baseline is not None:
+        if baseline["population"] != output["population"] or baseline["internal_split"] != output["internal_split"]:
+            raise ValueError("Inherited readouts use a different population/internal group holdout")
+        if (baseline["protocol"]["ridge_alphas"] != list(ALPHAS)
+                or baseline["protocol"]["objective"] != output["protocol"]["objective"]
+                or baseline["protocol"]["alpha_selection"] != output["protocol"]["alpha_selection"]):
+            raise ValueError("Inherited ridge selection/training protocol differs")
+        output["reused_baseline"] = {"job_dir": reuse["job_dir"], "readouts_refitted": False,
+                                    "dino_pca_refitted": False, "metric_replay_max_abs_error": {}}
+        for key in ("models", "hyperparameters", "noise_stability"):
+            output[key].update(baseline[key])
+        if "pca" in baseline:
+            output["pca"] = baseline["pca"]
+        for name in ("epoch20", "epoch100"):
+            decoded, report, rows = restore_frozen_readout(job, name, entries, targets, device, y_mean, y_std, full_count)
+            output["reused_baseline"]["metric_replay_max_abs_error"][name] = _check_replayed_metrics(report, baseline["models"][name])
+            decoded_by_model[name], rows_by_model[name] = decoded, rows
+    for name in models_to_fit:
         print(f"[prior-probe] fitting {name}", flush=True)
         array = np.load(job / (name + ".npy"), mmap_mode="r")
         expected = 30720 if name == "dino" else 768
@@ -471,17 +554,34 @@ def fit_job(job_dir, device="cuda:0"):
                 np.load(noise_path, mmap_mode="r"), mean.cpu().numpy(), std.cpu().numpy(), weights.cpu().numpy(),
                 y_mean.cpu().numpy(), y_std.cpu().numpy(), targets, entries, noise_rows)
         del features, standardized, candidates, weights
-    baseline = {"continuous": np.zeros_like(targets["continuous"]),
-                "contact": np.tile(targets["current_contact"], (1, 5)),
-                "transition": np.zeros_like(targets["transition"])}
+    persistence = {"continuous": np.zeros_like(targets["continuous"]),
+                   "contact": np.tile(targets["current_contact"], (1, 5)),
+                   "transition": np.zeros_like(targets["transition"])}
     baseline_targets = dict(targets)
     baseline_targets["contact_valid"] = targets["contact_valid"] & np.tile(targets["current_contact_valid"], (1, 5))
     baseline_targets["transition_valid"] = targets["transition_valid"] & np.tile(targets["current_contact_valid"], (1, 5))
-    output["models"]["zero_motion_persistent_contact"], _ = _reports(baseline, baseline_targets, entries)
+    persistence_report, _ = _reports(persistence, baseline_targets, entries)
+    if baseline is not None:
+        _check_replayed_metrics(persistence_report, baseline["models"]["zero_motion_persistent_contact"])
+        persistence_report = baseline["models"]["zero_motion_persistent_contact"]
+    output["models"]["zero_motion_persistent_contact"] = persistence_report
     output["persistent_contact_common_mask_comparison"] = {
         name: _reports(prediction, baseline_targets, entries)[0]
         for name, prediction in decoded_by_model.items()}
-    output["paired_group_bootstrap"] = _bootstrap(rows_by_model, entries, groups)
+    if baseline is not None:
+        output["persistent_contact_common_mask_comparison"].update(baseline["persistent_contact_common_mask_comparison"])
+        output["paired_group_bootstrap"] = baseline["paired_group_bootstrap"]
+        added = _bootstrap(rows_by_model, entries, groups,
+                           contrasts=(("epoch160", "epoch20"), ("epoch160", "epoch100")))
+        for source_name, result in added.items():
+            previous = output["paired_group_bootstrap"].setdefault(source_name, result)
+            if (previous["independent_connected_groups"] != result["independent_connected_groups"]
+                    or previous["repetitions"] != result["repetitions"]):
+                raise ValueError("Incremental group bootstrap population differs")
+            previous["contrasts"].update(result["contrasts"])
+        assert_reuse_current(plan)
+    else:
+        output["paired_group_bootstrap"] = _bootstrap(rows_by_model, entries, groups)
     output["runtime"] = {"elapsed_seconds": time.monotonic() - started,
                          "peak_gpu_allocated_bytes": torch.cuda.max_memory_allocated(torch.device(device)) if torch.device(device).type == "cuda" else None,
                          "source_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()

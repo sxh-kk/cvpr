@@ -8,7 +8,7 @@ import math
 import random
 import time
 from io import BytesIO
-from typing import (TYPE_CHECKING, Annotated, Any, Dict, List, Optional, Tuple,
+from typing import (TYPE_CHECKING, Annotated, Any, Dict, List, Literal, Optional, Tuple,
                     Union)
 from typing_extensions import Self, Annotated
 
@@ -1050,9 +1050,10 @@ class MixedRepackTransform(RepackTransform):
     
 
 class Psi0ModelTransform(ModelTransform):
-    # Set from LerobotDataConfig when native DINO history is enabled. Geometry
-    # then belongs to that shared processor, before branching to either encoder.
+    # Set from LerobotDataConfig when native DINO history is enabled. Both
+    # branches share geometry; the explicit color policy permits VLM-only jitter.
     shared_image_profile: str | None = None
+    motion_image_policy: Literal["shared_rgb", "vlm_color_clean_motion"] = "shared_rgb"
     resize: ResizeImage = Field(default_factory=lambda: ResizeImage(size=(224)))
     center_crop: CenterCrop = Field(default_factory=lambda: CenterCrop(size=224))
     color_jitter: ColorJitter = Field(default_factory=lambda: ColorJitter())
@@ -1080,7 +1081,30 @@ class Psi0ModelTransform(ModelTransform):
             ...
             data["observations"]: List of PIL Images
         """
-        if "motion_img_embs" in data:
+        policy = getattr(self, "motion_image_policy", "shared_rgb")
+        if policy == "vlm_color_clean_motion":
+            if "motion_img_embs" not in data:
+                raise ValueError("vlm_color_clean_motion requires motion_img_embs from the clean DINO history")
+            if self.view_aug or self.adaptive_resize:
+                raise ValueError("vlm_color_clean_motion permits only VLM color augmentation; disable view_aug/adaptive_resize")
+            if self.shared_image_profile is None:
+                raise ValueError("vlm_color_clean_motion requires an explicit shared_image_profile")
+            images = data["observations"]
+            if len(images) != 1:
+                raise ValueError("vlm_color_clean_motion requires exactly one raw current RGB image")
+            from ImageProcess import SharedImageProcessor
+
+            # The reader restores raw decoded bytes without applying geometry.
+            # Preserve Psi0's order: resize -> color jitter -> Qwen grid resize.
+            # DataLoader seeds torch per worker; deriving the local ImageProcess
+            # seed here preserves training replay and consumes no RNG in eval.
+            do_color_aug = self.img_aug and not no_aug
+            seed = int(torch.randint(0, 2**32, (), device="cpu").item()) if do_color_aug else None
+            window = SharedImageProcessor(self.shared_image_profile).process_window(
+                images, stage="posttrain", training=do_color_aug, seed=seed,
+            )
+            images = [Image.fromarray(image) for image in window.images]
+        elif "motion_img_embs" in data:
             if not no_aug and (self.img_aug or self.view_aug):
                 raise ValueError("motion_img_embs requires RGB geometry and augmentation shared upstream "
                                  "across the entire history window; disable Psi0ModelTransform img_aug/view_aug")

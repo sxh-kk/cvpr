@@ -1,8 +1,10 @@
 # Shared image processing
 
-MotionExpert/DINO and Ψ₀ receive the same RGB image before each encoder performs
-its own rescaling and normalization. This package owns image geometry and
-window-synchronized augmentation. It does not change motion coordinates, perform
+This package owns common image geometry and window-synchronized augmentation.
+In the general `shared_rgb` mode, MotionExpert/DINO and Ψ₀ receive the same
+processed current RGB before each encoder performs its own normalization.
+The current UnifoLM recipe explicitly uses a separate VLM color policy described
+below. This package does not change motion coordinates, perform
 camera undistortion, normalize image channels, load model weights, or start jobs.
 Input camera geometry must already follow the source dataset's established policy.
 
@@ -77,25 +79,62 @@ replay record. Reusing the returned RGB images is preferred to processing twice.
 Cropping operates at the intermediate 270×480 or 240×320 resolution; final Qwen
 grid alignment happens afterwards. These operations perturb image appearance and
 viewport, not physical camera pose or 3D labels. There is no mirroring or camera
-rotation in this implementation. The sampled crop and color factors are identical
-for both encoders, even though their patch layouts and normalization differ.
+rotation in this implementation. In `shared_rgb` mode, the sampled crop and color
+factors are identical for both encoders, even though their patch layouts and
+normalization differ. Sample again for each training window; a single fixed draw
+for an entire episode is not required.
 
-Randomly augmented training requires online DINO encoding of the augmented images.
-Unaugmented precomputed DINO embeddings cannot substitute for those features.
+Augmenting the shared Motion window requires online DINO encoding of those
+augmented images. Unaugmented precomputed DINO embeddings cannot substitute for
+such features. This requirement does not apply to VLM-only color augmentation.
 Historical image caches must include profile/augmentation identity if reused.
+
+## UnifoLM: VLM color, clean Motion history
+
+The current UnifoLM recipe explicitly sets
+`Psi0ModelTransform.motion_image_policy="vlm_color_clean_motion"` and `img_aug=True`.
+MotionExpert reads all six historical inputs from the existing deterministic
+`256x320` DINO cache. The VLM current frame has the same source, timestamp and
+geometry profile, but receives its own Ψ₀ color augmentation during training.
+`shared_rgb` remains the compatible default for other callers.
+
+The LeRobot wrapper restores the raw current RGB as uint8 without resizing it.
+The model transform then uses this package once:
+
+```python
+processor = SharedImageProcessor("256x320")
+vlm_current_rgb = processor.process_window(
+    [raw_current_rgb], stage="posttrain", training=img_aug and not no_aug
+).images[0]
+```
+
+The order is NEAREST resize to240×320, sampled color operations, then BICUBIC
+alignment to256×320. Applying color after a separate final resize would change
+this order. Do not preprocess the raw input with `process_image` first.
+No random crop or Robust augmentation is enabled by this policy. Each training
+sample gets a fresh color draw; validation, `no_aug`, and inference use clean
+deterministic geometry. Motion history remains clean in all cases.
+
+This branch policy reuses the existing cache bytes and metadata without
+re-extraction. DINO stays frozen; MotionExpert may still be trained from those
+features. It deliberately differs from sharing one augmented RGB across both
+encoders and does not add augmentation to cached DINO features.
 
 ## MotionExpert and current-frame alignment
 
 MotionExpert reads six real timestamps at 5Hz: previous five frames plus the
-current frame, spanning one second. The last image, `window.images[-1]`, is the
-same current image supplied to the Ψ₀ backbone. Both branches use that processed
-RGB directly, with separate encoder normalization. The motion model predicts
+current frame, spanning one second. The last timestamp always matches the Ψ₀
+current frame. In `shared_rgb` mode, `window.images[-1]` is also the exact processed
+RGB supplied to Ψ₀, with separate encoder normalization. Under the UnifoLM branch
+policy, only the VLM copy receives training color augmentation. The motion model predicts
 the next five frames and exposes one-call hidden tokens for later joint training.
 
 Offline DINO features preserve every native30Hz frame; MotionExpert selects
-indices 0, 6, 12, … when reading. This offline cache uses deterministic
-`256x480` pretraining geometry. Post-training and Robust augmentation use online
-encoding of the shared six-frame window. The same frozen DINO weights support
+six 5Hz timestamps relative to the current frame when reading. The pretraining
+cache uses deterministic `256x480` geometry, while the UnifoLM post-training cache
+uses deterministic `256x320` geometry. Shared Motion-window post-training or Robust
+augmentation uses online encoding; the VLM-only UnifoLM color policy keeps its
+clean cache. The same frozen DINO weights support
 both image sizes and always return CLS plus four register tokens, `[5,1024]`.
 
 For robot startup, the recommended protocol is to collect one second of actual

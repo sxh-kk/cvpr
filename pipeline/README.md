@@ -67,6 +67,11 @@ MixEgoMotion/
 | Robust | 270×480 | 256×480 | 窗口共享颜色及随机裁切 |
 | 验证／真机推理 | 按对应profile | 按对应profile | 确定性处理 |
 
+表中后训练和Robust的窗口共享增强指通用在线 `shared_rgb` 模式。当前UnifoLM配方例外：
+`vlm_color_clean_motion` 只增强VLM当前帧颜色，Motion历史六帧复用clean 256×320 DINO缓存；
+两路保持同源、同时间、同几何profile，不启用随机裁切，现有缓存无需重提取。
+详见 [ImageProcess的分支增强说明](../ImageProcess/README.md#unifolm-vlm-color-clean-motion-history)。
+
 DINO为冻结的 `dinov2-with-registers-large`。共享RGB处理后关闭HF的二次resize/crop，
 只执行DINO自身归一化，输出 `[5,1024] float32`，顺序CLS、register0..3。
 原始MCAP／MP4保持来源相机既有几何约定；共享模块不新增去畸变。

@@ -638,6 +638,21 @@
   "local_extensions": [
     {
       "date": "2026-10-18",
+      "change": "UnifoLM后训练显式启用vlm_color_clean_motion：VLM当前帧调用ImageProcess做Psi0随机颜色增强，Motion历史6帧保留确定性DINO缓存；同步视觉协议例外",
+      "paths": [
+        "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh",
+        "VLMExpert/src/psi/config/data_lerobot.py",
+        "VLMExpert/src/psi/config/transform.py",
+        "VLMExpert/src/psi/data/lerobot/lerobot_ext.py",
+        "VLMExpert/src/psi/data/lerobot/motion_history.py",
+        "VLMExpert/tests/test_dual_source_data.py",
+        "VLMExpert/tests/test_unifolm_dino_history.py"
+      ],
+      "validation": "docs/unifolm_vlm_color_validation.json",
+      "note": "原始当前RGB在模型transform中按resize→颜色→grid顺序只处理一次；验证/no_aug不增强。旧shared_rgb默认保留，缓存extractor/profile/metadata不变，不重做缓存或启动训练。"
+    },
+    {
+      "date": "2026-10-18",
       "change": "接通UnifoLM官方SONIC数据准备、原生30Hz DINO提取及LeRobot历史6帧mmap读取；DINO缓存与Psi0共用shared_image_profile并匹配锁定图像依赖，保留原动作/state查询",
       "paths": [
         "VLMExpert/scripts/data/prepare_unifolm.py",

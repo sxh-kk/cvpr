@@ -1,7 +1,7 @@
 """CPU checks of actual data-path methods, without Qwen/Pydantic construction.
 
-Image operations and tokenization are doubles. The tests validate transport of
-provider-supplied history, not its DINO identity or shared-RGB alignment.
+Tokenization and legacy image operations are doubles. The explicit VLM-color
+policy executes the real ImageProcess implementation.
 """
 
 from __future__ import annotations
@@ -73,6 +73,7 @@ def _transform_chain(actual):
     repack.pad_state_dim = repack.pad_action_dim = None
     repack.dataset_name = "egodex"
     model = actual.Psi0ModelTransform()
+    model.motion_image_policy = "shared_rgb"
     model.img_aug = model.view_aug = model.adaptive_resize = False
     model.resize = model.center_crop = _ImageOperation()
 
@@ -138,6 +139,101 @@ def _processed_model_input():
     return dict(observations=[Image.new("RGB", (320, 256))], instruction="pick",
                 states=np.zeros((1, 7), dtype=np.float32), actions=np.ones((2, 7), dtype=np.float32),
                 raw_actions=np.ones((2, 7), dtype=np.float32), motion_img_embs=torch.ones(6, 5, 1024))
+
+
+def _color_history_model(actual):
+    model = _transform_chain(actual).model
+    model.motion_image_policy = "vlm_color_clean_motion"
+    model.shared_image_profile = "256x320"
+    model.img_aug = True
+    return model
+
+
+def test_vlm_color_uses_raw_rgb_once_and_replays_the_real_shared_processor(actual_data_methods, monkeypatch):
+    from ImageProcess import SharedImageProcessor
+
+    model = _color_history_model(actual_data_methods)
+    raw = np.random.default_rng(17).integers(0, 256, (73, 101, 3), dtype=np.uint8)
+    data = {**_processed_model_input(), "observations": [Image.fromarray(raw)]}
+    before_history = data["motion_img_embs"].clone()
+    original_process = SharedImageProcessor.process_window
+    calls = []
+
+    def record_process(processor, images, **kwargs):
+        assert len(images) == 1
+        np.testing.assert_array_equal(np.asarray(images[0]), raw)
+        calls.append(kwargs)
+        return original_process(processor, images, **kwargs)
+
+    def forbidden_separate_image_op():
+        raise AssertionError("VLM color must use the shared processor once on raw RGB")
+
+    monkeypatch.setattr(SharedImageProcessor, "process_window", record_process)
+    model.resize = model.center_crop = model.color_jitter = forbidden_separate_image_op
+    results = []
+    for worker_seed in (42, 42, 43):
+        torch.manual_seed(worker_seed)
+        result = model(data)
+        actual = np.asarray(result["observations"][0])
+        expected = original_process(SharedImageProcessor("256x320"), [raw], **calls[-1]).images[0]
+        np.testing.assert_array_equal(actual, expected)
+        assert result["observations"][0].size == (320, 256)
+        for key in ("motion_img_embs", "actions", "states", "raw_actions", "instruction"):
+            assert result[key] is data[key]
+        results.append(actual)
+
+    assert len(calls) == 3
+    assert all(call["stage"] == "posttrain" and call["training"] for call in calls)
+    assert calls[0]["seed"] == calls[1]["seed"] != calls[2]["seed"]
+    np.testing.assert_array_equal(results[0], results[1])
+    assert not np.array_equal(results[0], results[2])
+    torch.testing.assert_close(data["motion_img_embs"], before_history, rtol=0, atol=0)
+    np.testing.assert_array_equal(np.asarray(data["observations"][0]), raw)
+
+
+@pytest.mark.parametrize(("img_aug", "no_aug"), [(True, True), (False, False)])
+def test_vlm_color_evaluation_matches_clean_cache_geometry_without_consuming_rng(
+    actual_data_methods, img_aug, no_aug,
+):
+    from ImageProcess import SharedImageProcessor
+
+    model = _color_history_model(actual_data_methods)
+    model.img_aug = img_aug
+    raw = np.random.default_rng(5).integers(0, 256, (73, 101, 3), dtype=np.uint8)
+    data = {**_processed_model_input(), "observations": [Image.fromarray(raw)]}
+    torch.manual_seed(123)
+    rng_before = torch.random.get_rng_state().clone()
+
+    result = model(data, no_aug=no_aug)
+
+    assert torch.equal(torch.random.get_rng_state(), rng_before)
+    np.testing.assert_array_equal(np.asarray(result["observations"][0]),
+                                  SharedImageProcessor("256x320").process_image(raw))
+    assert result["motion_img_embs"] is data["motion_img_embs"]
+
+
+@pytest.mark.parametrize("invalid", ["missing_history", "missing_profile", "view_aug", "adaptive_resize", "two_images"])
+def test_vlm_color_rejects_incompatible_input_before_advancing_worker_rng(actual_data_methods, invalid):
+    model = _color_history_model(actual_data_methods)
+    data = _processed_model_input()
+    if invalid == "missing_history":
+        del data["motion_img_embs"]
+        message = "requires motion_img_embs"
+    elif invalid == "missing_profile":
+        model.shared_image_profile = None
+        message = "shared_image_profile"
+    elif invalid == "two_images":
+        data["observations"] *= 2
+        message = "exactly one"
+    else:
+        setattr(model, invalid, True)
+        message = "view_aug/adaptive_resize"
+    rng_before = torch.random.get_rng_state().clone()
+
+    with pytest.raises(ValueError, match=message):
+        model(data)
+
+    assert torch.equal(torch.random.get_rng_state(), rng_before)
 
 
 def test_history_path_keeps_processed_current_rgb_without_applying_image_ops(actual_data_methods):

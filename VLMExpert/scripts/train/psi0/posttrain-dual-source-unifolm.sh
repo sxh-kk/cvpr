@@ -3,6 +3,7 @@
 # Required: EGO_DEX_VLM_PATH, MOTION_EXPERT_CHECKPOINT, UNIFOLM_DINO_ROOT,
 #           UNIFOLM_DINO_TRAIN_ID, UNIFOLM_DINO_VAL_ID, UNIFOLM_DINO_CACHE.
 # Cache packs are native30Hz offline DINO, using the same canonical256x320 profile.
+# Only the VLM current frame receives Psi0 color augmentation; Motion keeps clean history.
 # Review without starting workers: bash "$0" --dry-run [experiment]
 set -euo pipefail
 
@@ -84,7 +85,8 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
     --data.transform.field.stat-action-keys action.body_token_v1_1 'action[:14]'
     --data.transform.field.action_norm_type=bounds --data.transform.field.normalize-state
     --data.transform.field.pad-action-dim=80 --data.transform.field.pad-state-dim=45
-    --data.transform.model.no-img-aug --data.transform.model.no-view-aug
+    --data.transform.model.motion-image-policy=vlm_color_clean_motion
+    --data.transform.model.img-aug --data.transform.model.no-view-aug
     --model.action-architecture=dual_source_v1
     "--model.model_name_or_path=$EGO_DEX_VLM_PATH"
     "--model.motion-checkpoint=$MOTION_EXPERT_CHECKPOINT"

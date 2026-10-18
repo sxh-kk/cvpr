@@ -1,6 +1,6 @@
 # MotionExpert
 
-在5Hz上读取历史5帧＋当前帧图像，联合重建历史运动并预测未来5帧。当前图像与Ψ₀当前图像相同。
+在5Hz上读取历史5帧＋当前帧图像，联合重建历史运动并预测未来5帧。当前帧与Ψ₀当前帧同源、同时间。
 后训练在完整高斯噪声 `t=1` 上执行一次网络调用，得到完整11个motion hidden供下游输入，同时提供mean pooling摘要；
 该接口保留反传能力，下游模型不在本模块内。**没有可学习GLOBAL token。**
 
@@ -17,8 +17,11 @@
 | 后训练 | 256×320 | 窗口共享颜色增强 |
 | Robust | 256×480 | 窗口共享颜色＋随机裁切 |
 
-共享处理见 [ImageProcess](../ImageProcess/README.md)。两路复用同一处理后的当前RGB，各自归一化。
-后训练和Robust使用在线、冻结DINO编码；固定离线特征只用于确定性预训练。
+表中后训练和Robust的窗口共享增强指通用在线 `shared_rgb` 模式：两路复用同一处理后的当前RGB，
+各自归一化，并在线编码冻结DINO。共享处理见 [ImageProcess](../ImageProcess/README.md)。
+当前UnifoLM配方显式使用 `vlm_color_clean_motion`：只增强VLM当前帧颜色，Motion历史六帧复用
+clean 256×320 DINO缓存；两路保持同源、同时间、同几何profile，不启用随机裁切。
+具体策略见 [VLMExpert](../VLMExpert/README.md#本仓库扩展双来源-action-expert)。
 真机先攒满约1秒历史再启用运动先验；接口要求6个真实时刻，不复制首帧补历史。
 
 训练保留历史轨迹模态dropout：每样本概率0.5开放前6帧有效18维相机轨迹。

@@ -68,8 +68,11 @@ class LerobotDataConfig(DataConfig):
         repack = self.transform.repack
         if not isinstance(model, Psi0ModelTransform):
             raise ValueError("dino_cache_root is supported only by Psi0ModelTransform")
-        if model.img_aug or model.view_aug or model.adaptive_resize:
-            raise ValueError("Cached DINO requires one shared image profile; disable independent img_aug/view_aug/adaptive_resize")
+        policy = model.motion_image_policy
+        if model.view_aug or model.adaptive_resize:
+            raise ValueError("Cached DINO requires one shared geometry profile; disable view_aug/adaptive_resize")
+        if model.img_aug and policy != "vlm_color_clean_motion":
+            raise ValueError("Cached DINO with img_aug requires motion_image_policy=vlm_color_clean_motion")
         if getattr(repack, "num_past_frames", 0) != 0:
             raise ValueError("Cached DINO supplies history separately; VLM image must be the single current frame")
         if len(getattr(repack, "image_keys", [])) != 1:
@@ -77,11 +80,24 @@ class LerobotDataConfig(DataConfig):
         if type(self.dino_max_open_episodes) is not int or self.dino_max_open_episodes < 1:
             raise ValueError("dino_max_open_episodes must be a positive integer")
         profile = SharedImageProcessor(self.shared_image_profile).profile
+        if policy == "vlm_color_clean_motion" and model.img_aug:
+            # ImageProcess owns augmentation. Reject stale CLI/checkpoint jitter
+            # overrides instead of silently ignoring the legacy color fields.
+            color = profile.to_dict()["augmentation"]["posttrain"]
+            for name in ("brightness", "contrast", "saturation", "hue"):
+                value = getattr(model.color_jitter, name)
+                if isinstance(value, (int, float)):
+                    bounds = (-value, value) if name == "hue" else (max(0.0, 1.0 - value), 1.0 + value)
+                else:
+                    bounds = value
+                if len(bounds) != 2 or not all(abs(a - b) <= 1e-12 for a, b in zip(bounds, color[name])):
+                    raise ValueError(f"VLM color_jitter.{name} must match the shared ImageProcess profile")
         if model.shared_image_profile not in (None, self.shared_image_profile):
             raise ValueError("Psi0 model and DINO data must use the same shared_image_profile")
         model.shared_image_profile = self.shared_image_profile
-        # Serialized model config describes the shared output rather than stale224.
-        # Actual geometry runs once in the reader, and model transform bypasses it.
+        # Serialize the shared final geometry rather than stale224. The reader
+        # handles shared_rgb; the VLM-only policy defers it to ImageProcess in
+        # the model transform, preserving color-before-grid ordering.
         model.resize.size = tuple(profile.output_hw)
         model.center_crop.size = tuple(profile.output_hw)
         return self

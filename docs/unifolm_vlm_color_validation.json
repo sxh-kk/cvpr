@@ -1,0 +1,115 @@
+{
+  "date_utc": "2026-10-18T15:47:30.282055+00:00",
+  "baseline_commit": "1c9396a21a370163908dbbc739e78114f9d51133",
+  "scope": "UnifoLM后训练VLM当前帧单独使用ImageProcess颜色增强，Motion历史6帧保持clean并复用现有DINO缓存；未启动训练",
+  "policy": {
+    "motion_image_policy": "vlm_color_clean_motion",
+    "img_aug": true,
+    "view_aug": false,
+    "adaptive_resize": false,
+    "profile": "256x320",
+    "order": [
+      "raw RGB restore",
+      "NEAREST resize 240x320",
+      "VLM-only Psi0 color jitter",
+      "BICUBIC grid resize 256x320"
+    ],
+    "seed": "torch CPU worker RNG -> ImageProcess local seed; eval/no_aug consumes no torch RNG",
+    "motion_history": "six deterministic cached DINO frames; no random augmentation",
+    "evaluation": "no_aug disables colors; canonical geometry remains"
+  },
+  "source_sha256": {
+    "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh": "3e2bff15db5832ca8e8cae423e0c62ea7758892489c29e7205bdde126a42a108",
+    "VLMExpert/src/psi/config/data_lerobot.py": "4df3b5a1778f0dbbf99328fafa21cdafe238b28015a4e89a1c02d0c39131f8f9",
+    "VLMExpert/src/psi/config/transform.py": "87f67517f45bcbe00ad09746d5e79edf59a8404568008c8af1fc1a2fc3c96150",
+    "VLMExpert/src/psi/data/lerobot/lerobot_ext.py": "5c6a373785daa72bb5af3fd2ec85a6ebdb8f17e5fccd35cdaddbd835008f1829",
+    "VLMExpert/src/psi/data/lerobot/motion_history.py": "6095bcea055013681a6c536e478a1366f867155a0bf837b9c9edc4163b112e85",
+    "VLMExpert/tests/test_dual_source_data.py": "21408e6bab1d67393b7da78829e6b1cb3f7db76d65f8d3ef4e93d9b7da3e380c",
+    "VLMExpert/tests/test_unifolm_dino_history.py": "ce13beb7b49843f1ab5bd7a4dd752349b8d17191699fe84dc0833cb03e5959b5",
+    "ImageProcess/processor.py": "6f1b78b3c2a2d987eec827693d0f2785fe39cf98cb079bc790828e1fe486d3be",
+    "ImageProcess/configs/256x320.json": "6a1ad3564754d641d4febb1a30d261248fbbad534dd5652380cd1923948cbeb3",
+    "VLMExpert/scripts/data/extract_unifolm_dino.py": "91ecd24a7e1b7ef7e05daab860b600b89c5f4335efca7e5b912d9b61fcc0118a",
+    "VLMExpert/src/psi/data/lerobot/dino_cache.py": "4acbcf11c403717bfb66659f83eca2e868799ff10e80519cb8e48a7a306404f4"
+  },
+  "cache_extraction_protocol_unchanged": [
+    "ImageProcess/processor.py",
+    "ImageProcess/configs/256x320.json",
+    "VLMExpert/scripts/data/extract_unifolm_dino.py",
+    "VLMExpert/src/psi/data/lerobot/dino_cache.py"
+  ],
+  "cpu": {
+    "passed": 82,
+    "skipped": 1,
+    "subtests_passed": 2,
+    "duration_seconds": 3.15,
+    "gpu_count": 0,
+    "working_directory": "VLMExpert",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/gaozt-test1/datasets/UnifoLM/.pipeline/imageprocess-psi0-deps:src:..:. /gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/dino-torch260-cu118/bin/python -m pytest -p no:cacheprovider -q tests/test_dual_source_data.py tests/test_unifolm_dino_history.py tests/test_extract_unifolm_dino.py ../ImageProcess/tests/test_processor.py",
+    "skip_reason": "torchvision未安装，ImageProcess对torchvision的可选像素参考比对跳过",
+    "numpy": "1.26.4",
+    "pillow": "11.3.0",
+    "av": "16.0.1",
+    "torch": "2.6.0+cu118",
+    "coverage": [
+      "真实ImageProcess颜色参数、处理顺序、同worker种子复现与异种子变化",
+      "no_aug/关闭img_aug时确定性几何与torch RNG不变",
+      "原始RGB取整恢复、延后几何、全6帧DINO及缓存文件字节不变",
+      "实际wrapper/model/config方法与repack/field/collator数据传递、原action/state/index/episode范围保持",
+      "旧shared_rgb默认及无缓存路径回归、拒绝独立裁切/自适应几何、颜色配置不一致明确报错"
+    ]
+  },
+  "real_data_cpu": {
+    "passed": true,
+    "scope": "真实MP4/Parquet/只读DINO缓存，生产RGB恢复/Sonic repack/DataTransform/model-transform；field和tokenizer为替身",
+    "source": "/gaozt-test1/datasets/UnifoLM/unifolm_sonic_lerobot_val",
+    "cache": "/gaozt-test1/datasets/UnifoLM/dino/256x320/unifolm_sonic_lerobot_val",
+    "episode": 0,
+    "native_current_rows": [
+      30,
+      31,
+      32,
+      33
+    ],
+    "samples": 4,
+    "history_frames": 6,
+    "gpu_count": 0,
+    "real_vlm": false,
+    "real_dino_recomputed": false,
+    "clean_cache_unchanged": true,
+    "cache_files_sha256": {
+      "manifest.json": "86c68f31392fb8260d08372e71d624d9ce80de32c4d39aee425453e5b51e8161",
+      "episodes/00000000/receipt.json": "2f39a92f36e61b3fc860459f308a2a390cd47396f72da4af67236ec78003bb34",
+      "episodes/00000000/frames.npz": "2acbde13919cb41d685d34300c6e34bbd5ed5471b9aa371f10775aabf4e617d9",
+      "episodes/00000000/features.npy": "915524b31e971c3d624640b50dcba768edeb7dd61122fc23b061a7a84ec99721"
+    },
+    "source_and_cache_current_timestamps_match": true,
+    "colors_replay_with_torch_seed": true,
+    "distinct_seeds_change_colors": true,
+    "no_aug_rng_unchanged": true,
+    "no_aug_matches_canonical_geometry": true,
+    "actions_states_unchanged": true,
+    "changed_pixel_channel_fractions": [
+      0.9668619791666667,
+      0.96976318359375,
+      0.970263671875,
+      0.9712605794270833
+    ],
+    "numpy": "1.26.4",
+    "pillow": "11.3.0",
+    "av": "16.0.1",
+    "torch": "2.6.0+cu118",
+    "training_started": false
+  },
+  "checks": {
+    "python_ast": true,
+    "bash_n": true,
+    "recipe_dry_run": true,
+    "recipe_enables_vlm_colors_and_clean_motion_policy": true
+  },
+  "limitations": [
+    "实际方法由AST加载，完整LeRobot/Pydantic/Qwen训练运行环境未执行；真实样本验证的field/tokenizer为替身",
+    "本次未运行GPU或重新编码DINO，没有改网络、损失或分布式逻辑",
+    "尚无增强策略的训练效果/吞吐对照结论；未启动正式训练",
+    "部署端历史DINO缓冲仍属已有待接入范围，本次只修改后训练数据处理"
+  ]
+}

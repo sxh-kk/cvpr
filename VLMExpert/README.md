@@ -50,13 +50,23 @@ output = model(
 ```
 
 `motion_img_embs` 必须是六个真实5Hz历史时刻的 DINO CLS＋4 register 特征，最后时刻对应 VLM 当前帧。
-两路复用同一份处理后的当前 RGB，历史窗口共享增强；DINO 权重身份、归一化和视觉尺寸必须遵守
+两路当前帧必须同源、同时间，并遵循同一几何 profile；DINO 权重身份、归一化和视觉尺寸必须遵守
 Motion checkpoint 的视觉协议，跨尺寸适配须显式声明。接口不会从张量形状推断这些来源关系。
 标准 transform／collator 会保留并堆叠该字段，三个 action trainer 会转交给模型。
-UnifoLM 的 LeRobot wrapper 在配置 `dino_cache_root` 后，会从原生缓存读取历史并处理共享当前 RGB，
-无需把整份特征写入 Parquet；其他数据源仍需提供真实历史。
-携带历史特征时，`observations` 必须已经是同一共享窗口处理后的当前 RGB，模型 transform 不再单独
-裁切或改变颜色；该路径要求关闭本地 `img_aug/view_aug`，窗口增强应在上游统一完成。
+UnifoLM 的 LeRobot wrapper 在配置 `dino_cache_root` 后，会从原生缓存读取历史，无需把整份特征写入 Parquet；
+当前 RGB 如何处理由 `Psi0ModelTransform.motion_image_policy` 显式选择：
+
+- `shared_rgb`（兼容默认值）：`observations` 已是上游共享窗口处理后的当前 RGB；模型不再改变几何或颜色，
+  关闭本地 `img_aug/view_aug`。若增强 Motion 输入，六帧共用同一组增强参数并在线编码冻结 DINO。
+- `vlm_color_clean_motion`（当前 UnifoLM 配方）：wrapper 只恢复当前帧的原始分辨率 uint8 RGB，不预先 resize；
+  模型调用 `SharedImageProcessor(profile).process_window([current], stage="posttrain", training=img_aug and not no_aug)`，
+  依次执行 resize 到240×320、Ψ₀颜色增强、最终对齐到256×320。`img_aug=True` 只增强 VLM 当前帧，
+  Motion 历史六帧全部复用 clean DINO 缓存；不启用 `view_aug`、Robust随机裁切或 `adaptive_resize`。
+  验证／`no_aug`／推理关闭随机颜色，保留同一确定性几何。
+
+颜色参数由 ImageProcess profile 定义，legacy `color_jitter.*` 必须与其匹配，否则配置校验拒绝。
+增强 seed 从 Torch worker RNG 派生，记录该 seed 可重放对应的颜色增强。
+新策略保留同源、同时间、同几何的对应关系，但训练时两路不再复用同一份颜色增强后的 RGB。
 现有单帧数据源不会自动得到历史，缺失时明确报错，不复制当前图或读取未来标签。
 
 训练每个 batch、四种 `predict_action*` 采样及三个 trainer 的评估入口均只提取一次两路特征；
@@ -110,8 +120,9 @@ python VLMExpert/scripts/data/prepare_unifolm.py --root /gaozt-test1/datasets/Un
 
 **DINO 缓存与 Ψ₀ 读取端共用 `data.shared_image_profile`，当前为 `256x320`。**
 唯一几何来源是 [ImageProcess 配置](../ImageProcess/configs/256x320.json)：
-共享中间处理后输出 H256×W320；DINO 只再做自己的 rescale／ImageNet normalization，关闭二次 resize/crop。
-模型 transform 的 profile 与最终 resize/crop 配置自动同步，缓存分支校验输入 RGB 的尺寸与 uint8 类型。
+最终输出 H256×W320；DINO 只再做自己的 rescale／ImageNet normalization，关闭二次 resize/crop。
+模型 transform 绑定同一 profile。`shared_rgb` 接收已处理的 uint8 当前 RGB；
+`vlm_color_clean_motion` 接收原始分辨率 uint8 RGB，在模型 transform 内按该 profile 完成几何和颜色，避免重复 resize。
 完整 profile/hash/实现、NumPy/Pillow 版本、DINO 本地权重/config SHA 和原始视频／Parquet 身份随缓存保存。
 提取与读取需匹配 Ψ₀ `uv.lock` 的 NumPy1.26.4／Pillow11.3.0；不一致会明确拒绝。
 视频解码使用同一 `uv.lock` 的 PyAV16.0.1。本机验证集早先由 PyAV17.1.0 提取，
@@ -143,6 +154,12 @@ python VLMExpert/scripts/data/extract_unifolm_dino.py \
 dino_cache_root = "/gaozt-test1/datasets/UnifoLM/dino/256x320"
 shared_image_profile = "256x320"
 dino_max_open_episodes = 8
+
+# Psi0ModelTransform 字段，位于 data.transform.model：
+motion_image_policy = "vlm_color_clean_motion"
+img_aug = True
+view_aug = False
+adaptive_resize = False
 ```
 
 wrapper 按原始 row/episode/frame/timestamp 建立过滤映射，逐时刻取
@@ -151,9 +168,12 @@ VLM 当前帧保持原动作查询的30Hz时刻。缺少真实一秒历史、跨
 任一中间原生帧无效的窗口都排除，不重复首帧、不借未来图像。
 过滤后的任务采样权重及 episode 迭代同步调整；官方 split 元数据遗留的旧全量范围不用于本地行映射。
 特征以每 worker 有界 LRU/mmap 按需读取，不预载整份缓存。
-当前离线缓存关闭随机颜色／裁切增强，也拒绝独立 `img_aug/view_aug/adaptive_resize`；
-若要随机增强，需要两路共用增强窗口并在线运行冻结 DINO，不能复用这份确定性缓存。
+离线缓存始终使用 clean RGB，不含随机颜色或裁切。`shared_rgb` 模式继续拒绝本地 `img_aug/view_aug`；
+当前 `vlm_color_clean_motion` 模式允许 VLM 独立 `img_aug=True`，Motion 全历史仍保持 clean。
+该策略不改变缓存 extractor、metadata 或特征字节，不需要重新提取；DINO 冻结不妨碍 MotionExpert 联合训练。
+只有改为增强 Motion 输入时，才需在线编码同步增强后的六帧，不能在 clean DINO 特征上补做等价颜色增强。
 数据与 GPU 验证范围见 [UnifoLM 验证记录](../docs/unifolm_dino_validation.json)。
+新颜色策略的 CPU 验证见 [UnifoLM 分支增强验证记录](../docs/unifolm_vlm_color_validation.json)。
 
 ### UnifoLM 联合训练配方
 
@@ -161,7 +181,7 @@ VLM 当前帧保持原动作查询的30Hz时刻。缺少真实一秒历史、跨
 必须显式提供 EgoDex VLM、Motion checkpoint、UnifoLM 数据路径／ID，以及
 `UNIFOLM_DINO_CACHE=/gaozt-test1/datasets/UnifoLM/dino/256x320`；
 脚本的 `--dry-run` 可先打印命令，不启动训练；`MOTION_USE_EMA=1/0` 指定初始化权重选择。
-数据 wrapper 自动把已完成的原生 DINO 缓存接入 `motion_img_embs`，并生成同 profile 的当前 RGB；
+数据 wrapper 自动把已完成的原生 DINO 缓存接入 `motion_img_embs`，并将同源、同时间的当前 RGB 交给所选策略处理；
 缺少或未完成的缓存明确报错，下载 ZIP 本身不会自动产生 DINO。
 
 | 参数组 | 初始学习率 | 来源 |
@@ -175,7 +195,9 @@ VLM 当前帧保持原动作查询的30Hz时刻。缺少真实一秒历史、跨
 参考 [Ψ₀ 官方 UnifoLM 配方](https://github.com/physical-superintelligence-lab/Psi0/blob/cda3fdfafe47cb6fa75400d013de1bd36e3cea05/scripts/train/psi0/posttrain-psix-unifolm-g1-sonic1.1.sh)，
 沿用 posttrain、40,000 步、1,000 步 warmup、每卡 batch 16、累积2步和 BF16，
 动作80维、state45维、horizon30；action expert 保留本图的6个双来源 block、VLM最后一层、无CLIP。
-官方单帧随机增强在这里关闭，增强需在共享历史窗口上完成。
+当前配方显式启用 `motion_image_policy="vlm_color_clean_motion", img_aug=True`，
+通过 ImageProcess 对 VLM 当前帧采样 Ψ₀ 颜色增强；Motion 历史六帧保持 clean，随机裁切关闭。
+每个训练样本重新采样颜色，验证／`no_aug`／推理关闭随机增强。
 只使用 action flow loss 联合反传，没有额外增加 Motion 重建损失。
 VLM 最后 norm 参与所选最后 hidden 的计算，保持可训；独立词表输出头不读 logits，保持冻结。
 Motion 仅冻结当前 hidden 接口不使用的运动输出头、被完整遮蔽的轨迹输入投影和未来图像 mask token；

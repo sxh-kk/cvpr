@@ -28,7 +28,7 @@ DINO提取还需原始MCAP／MP4及DINO预训练权重，修改record中的原�
 
 当前数据／提取格式见 [pipeline](../pipeline/README.md)，
 从头训练与一步hidden接口见 [MotionExpert](../MotionExpert/README.md)，
-两路同步RGB处理见 [ImageProcess](../ImageProcess/README.md)。
+统一几何与分支增强策略见 [ImageProcess](../ImageProcess/README.md)。
 
 仓库 `docs/inventory` 与 `scripts/verify_inventory.py` 是2026-10-06初次迁移快照，
 不作为当前MotionExpert文件或训练协议的验证入口。第三方许可与VLM资产来源继续保留。
@@ -44,6 +44,9 @@ DINO提取还需原始MCAP／MP4及DINO预训练权重，修改record中的原�
 模块README说明了本地接口，后附官方说明。新模式接收真实历史 DINO 特征；UnifoLM 已新增原生30Hz
 提取器与 LeRobot 历史读取，数据位于 `/gaozt-test1/datasets/UnifoLM`，缓存以episode保存mmap。
 DINO 与当前 VLM RGB 共用 `data.shared_image_profile=256x320`，绑定完整配置、NumPy/Pillow版本与权重身份；
+当前 UnifoLM 配方显式保存 `motion_image_policy="vlm_color_clean_motion"`：VLM 当前帧调用 ImageProcess
+做 Ψ₀ 随机颜色增强，Motion 历史6帧保留 clean 缓存，验证／`no_aug` 关闭增强。
+该策略不改变缓存协议或重做缓存；旧配置缺少此字段时仍按 `shared_rgb` 处理。
 迁移时源路径或文件身份改变会拒绝旧缓存，需按新路径重新验收。现有服务入口的历史缓冲仍需接线。
 不能直接把单帧官方部署命令当作双来源入口；数据准备和训练是分开的命令。
 完整恢复仍需原 Motion checkpoint／统计来重建其协议，联合更新后的 Motion 网络权重同时随完整模型保存。

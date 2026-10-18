@@ -5,7 +5,7 @@ MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert同步官�
 | 模块 | 当前用途 | 说明 |
 | --- | --- | --- |
 | MotionExpert | 5Hz历史5帧＋当前帧，预测未来5帧；一步完整11个hidden作为运动先验，可反传 | [接口与训练](MotionExpert/README.md) |
-| ImageProcess | 与Ψ₀共享当前RGB、尺寸和窗口增强 | [配置与接口](ImageProcess/README.md) |
+| ImageProcess | 统一RGB几何，支持共享窗口增强与显式分支颜色策略 | [配置与接口](ImageProcess/README.md) |
 | pipeline | 从SMPL-H归档和MCAP／MP4提取原生30Hz DINO | [格式与命令](pipeline/README.md) |
 | VLMExpert | Ψ₀／Qwen工程，上游 `cda3fdf`；新增可联合训练 VLM＋Motion 的双来源 action expert | [接口与上游说明](VLMExpert/README.md) |
 
@@ -21,6 +21,9 @@ VLMExpert于2026-10-18替换为官方Psi0 `main` 的固定快照，恢复官方�
 UnifoLM 配方解冻两套 expert，DINO 保持冻结；VLM 使用官方分组学习率，Motion 使用独立学习率。
 UnifoLM 放在 `/gaozt-test1/datasets/UnifoLM`，原生30Hz DINO 提取与历史6帧读取已接通，
 缓存和 Ψ₀ 共用 `shared_image_profile=256x320`；数据准备命令见 [UnifoLM 数据链路](VLMExpert/README.md#unifolm-下载dino-提取与读取)。
+当前 UnifoLM 配方显式使用 `motion_image_policy="vlm_color_clean_motion"`：VLM 当前帧单独做 Ψ₀ 随机颜色增强，
+Motion 历史6帧保持 clean，复用现有 DINO 缓存；两路仍同源、同时间、同几何 profile，不启用随机裁切。
+验证／`no_aug`／推理均保持 clean；通用 `shared_rgb` 在线同步增强模式继续保留。此项调整不启动训练或重做缓存。
 Python接口、数据与服务接线边界见 [双来源说明](VLMExpert/README.md#本仓库扩展双来源-action-expert)。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
@@ -30,7 +33,7 @@ v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断�
 
 MotionExpert输出245维运动，另有18维相机轨迹。训练用5Hz／11帧，历史6帧的最后一帧与Ψ₀当前帧一致。
 DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即5×1024，按episode用mmap读取。
-预训练与Robust的最终RGB为H256×W480，后训练为H256×W320；共享处理后两路各自做编码器归一化。
+预训练与Robust的最终RGB为H256×W480，后训练为H256×W320；两路遵循同一几何profile，各自做编码器归一化，增强按显式策略执行。
 
 模型已去掉可学习GLOBAL token。`forward_features()` 在 `t=1` 完整Gaussian上前向一次，返回
 `one_step_hidden [B,11,768]` 和严格的 `one_step_global = one_step_hidden.mean(1) [B,768]`。

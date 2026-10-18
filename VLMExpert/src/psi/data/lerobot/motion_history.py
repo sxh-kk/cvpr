@@ -167,8 +167,13 @@ class MotionHistoryIndex:
             raise ValueError("Selected DINO history must be finite [6,5,1024]")
         return features
 
-    def process_current_rgb(self, sample):
-        """Process exactly the same decoded current RGB used by offline DINO."""
+    def process_current_rgb(self, sample, *, apply_geometry=True):
+        """Restore decoded RGB bytes, optionally applying clean cache geometry.
+
+        VLM-only color augmentation defers geometry to Psi0ModelTransform so
+        colors are applied at the profile's intermediate size, before grid resize.
+        The DINO history remains the original deterministic cached features.
+        """
         import torch
         image = sample[self.image_key]
         if not isinstance(image, torch.Tensor) or image.ndim != 3 or image.shape[0] != 3:
@@ -178,7 +183,7 @@ class MotionHistoryIndex:
                 or np.any(pixels < 0) or np.any(pixels > 1)):
             raise ValueError("LeRobot current RGB must be a finite float image in [0,1]")
         rgb = np.rint(pixels.transpose(1, 2, 0) * 255).astype(np.uint8)
-        processed = self.processor.process_image(rgb)
+        processed = self.processor.process_image(rgb) if apply_geometry else rgb
         sample[self.image_key] = torch.from_numpy(processed.copy()).permute(2, 0, 1).float().div_(255)
         return sample
 

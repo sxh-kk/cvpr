@@ -35,7 +35,7 @@
 ## 3. 模块职责与修改范围
 
 - MotionExpert：运动训练、采样、一步 hidden、数据读取和归一化。
-- ImageProcess：共享 RGB 几何与历史窗口同步增强。
+- ImageProcess：统一 RGB 几何；按显式策略执行历史窗口共享增强或 VLM 独立颜色增强。
 - pipeline：从已验收的 SMPL-H 归档和原始相机数据提取 DINO 特征。
 - VLMExpert：保留原工程；仅在任务明确涉及它时修改。
 - 用户限定“只修改某模块”时，严格遵守范围。
@@ -72,8 +72,9 @@
 - 预训练：H256×W480。
 - 后训练：H256×W320。
 - Robust：H256×W480。
-- 两路复用同一份处理后的当前RGB，各自进行编码器归一化。
-- 颜色和随机裁切参数在整个历史窗口内共享。
+- 通用 `shared_rgb` 模式：两路复用同一份处理后的当前RGB，各自进行编码器归一化；在线增强每窗口采样一次，颜色和随机裁切参数在整个历史窗口内共享。
+- 当前 UnifoLM 后训练显式使用 `motion_image_policy="vlm_color_clean_motion"`：两路当前帧保持同源、同时间、同 `256x320` 几何 profile；仅 VLM 当前帧在训练时做 ImageProcess 的 Ψ₀ 颜色增强，Motion 历史6帧全部使用现有 clean DINO 缓存。本策略不启用随机裁切，验证／`no_aug`／推理保持 clean；不因该颜色策略重做缓存或改写缓存 metadata。
+- `shared_rgb` 仍为兼容默认值；若增强 Motion 输入，仍须在线编码同步增强后的完整历史窗口，不能用 clean DINO 特征替代。DINO 始终冻结，MotionExpert 可按训练配置参与反传。
 - 跨视觉尺寸适配须明确声明，DINO权重身份和归一化仍须匹配。
 
 协议变更时，同步更新实现、配置、接口说明和相关验证。

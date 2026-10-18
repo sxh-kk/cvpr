@@ -86,10 +86,14 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
         )
         self._cache = {}
         self.motion_history = None
+        self._defer_current_geometry = False
         if data_cfg.dino_cache_root is not None:
             from pathlib import Path
             from types import SimpleNamespace
             from .motion_history import MotionHistoryIndex
+            self._defer_current_geometry = (
+                data_cfg.transform.model.motion_image_policy == "vlm_color_clean_motion"
+            )
             packs = getattr(self.base_dataset, "_datasets", None) or [self.base_dataset]
             ids = data_cfg.train_repo_ids if split == "train" else data_cfg.val_repo_ids
             self.motion_history = MotionHistoryIndex(
@@ -126,7 +130,7 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
         if "motion_img_embs" in sample:
             raise ValueError("Source dataset already supplies motion_img_embs; do not mix two history providers")
         sample["motion_img_embs"] = self.motion_history.get_history(idx)
-        return self.motion_history.process_current_rgb(sample)
+        return self.motion_history.process_current_rgb(sample, apply_geometry=not self._defer_current_geometry)
 
     def __len__(self):
         return len(self.base_dataset) if self.motion_history is None else len(self.motion_history.original_indices)

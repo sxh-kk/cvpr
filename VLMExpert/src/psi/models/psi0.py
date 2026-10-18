@@ -1,5 +1,6 @@
 import os
 import copy
+from contextlib import nullcontext
 from tqdm import tqdm
 from typing import List, Optional, Tuple, Union, Dict, Any
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -25,6 +26,8 @@ from diffusers.models.attention import FeedForward, _chunked_feed_forward
 # from dit_policy.data4robotics.models.diffusion import _TimeNetwork
 from psi.config.config import LaunchConfig
 from psi.models.vlm_features import VLMFeatures, masked_mean_vlm_tokens
+from psi.models.frozen_motion import FrozenMotionConditioner, FrozenMotionFeatures
+from psi.models.dual_source_action import DualSourceActionTransformer
 from transformers import Qwen3VLForConditionalGeneration, AutoConfig, AutoProcessor, Qwen2TokenizerFast, Qwen3VLProcessor
 from qwen_vl_utils import process_vision_info
 
@@ -54,6 +57,7 @@ class HumanFoundationModelOutput(BaseOutput):
     state_drop_frac: Optional[float] = None
     # Optional observation-prefix tokens and their parameter-free p_V summary.
     vlm_features: Optional[VLMFeatures] = None
+    motion_features: Optional[FrozenMotionFeatures] = None
 
     def to_tuple(self):
         return (None, self.action)
@@ -1673,10 +1677,48 @@ class HumanFoundationModel(nn.Module):
 
 class Psi0Model(nn.Module):
 
-    def __init__(self, model_cfg, vlm_model: Qwen3VLForConditionalGeneration):
+    def __init__(self, model_cfg, vlm_model: Qwen3VLForConditionalGeneration, motion_expert=None):
         super().__init__()
-        
-        if model_cfg.use_dit:
+
+        architecture = getattr(model_cfg, "action_architecture", "psi0_joint")
+        if architecture not in ("psi0_joint", "dual_source_v1"):
+            raise ValueError(f"Unsupported action architecture: {architecture}")
+        self.uses_dual_source = architecture == "dual_source_v1"
+        self.motion_conditioner = None
+        if self.uses_dual_source:
+            # Enforce this at the model boundary too, for callers constructing a
+            # config object without Pydantic validation.
+            incompatible = ("use_dit", "combined_temb", "use_film", "tune_vlm",
+                            "tune_mm_llm", "tune_mm_vision", "tune_mm_mlp")
+            if any(getattr(model_cfg, name, False) for name in incompatible):
+                raise ValueError("dual_source_v1 requires frozen VLM and no legacy DiT/CLIP/FiLM conditioning")
+            if getattr(model_cfg, "vlm_layer_indices", None) is not None:
+                raise ValueError("dual_source_v1 uses only the final VLM layer")
+            if getattr(model_cfg, "n_conditions", 0) != 0 or getattr(model_cfg, "pooled_text_encoder", None) is not None:
+                raise ValueError("dual_source_v1 requires n_conditions=0 and pooled_text_encoder=None")
+            self.action_header = DualSourceActionTransformer(
+                action_dim=model_cfg.action_dim,
+                action_pred_horizon=model_cfg.action_chunk_size,
+                action_hidden_dim=model_cfg.hidden_dim,
+                action_num_blocks=model_cfg.num_blocks,
+                action_nheads=model_cfg.nhead,
+                view_feature_dim=model_cfg.view_feature_dim,
+                odim=model_cfg.odim,
+                time_dim=getattr(model_cfg, "time_dim", 256),
+                qk_norm=getattr(model_cfg, "qk_norm", None) or "rms_norm",
+                state_drop_prob=getattr(model_cfg, "state_drop_prob", 0.0),
+                state_null_token=getattr(model_cfg, "state_null_token", False),
+                dropout=getattr(model_cfg, "dropout", 0.0),
+            )
+            seed = getattr(model_cfg, "motion_feature_seed", 0)
+            self.motion_conditioner = (
+                FrozenMotionConditioner(motion_expert, seed=seed)
+                if motion_expert is not None else FrozenMotionConditioner.from_checkpoint(
+                    getattr(model_cfg, "motion_checkpoint", None),
+                    use_ema=getattr(model_cfg, "motion_use_ema", True), seed=seed,
+                )
+            )
+        elif model_cfg.use_dit:
             self.action_header = DiTActionTransformerModel(
                 resnet_store_path=model_cfg.resnet_store_path,
                 odim=model_cfg.odim,
@@ -1717,6 +1759,8 @@ class Psi0Model(nn.Module):
         overwatch.info(f"Total ActionTransformerModel parameters: {total_params:,}")
 
         self.vlm_model = vlm_model
+        if self.uses_dual_source:
+            self.vlm_model.requires_grad_(False).eval()
         total_params = sum(p.numel() for p in self.vlm_model.parameters())
         overwatch.info(f"Total VLM Backbone parameters: {total_params:,}")
 
@@ -1731,6 +1775,33 @@ class Psi0Model(nn.Module):
             )
             overwatch.info(f"Depth-matched VLM conditioning: block->layer map {self.vlm_layer_indices}")
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if getattr(self, "uses_dual_source", False):
+            self.vlm_model.requires_grad_(False).eval()
+            self.motion_conditioner.train(False)
+        return self
+
+    def extract_motion_features(self, motion_img_embs=None, motion_features=None):
+        """Resolve one frozen history6 -> full11 motion pass per observation.
+
+        Reusable features must originate from the same observation window.
+        No action-diffusion timestep or future supervision enters this branch.
+        """
+        if not getattr(self, "uses_dual_source", False):
+            if motion_img_embs is not None or motion_features is not None:
+                raise ValueError("Motion conditioning requires action_architecture=dual_source_v1")
+            return None
+        if motion_img_embs is not None and motion_features is not None:
+            raise ValueError("Pass either motion_img_embs or reusable motion_features, not both")
+        if motion_features is not None:
+            if not isinstance(motion_features, FrozenMotionFeatures):
+                raise TypeError("motion_features must be FrozenMotionFeatures from the same observation")
+            return motion_features
+        if motion_img_embs is None:
+            raise ValueError("dual_source_v1 requires motion_img_embs [B,6,5,1024] or reusable motion_features")
+        return self.motion_conditioner(motion_img_embs)
+
     # load pretrained vlm+action head, and all the modules needed for predict_action
     @classmethod
     def from_pretrained(cls, run_dir, ckpt_step, launch_config:LaunchConfig, device):
@@ -1744,7 +1815,12 @@ class Psi0Model(nn.Module):
         state_dict = load_file(file_path, device="cpu")
 
         # init empty vlm backbone from config only (skip loading base pretrained weights)
-        vlm_config = AutoConfig.from_pretrained(QWEN3VL_VARIANT)
+        dual = getattr(launch_config.model, "action_architecture", "psi0_joint") == "dual_source_v1"
+        has_dual_weights = "action_header._architecture_signature" in state_dict
+        if dual != has_dual_weights:
+            raise ValueError("Checkpoint architecture does not match action_architecture; joint and dual_source_v1 are incompatible")
+        vlm_source = launch_config.model.model_name_or_path if dual else QWEN3VL_VARIANT
+        vlm_config = AutoConfig.from_pretrained(vlm_source)
         # Attention backend: flash_attention_2 on CUDA (if installed), sdpa on XPU/CPU.
         try:
             from transformers.utils import is_flash_attn_2_available
@@ -1759,7 +1835,7 @@ class Psi0Model(nn.Module):
 
         vlm_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith("action_header."):
+            if k.startswith(("action_header.", "motion_conditioner.")):
                 continue
             elif k.startswith('vlm_model.'):
                 vlm_state_dict[k.replace("vlm_model.", "")] = v
@@ -1787,7 +1863,7 @@ class Psi0Model(nn.Module):
         # load action head
         action_head_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith("vlm_model."):
+            if k.startswith(("vlm_model.", "motion_conditioner.")):
                 continue
             elif k.startswith('action_header.'):
                 action_head_state_dict[k.replace("action_header.", "")] = v
@@ -1796,8 +1872,16 @@ class Psi0Model(nn.Module):
         model.action_header.load_state_dict(action_head_state_dict, strict=True)
         overwatch.info("loaded action head checkpoint successfully.")
 
+        if dual:
+            motion_state = {key.removeprefix("motion_conditioner."): value
+                            for key, value in state_dict.items() if key.startswith("motion_conditioner.")}
+            if not motion_state:
+                raise ValueError("A complete dual_source_v1 checkpoint must include frozen MotionExpert weights")
+            model.motion_conditioner.load_state_dict(motion_state, strict=True)
+            model.train(False)
+
         # load necessary modules
-        model.vlm_processor = AutoProcessor.from_pretrained(QWEN3VL_VARIANT)
+        model.vlm_processor = AutoProcessor.from_pretrained(vlm_source)
         # model.tokenizer = model.vlm_processor.tokenizer
 
         if launch_config.model.noise_scheduler == "ddpm":
@@ -1845,24 +1929,30 @@ class Psi0Model(nn.Module):
         """Extract the existing action-context tokens and a masked-mean p_V.
 
         Inputs must be the observation prefix (images, instruction and template),
-        without teacher-forced action answers. Layer selection, normalization,
-        grad mode and model train/eval mode are unchanged. No feature is cached.
+        without teacher-forced action answers. The joint architecture preserves
+        its layer/gradient/mode settings. Dual-source mode freezes the final-layer
+        extraction in eval/no_grad; neither path caches observation features.
         """
-        all_hidden_states = self.vlm_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
-            output_hidden_states=True,
-            return_dict=True,
-        ).hidden_states
-        views = self._select_vlm_views(all_hidden_states)
-        return VLMFeatures(
-            tokens=views,
-            pooled_tokens=masked_mean_vlm_tokens(views, attention_mask),
-            attention_mask=attention_mask,
-            last_hidden_state=all_hidden_states[-1],
-        )
+        frozen = getattr(self, "uses_dual_source", False)
+        if frozen:
+            self.vlm_model.requires_grad_(False).eval()
+        with (torch.inference_mode(False) if frozen else nullcontext()), \
+                (torch.no_grad() if frozen else nullcontext()):
+            all_hidden_states = self.vlm_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                output_hidden_states=True,
+                return_dict=True,
+            ).hidden_states
+            views = self._select_vlm_views(all_hidden_states)
+            return VLMFeatures(
+                tokens=views,
+                pooled_tokens=masked_mean_vlm_tokens(views, attention_mask),
+                attention_mask=attention_mask,
+                last_hidden_state=all_hidden_states[-1],
+            )
 
     def forward(
         self,
@@ -1878,14 +1968,27 @@ class Psi0Model(nn.Module):
         return_dict: bool = True,
         skip_layers: Optional[List[int]] = None,
         return_vlm_features: bool = False,
+        motion_img_embs: Optional[torch.Tensor] = None,
+        motion_features: Optional[FrozenMotionFeatures] = None,
+        vlm_features: Optional[VLMFeatures] = None,
     ) -> Union[List[torch.Tensor], HumanFoundationModelOutput]:
 
-        vlm_features = self.extract_vlm_features(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
-        )
+        motion_features = self.extract_motion_features(motion_img_embs, motion_features)
+        if vlm_features is None:
+            vlm_features = self.extract_vlm_features(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+        else:
+            if not getattr(self, "uses_dual_source", False):
+                raise ValueError("Reusable vlm_features are supported only by dual_source_v1")
+            if not isinstance(vlm_features, VLMFeatures):
+                raise TypeError("vlm_features must come from extract_vlm_features() for this observation")
+            if (vlm_features.tokens.requires_grad or vlm_features.pooled_tokens.requires_grad
+                    or torch.is_inference(vlm_features.tokens)):
+                raise ValueError("Reusable dual-source VLM features must be frozen normal tensors")
         vlm_hidden_states = vlm_features.last_hidden_state
         views = vlm_features.tokens
 
@@ -1907,16 +2010,19 @@ class Psi0Model(nn.Module):
             joint_attention_kwargs=dict(
                 action_hidden_embeds=action_samples, # (B,Tp,Da)
                 views=views,  # (B,V,N,D)  V=1 (last layer) or n_blocks (layerwise VLM fusion)
-                vlm_features=vlm_features,  # separate p_V branch; legacy header ignores it
+                vlm_features=vlm_features,  # complete tokens plus p_V for the dual-source head
+                motion_features=motion_features,
                 obs=states,  # (B,1,M)
                 traj2ds=traj2ds,  # (B, C, 3, H, W)
             ),
             vlm_attn_mask=attention_mask, # (B, seq_len)
             return_dict=return_dict,
+            skip_layers=skip_layers,
         )
         return HumanFoundationModelOutput(action=model_output.action, vlm_feat_norm=vlm_feat_norm,
                                           state_drop_frac=getattr(self.action_header, "last_state_drop_frac", None),
-                                          vlm_features=vlm_features if return_vlm_features else None)
+                                          vlm_features=vlm_features if return_vlm_features else None,
+                                          motion_features=motion_features if return_vlm_features else None)
 
     def _collate_vlm_batch(self, batch_input_ids: List[torch.Tensor]):
         """Right-pad mixed-length samples like training's PaddedCollatorForTogether
@@ -1940,9 +2046,12 @@ class Psi0Model(nn.Module):
         goal_images: List[List[Image.Image]] | None = None,  # B * List of PIL goal images
         pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
         return_vlm_features: bool = False,
+        motion_img_embs: Optional[torch.Tensor] = None,
+        motion_features: Optional[FrozenMotionFeatures] = None,
         **kwargs: str
     ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
 
+        motion_features = self.extract_motion_features(motion_img_embs, motion_features)
         bsz = states.shape[0]
         batch_input_ids = []
         batch_attention_mask = []
@@ -2017,6 +2126,7 @@ class Psi0Model(nn.Module):
                     joint_attention_kwargs=dict(
                         action_hidden_embeds=action_samples, # (B,Tp,Da)
                         views=vlm_features.tokens,
+                        motion_features=motion_features,
                         vlm_features=vlm_features,
                         obs=states,  # (B,1,M)
                         traj2ds=traj2ds,  # (B, C, 3, H, W)
@@ -2031,7 +2141,7 @@ class Psi0Model(nn.Module):
                 ).prev_sample
 
         if return_vlm_features:
-            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features)
+            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features, motion_features=motion_features)
         return action_samples.float()
 
     @torch.inference_mode()
@@ -2048,6 +2158,8 @@ class Psi0Model(nn.Module):
         goal_images: List[List[Image.Image]] | None = None,  # B * List of PIL goal images
         pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
         return_vlm_features: bool = False,
+        motion_img_embs: Optional[torch.Tensor] = None,
+        motion_features: Optional[FrozenMotionFeatures] = None,
         **kwargs: str
     ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
 
@@ -2075,6 +2187,7 @@ class Psi0Model(nn.Module):
             )
             d = d_limit - 1
 
+        motion_features = self.extract_motion_features(motion_img_embs, motion_features)
         bsz = states.shape[0]
         # (B, H): d is shared by all samples, but expand explicitly — `batched_timestep_masked`
         # below is derived from this mask and must carry the batch dim, not rely on broadcasting.
@@ -2162,6 +2275,7 @@ class Psi0Model(nn.Module):
                     joint_attention_kwargs=dict(
                         action_hidden_embeds=action_samples, # (B,Tp,Da)
                         views=vlm_features.tokens,
+                        motion_features=motion_features,
                         vlm_features=vlm_features,
                         obs=states,  # (B,1,M)
                         traj2ds=traj2ds,  # (B, C, 3, H, W)
@@ -2180,7 +2294,7 @@ class Psi0Model(nn.Module):
                 #     action_samples = torch.where(prefix_mask[:, :, None], prev_actions, action_samples)
 
         if return_vlm_features:
-            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features)
+            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features, motion_features=motion_features)
         return action_samples.float()
 
     @torch.no_grad()
@@ -2202,6 +2316,8 @@ class Psi0Model(nn.Module):
         guidance_weight: float = 5.0,  # DEPRECATED, see the guidance scaling note below
         guidance_alpha: float = 0.9,
         return_vlm_features: bool = False,
+        motion_img_embs: Optional[torch.Tensor] = None,
+        motion_features: Optional[FrozenMotionFeatures] = None,
         **kwargs: str
     ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
 
@@ -2233,6 +2349,7 @@ class Psi0Model(nn.Module):
         )
         mask_expanded = mask.view(1, -1, 1).expand(1, self.action_horizon, self.action_dim)
 
+        motion_features = self.extract_motion_features(motion_img_embs, motion_features)
         bsz = states.shape[0]
         batch_input_ids = []
         batch_attention_mask = []
@@ -2303,6 +2420,7 @@ class Psi0Model(nn.Module):
                         joint_attention_kwargs=dict(
                             action_hidden_embeds=action_samples_grad, # (B,Tp,Da)
                             views=vlm_features.tokens,
+                            motion_features=motion_features,
                             vlm_features=vlm_features,
                             obs=states,  # (B,1,M)
                             traj2ds=traj2ds,  # (B, C, 3, H, W)
@@ -2345,7 +2463,7 @@ class Psi0Model(nn.Module):
                 ).prev_sample
 
         if return_vlm_features:
-            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features)
+            return HumanFoundationModelOutput(action=action_samples.float(), vlm_features=vlm_features, motion_features=motion_features)
         return action_samples.float()
 
     def predict_action_with_rtc_flow_naive_inpaint(
@@ -2361,6 +2479,8 @@ class Psi0Model(nn.Module):
         mask_schedule: str = "exponential",
         guidance_weight: float = 5.0,
         return_vlm_features: bool = False,
+        motion_img_embs: Optional[torch.Tensor] = None,
+        motion_features: Optional[FrozenMotionFeatures] = None,
         **kwargs: str
     ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
         with torch.no_grad():
@@ -2386,6 +2506,7 @@ class Psi0Model(nn.Module):
             ##              ##
 
 
+            motion_features = self.extract_motion_features(motion_img_embs, motion_features)
             bsz = states.shape[0]
             batch_input_ids = []
             batch_attention_mask = []
@@ -2424,7 +2545,11 @@ class Psi0Model(nn.Module):
 
             batch_input_ids = torch.stack(batch_input_ids) # (B, 80)
             batch_attention_mask = torch.stack(batch_attention_mask) # (B, 80)
-            batch_pixel_values = torch.stack(batch_pixel_values) # (B, 256, 1536)
+            # Qwen consumes image patches flattened across images, as in the
+            # other sampling paths. Legacy naive-inpaint layout stays available.
+            batch_pixel_values = (torch.cat(batch_pixel_values, dim=0)
+                                  if getattr(self, "uses_dual_source", False)
+                                  else torch.stack(batch_pixel_values))
             batch_image_grid_thw = torch.stack(batch_image_grid_thw) # (B, 3)
 
             with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
@@ -2464,10 +2589,12 @@ class Psi0Model(nn.Module):
                         joint_attention_kwargs=dict(
                             action_hidden_embeds=action_samples, # (B,Tp,Da)
                             views=vlm_features.tokens,
+                            motion_features=motion_features,
                             vlm_features=vlm_features,
                             obs=states,  # (B,1,M)
                             traj2ds=traj2ds,  # (B, C, 3, H, W)
                         ),
+                        vlm_attn_mask=(batch_attention_mask if getattr(self, "uses_dual_source", False) else None),
                         return_dict=True,
                     ).action
 
@@ -2483,7 +2610,7 @@ class Psi0Model(nn.Module):
                         action_samples[:, :d, :] = prev_actions[:, :d, :]
 
             if return_vlm_features:
-                return HumanFoundationModelOutput(action=action_samples, vlm_features=vlm_features)
+                return HumanFoundationModelOutput(action=action_samples, vlm_features=vlm_features, motion_features=motion_features)
             return action_samples
 
     def _create_soft_mask(self, H, d, s, schedule="exponential", device="cpu"):

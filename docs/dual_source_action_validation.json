@@ -1,0 +1,130 @@
+{
+  "date_utc": "2026-10-18",
+  "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
+  "scope": "冻结VLM最后层与完整11-token MotionExpert，新增4路串行残差和12d调制；标准训练/采样/数据字段透传",
+  "source_sha256": {
+    "VLMExpert/src/psi/config/model_psi0.py": "920faab04ab837556dcf0f9504e32113d5d7413bebaccc38d88a1ce6460b88f8",
+    "VLMExpert/src/psi/config/transform.py": "19570dd7425dfe5a29e1d249423afdc29912412f2f7cbad0ab538c3476a8625f",
+    "VLMExpert/src/psi/models/psi0.py": "df0bed9d098c71240b3957298a59f051cc168052bd0971b2f514b793dac1024c",
+    "VLMExpert/src/psi/models/dual_source_action.py": "e8c9996318655faeb2a2c7f28593877394d3909394beba18df596ee18fbd1375",
+    "VLMExpert/src/psi/models/frozen_motion.py": "82eec4134867513b5da9bbcabc6f217986e629b5340edee56311f28fa2a4d51a",
+    "VLMExpert/src/psi/trainers/posttrain.py": "e143dce3d8c05908682811ed7fa43a6826239a4ec5edb9b60bb74221ef34085e",
+    "VLMExpert/src/psi/trainers/finetune.py": "9633c54e90017b1bfae588602397b696b762bb21004e4d9c979175d40779a833",
+    "VLMExpert/src/psi/trainers/sonic.py": "8a1ac5477babbdb65facedc89532a6a7efd4c953ed10c98bf85f263d84aa083c",
+    "VLMExpert/src/psi/trainers/qwen3vl_mixin.py": "84a1e403285754c2988517c2afdcfe17865b2f7c97bd5a96bf448700f0f2645f",
+    "VLMExpert/tests/test_vlm_features.py": "210746a3fb85e5c6637b2e06b14cfe4cceb31cb1dbbc8af7478a010df3f740f7",
+    "VLMExpert/tests/test_dual_source_action.py": "47028297206de47b0e91bce3de80bf2376ed76315e7b6c5c452f1c78492b3471",
+    "VLMExpert/tests/test_dual_source_integration.py": "e69319b17c5843b2f95caf974f4533621d96f53984a0bcb0042c763ea31935af",
+    "VLMExpert/tests/test_dual_source_data.py": "51faee5e112aa92a65b7fe5f28a690c27a11177b145befff80c042bf1458e593"
+  },
+  "cpu": {
+    "passed": 81,
+    "duration_seconds": 63.78,
+    "gpu_count": 0,
+    "environment": "Python3.10.12/PyTorch2.6.0+cu118，已有独立检查环境；未安装或替换依赖",
+    "working_directory": "VLMExpert",
+    "command": "CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:..:. python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py tests/test_dual_source_action.py tests/test_dual_source_integration.py tests/test_dual_source_data.py",
+    "counts": {
+      "vlm_pooling_and_legacy_routing": 25,
+      "real_dual_head_math": 16,
+      "dual_model_integration": 23,
+      "history_data_transport": 17
+    },
+    "coverage": [
+      "SA/CA-VLM/CA-Motion/FFN独立AdaLN与门控的串行数学关系，零门控梯度开启节奏",
+      "VLM有效token池化和注意力mask排除非有限padding，Motion全11位置均值且不读取未来标签",
+      "真实新head的融合、两套memory和pool投影梯度有限且更新；VLM/Motion及DINO输入无梯度",
+      "显式BF16/FP16/FP64模型的时间频率精度，999/1000可区分，state/RTC前缀使用time_embed(0)",
+      "四种实际采样入口同chunk只提取一次来源，默认动作/可选特征输出兼容，RTC输入与错误拒绝",
+      "完整模型state_dict包含冻结来源和Tensor签名，往返恢复；嵌套strict=False拒旧架构/缺参数/改配置",
+      "实际repack/field/model transform/collator保留真实history和共享currentRGB，拒混缺失/错误shape/dtype/独立随机增强"
+    ],
+    "method": "核心head和pool使用真实纯Torch实现；Psi0/data接线执行源文件实际方法AST，Qwen/图像算子/来源模型/采样器使用轻量替身"
+  },
+  "gpu": {
+    "gpu_count": 1,
+    "device": "NVIDIA A100-SXM4-80GB",
+    "torch": "2.6.0+cu118",
+    "batch": 2,
+    "action_dim": 7,
+    "horizon": 6,
+    "width": 1536,
+    "blocks": 6,
+    "heads": 24,
+    "vlm_shape": [
+      2,
+      1,
+      12,
+      2048
+    ],
+    "motion_shape": [
+      2,
+      11,
+      768
+    ],
+    "history_shape": [
+      2,
+      6,
+      5,
+      1024
+    ],
+    "precision": "float32 parameters + bfloat16 autocast",
+    "optimizer_steps": 3,
+    "losses": [
+      0.5367677211761475,
+      0.06496060639619827,
+      6.222421646118164
+    ],
+    "all_trainable_gradients_finite": true,
+    "all_three_attention_branches_nonzero_gradient": true,
+    "fusion_nonzero_gradient": true,
+    "action_parameters_updated": true,
+    "motion_frozen_no_gradient": true,
+    "sampling_steps_finite": 3,
+    "motion_checkpoint": "/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=99-step=48700.ckpt",
+    "motion_use_ema": false,
+    "peak_allocated_bytes": 10304951808,
+    "scope": "actual full-width new action head and actual frozen MotionExpert; synthetic VLM hidden/DINO history, no Qwen checkpoint or full dataset run",
+    "explicit_bfloat16_followup": {
+      "device": "NVIDIA A100-SXM4-80GB",
+      "gpu_count": 1,
+      "head": {
+        "width": 32,
+        "blocks": 1,
+        "heads": 4,
+        "time_dim": 256
+      },
+      "checks": [
+        "最终实现显式to(cuda,bfloat16)后frequency仍为FP32",
+        "999/1000的encoding和time-MLP输出可区分，t0与FP32三角参考一致",
+        "time-MLP梯度有限且非零"
+      ],
+      "note": "完整1536维GPU检查使用FP32参数+BF16autocast；后续低精度转换修复另用最终实现作此GPU检查"
+    }
+  },
+  "additional_cpu_behavior_checks": {
+    "method": "从实际源文件提取并执行配置validator、trainer方法，无Pydantic/Qwen完整构造",
+    "configuration_cases": 14,
+    "history_helper_cases": 6,
+    "trainer_inference": "Posttrain/Finetune/Sonic，B2、3去噪步，dual各来源一次前向并复用；joint原行为",
+    "freeze": "Posttrain/Finetune强制保持dual VLM冻结"
+  },
+  "static": {
+    "python_implementations_ast_checked": 9,
+    "test_files_ast_checked": 4,
+    "git_diff_check": "通过",
+    "provenance_json": "通过",
+    "actual_safetensors_head_roundtrip": "独立使用save_file/load_file，d16/2block，全部参数和buffer逐值一致"
+  },
+  "review": [
+    "核心block与集成互相独立只读复核；修复VLM grad上下文顺序、history字段吞失和低精度时间编码",
+    "文档明确新架构选择、冻结策略、真实history/共享视觉协议与运行限制"
+  ],
+  "limitations": [
+    "未加载真实EgoDex Qwen checkpoint，未验收全量数据训练、完整Ψ0依赖环境、DDP/DeepSpeed或真实下游精度",
+    "GPU使用真实第100轮Motion普通权重作接口检查；未把该checkpoint设为生产默认，也未改变正在运行的训练",
+    "GPU为三步有限性/梯度/更新检查，不构成loss收敛或吞吐结论",
+    "数据集仍须生成符合视觉协议的真实历史DINO及对应processed currentRGB，接口无法从shape核对物理来源",
+    "HTTP/机器人服务仍须提供历史DINO；完整模型恢复仍依赖显式原Motion checkpoint和统计协议"
+  ]
+}

@@ -108,8 +108,14 @@ class DataTransform(BaseModel):
     field: FieldTransform
 
     def __call__(self, data:dict[str, Any], **kwargs) -> dict[str, Any]:
+        # Repack/field transforms may rebuild dictionaries. Preserve only explicitly
+        # supplied Psi0 motion history, whose RGB alignment is the provider's contract.
+        keep_motion = isinstance(self.model, Psi0ModelTransform) and "motion_img_embs" in data
+        motion_history = data["motion_img_embs"] if keep_motion else None
         data = self.repack(data, **kwargs)
         data = self.field(data, **kwargs)
+        if keep_motion:
+            data["motion_img_embs"] = motion_history
         data = self.model(data, **kwargs)
         return data
     
@@ -1071,37 +1077,44 @@ class Psi0ModelTransform(ModelTransform):
             ...
             data["observations"]: List of PIL Images
         """
-        # no_aug=True (val split, deploy, mock clients) disables every image augmentation.
-        do_img_aug = self.img_aug and not no_aug
-        do_view_aug = self.view_aug and not no_aug
-        if self.adaptive_resize:
-            assert data["dataset"] is not None
-            match data["dataset"]:
-                case "egodex":
-                    target_size = self.img_sizes["egodex"]
-                case "humanoid-everyday":
-                    target_size = self.img_sizes["he"]
-                case _:
-                    target_size = (256, 256)
-            resizer = ResizeImage(size=tuple(target_size))() # type: ignore
-            center_crop = CenterCrop(size=tuple(target_size))() # type: ignore
-            view_size = tuple(target_size)
+        if "motion_img_embs" in data:
+            if not no_aug and (self.img_aug or self.view_aug):
+                raise ValueError("motion_img_embs requires RGB geometry and augmentation shared upstream "
+                                 "across the entire history window; disable Psi0ModelTransform img_aug/view_aug")
+            # This RGB was already processed alongside the supplied DINO history.
+            images = data["observations"]
         else:
-            resizer = self.resize()
-            center_crop = self.center_crop()
-            view_size = self.center_crop.size
-            if isinstance(view_size, int):
-                view_size = (view_size, view_size)
+            # no_aug=True (val split, deploy, mock clients) disables every image augmentation.
+            do_img_aug = self.img_aug and not no_aug
+            do_view_aug = self.view_aug and not no_aug
+            if self.adaptive_resize:
+                assert data["dataset"] is not None
+                match data["dataset"]:
+                    case "egodex":
+                        target_size = self.img_sizes["egodex"]
+                    case "humanoid-everyday":
+                        target_size = self.img_sizes["he"]
+                    case _:
+                        target_size = (256, 256)
+                resizer = ResizeImage(size=tuple(target_size))() # type: ignore
+                center_crop = CenterCrop(size=tuple(target_size))() # type: ignore
+                view_size = tuple(target_size)
+            else:
+                resizer = self.resize()
+                center_crop = self.center_crop()
+                view_size = self.center_crop.size
+                if isinstance(view_size, int):
+                    view_size = (view_size, view_size)
 
-        t1 = v2.Compose([
-            resizer,
-            center_crop,
-            RandomViewPerturb(size=tuple(view_size), min_scale=self.view_aug_min_scale, prob=self.view_aug_prob)()
-                if do_view_aug else v2.Identity(),
-            self.color_jitter() if do_img_aug else v2.Identity(),
-        ])
+            t1 = v2.Compose([
+                resizer,
+                center_crop,
+                RandomViewPerturb(size=tuple(view_size), min_scale=self.view_aug_min_scale, prob=self.view_aug_prob)()
+                    if do_view_aug else v2.Identity(),
+                self.color_jitter() if do_img_aug else v2.Identity(),
+            ])
 
-        images = [t1(img) for img in data["observations"]]
+            images = [t1(img) for img in data["observations"]]
         instruction = data["instruction"]
 
         inputs: dict = self.build_qwenvl_inputs(
@@ -1116,6 +1129,8 @@ class Psi0ModelTransform(ModelTransform):
         inputs['actions'] = data["actions"]
         inputs['states'] = data["states"]
         inputs['instruction'] = data["instruction"]
+        if "motion_img_embs" in data:
+            inputs["motion_img_embs"] = data["motion_img_embs"]
         return inputs
 
     def build_qwenvl_inputs(

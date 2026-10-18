@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from psi.data.dataset import TransformableDataset
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor #, Qwen2TokenizerFast, Qwen3VLProcessor
 from psi.trainers.qwen3vl_mixin import PaddedCollatorForTogether
+from psi.config.model_psi0 import motion_model_kwargs
 
 if TYPE_CHECKING:    
     from psi.config.config import TrainConfig #, LaunchConfig
@@ -209,6 +210,11 @@ class PosttrainTrainer(Trainer):
 
         Ported from FinetuneTrainer: this trainer used to hard-freeze the whole VLM.
         """
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            self.model.vlm_model.requires_grad_(False)
+            self.model.vlm_model.eval()
+            overwatch.info("dual_source_v1 keeps the VLM frozen in eval mode")
+            return set()
         trainable_components = self.vlm_trainable_components()
         for name, p in self.model.vlm_model.named_parameters():
             p.requires_grad = self._vlm_group_of(name) in trainable_components
@@ -254,6 +260,8 @@ class PosttrainTrainer(Trainer):
     def vlm_trainable_components(self) -> set[str]:
         """Which VLM components to finetune. tune_mm_* select individually and imply
         a tuned VLM; otherwise tune_vlm means "train the whole VLM"."""
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            return set()
         selected = set()
         if self.model_cfg.tune_mm_vision:
             selected.add("vision_tower")
@@ -767,6 +775,19 @@ class PosttrainTrainer(Trainer):
     @torch.no_grad()
     def inference(self, eval_model, repacked_batch):
 
+        motion_kwargs = motion_model_kwargs(self.model_cfg, repacked_batch)
+        context_kwargs = motion_kwargs
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            # evaluate() supplies the unwrapped model; both frozen sources run once per chunk.
+            context_kwargs = dict(
+                vlm_features=eval_model.extract_vlm_features(
+                    input_ids=repacked_batch["input_ids"],
+                    attention_mask=repacked_batch["attention_mask"],
+                    pixel_values=repacked_batch["pixel_values"],
+                    image_grid_thw=repacked_batch["image_grid_thw"],
+                ),
+                motion_features=eval_model.extract_motion_features(**motion_kwargs),
+            )
         traj2ds = repacked_batch["traj2ds"] if "traj2ds" in repacked_batch else None  # (B, 3, H, W)
         obs = repacked_batch["states"]  # (B,1,M)
 
@@ -795,6 +816,7 @@ class PosttrainTrainer(Trainer):
                 traj2ds=traj2ds,
                 pooled_projections=pooled_projections,
                 return_dict=True,
+                **context_kwargs,
             ).action
 
             action_samples = self.noise_scheduler.step(
@@ -900,6 +922,7 @@ class PosttrainTrainer(Trainer):
         }
 
     def forward_and_loss(self, model, batch) -> dict[str, torch.Tensor]:
+        motion_kwargs = motion_model_kwargs(self.model_cfg, batch)
         bsz, *_, h, w = batch["actions"].shape
         # for debugging purposes
         # gen = torch.Generator(device=self.device)
@@ -943,6 +966,7 @@ class PosttrainTrainer(Trainer):
             traj2ds=batch["traj2ds"] if "traj2ds" in batch else None,  # (B, C, 3, H, W)
             pooled_projections=self.compute_pooled_projections(batch),  # (B, D) or None
             return_dict=True,
+            **motion_kwargs,
         )
         action_pred = model_output.action
         loss_action = F.mse_loss(

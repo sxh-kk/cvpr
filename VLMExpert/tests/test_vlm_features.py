@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
 from psi.models.vlm_features import VLMFeatures, masked_mean_vlm_tokens
+from psi.models.frozen_motion import FrozenMotionConditioner, FrozenMotionFeatures
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
@@ -163,18 +165,14 @@ class _Scheduler:
         return SimpleNamespace(prev_sample=sample - 0.2 * model_output)
 
 
-@pytest.fixture(scope="module")
-def psi0_harness():
+def build_psi0_harness(*, include_init=False, extra_globals=None):
+    """Execute real Psi0 tensor methods without optional pretrained dependencies."""
     source = Path(__file__).parents[1] / "src/psi/models/psi0.py"
     tree = ast.parse(source.read_text())
     model = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Psi0Model")
-    names = {
-        "_select_vlm_views", "extract_vlm_features", "forward", "_collate_vlm_batch",
-        "predict_action", "predict_action_with_training_rtc_flow", "predict_action_with_rtc_flow",
-        "predict_action_with_rtc_flow_naive_inpaint", "_create_soft_mask",
-    }
-    methods = [copy.deepcopy(node) for node in model.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    assert {node.name for node in methods} == names
+    excluded = {"from_pretrained"} | ({"__init__"} if not include_init else set())
+    methods = [copy.deepcopy(node) for node in model.body
+               if isinstance(node, ast.FunctionDef) and node.name not in excluded]
     harness = ast.ClassDef(name="Psi0Harness", bases=[ast.Attribute(value=ast.Name(id="nn", ctx=ast.Load()),
                           attr="Module", ctx=ast.Load())], keywords=[], body=methods, decorator_list=[])
     output = copy.deepcopy(next(node for node in tree.body
@@ -183,10 +181,19 @@ def psi0_harness():
                              output, harness], type_ignores=[])
     namespace = dict(__name__=__name__, torch=torch, nn=nn, dataclass=dataclass, BaseOutput=object,
                      VLMFeatures=VLMFeatures, masked_mean_vlm_tokens=masked_mean_vlm_tokens,
+                     nullcontext=nullcontext, FrozenMotionConditioner=FrozenMotionConditioner,
+                     FrozenMotionFeatures=FrozenMotionFeatures,
                      pad_sequence=pad_sequence, process_vision_info=_vision_info,
-                     overwatch=SimpleNamespace(warning=lambda *args, **kwargs: None))
+                     overwatch=SimpleNamespace(warning=lambda *args, **kwargs: None,
+                                               info=lambda *args, **kwargs: None))
+    namespace.update(extra_globals or {})
     exec(compile(ast.fix_missing_locations(module), str(source), "exec"), namespace)
     return namespace["Psi0Harness"]
+
+
+@pytest.fixture(scope="module")
+def psi0_harness():
+    return build_psi0_harness()
 
 
 @pytest.fixture
@@ -198,6 +205,8 @@ def model(psi0_harness):
     model.action_header = _LegacyHeader()
     model.noise_scheduler = _Scheduler()
     model.vlm_layer_indices = None
+    model.action_architecture = "psi0_joint"
+    model.uses_dual_source = False
     model.action_horizon = 4
     model.action_dim = 2
     return model

@@ -14,6 +14,7 @@ from typing import Dict, Optional, List, Union, Any, TYPE_CHECKING
 from torch.utils.data import DataLoader
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, Qwen3VLProcessor
 from psi.trainers.qwen3vl_mixin import PaddedCollatorForTogether
+from psi.config.model_psi0 import motion_model_kwargs
 
 if TYPE_CHECKING:    
     from psi.config.config import TrainConfig
@@ -335,7 +336,19 @@ class FinetuneTrainer(Trainer):
             from safetensors.torch import load_file
             ckpt_path = self.model_cfg.pretrained_action_header_path
             state_dict = load_file(f"{ckpt_path}/action_header.safetensors")
-            if (state_dict["action_proj_in.dec_pos"].shape[0] != self.model_cfg.action_chunk_size or
+            if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+                motion_prefix = "motion_conditioner."
+                motion_state = {key[len(motion_prefix):]: value for key, value in state_dict.items()
+                                if key.startswith(motion_prefix)}
+                header_state = {key: value for key, value in state_dict.items()
+                                if not key.startswith(motion_prefix)}
+                if header_state and all(key.startswith("action_header.") for key in header_state):
+                    header_state = {key[len("action_header."):]: value for key, value in header_state.items()}
+                # The dual head validates its architecture signature; no legacy partial warm start.
+                self.model.action_header.load_state_dict(header_state, strict=True)
+                if motion_state:
+                    self.model.motion_conditioner.load_state_dict(motion_state, strict=True)
+            elif (state_dict["action_proj_in.dec_pos"].shape[0] != self.model_cfg.action_chunk_size or
                 state_dict["action_proj_out.linear.weight"].shape[0] != self.model_cfg.action_dim):
                 # only load transformer blocks
                 reduced_state_dict = {}
@@ -367,6 +380,11 @@ class FinetuneTrainer(Trainer):
 
     def apply_vlm_trainability(self) -> set[str]:
         """Freeze/unfreeze the VLM per component; returns the tuned components."""
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            self.model.vlm_model.requires_grad_(False)
+            self.model.vlm_model.eval()
+            overwatch.info("dual_source_v1 keeps the VLM frozen in eval mode")
+            return set()
         trainable_components = self.vlm_trainable_components()
         for name, p in self.model.vlm_model.named_parameters():
             p.requires_grad = self._vlm_group_of(name) in trainable_components
@@ -422,6 +440,8 @@ class FinetuneTrainer(Trainer):
         `vision_tower_lr`. When none of them is set, `tune_vlm` keeps its legacy
         meaning of "train the whole VLM".
         """
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            return set()
         selected = set()
         if self.model_cfg.tune_mm_vision:
             selected.add("vision_tower")
@@ -857,6 +877,18 @@ class FinetuneTrainer(Trainer):
     @torch.no_grad()
     def inference(self, eval_model, repacked_batch):
 
+        motion_kwargs = motion_model_kwargs(self.model_cfg, repacked_batch)
+        context_kwargs = motion_kwargs
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            context_kwargs = dict(
+                vlm_features=eval_model.extract_vlm_features(
+                    input_ids=repacked_batch["input_ids"],
+                    attention_mask=repacked_batch["attention_mask"],
+                    pixel_values=repacked_batch["pixel_values"],
+                    image_grid_thw=repacked_batch["image_grid_thw"],
+                ),
+                motion_features=eval_model.extract_motion_features(**motion_kwargs),
+            )
         traj2ds = repacked_batch["traj2ds"] if "traj2ds" in repacked_batch else None  # (B, 3, H, W)
         obs = repacked_batch["states"]  # (B,1,M)
 
@@ -885,6 +917,7 @@ class FinetuneTrainer(Trainer):
                 traj2ds=traj2ds,
                 pooled_projections=pooled_projections,  # (B, D) or None
                 return_dict=True,
+                **context_kwargs,
             ).action
 
             action_samples = self.noise_scheduler.step(
@@ -992,6 +1025,7 @@ class FinetuneTrainer(Trainer):
         }
 
     def forward_and_loss(self, model, batch) -> dict[str, torch.Tensor]:
+        motion_kwargs = motion_model_kwargs(self.model_cfg, batch)
         bsz, Tp, Da = batch["actions"].shape
 
         if self.noise_scheduler_name == "ddpm":
@@ -1049,6 +1083,7 @@ class FinetuneTrainer(Trainer):
             traj2ds=batch["traj2ds"] if "traj2ds" in batch else None,  # (B, C, 3, H, W)
             pooled_projections=self.compute_pooled_projections(batch),  # (B, D) or None
             return_dict=True,
+            **motion_kwargs,
         )
         action_pred = model_output.action
         loss_action = F.mse_loss(

@@ -143,6 +143,27 @@ class PaddedCollatorForTogether:
         self.pixel_values_dtype = pixel_values_dtype
 
     def __call__(self, instances):
+        motion_history = None
+        motion_present = ["motion_img_embs" in instance for instance in instances]
+        if any(motion_present):
+            if not all(motion_present):
+                raise ValueError("motion_img_embs must be supplied for every sample in a batch; "
+                                 "missing history cannot be padded or copied from the current frame")
+            histories = []
+            for index, instance in enumerate(instances):
+                history = instance["motion_img_embs"]
+                if not isinstance(history, (torch.Tensor, np.ndarray)):
+                    raise ValueError(f"motion_img_embs sample {index} must be a floating-point Tensor "
+                                     "or numpy array [6,5,1024]")
+                if tuple(history.shape) != (6, 5, 1024):
+                    raise ValueError(f"motion_img_embs sample {index} must have shape [6,5,1024], "
+                                     f"got {tuple(history.shape)}")
+                history = torch.as_tensor(history)
+                if not history.is_floating_point():
+                    raise ValueError(f"motion_img_embs sample {index} must be floating-point")
+                histories.append(history)
+            motion_history = torch.stack(histories, dim=0)
+
         # Extract sequences
         input_ids = [instance["input_ids"].squeeze(0) if instance["input_ids"].dim() == 2 else instance["input_ids"]
                     for instance in instances]
@@ -189,6 +210,8 @@ class PaddedCollatorForTogether:
             "pixel_values": pixel_values,
             "image_grid_thw": image_grid_thw,
         }
+        if motion_history is not None:
+            output["motion_img_embs"] = motion_history
         # see also:  batch_str_to_tensor in src/psi/data/gear/transform/base.py for similar encoding of string metadata
         if dataset_names is not None:
             # encode as padded uint8 tensor so accelerate can concatenate across processes

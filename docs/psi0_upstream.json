@@ -638,6 +638,29 @@
   "local_extensions": [
     {
       "date": "2026-10-18",
+      "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
+      "change": "新增dual_source_v1：冻结最后层VLM和完整11-token MotionExpert，逐block串行SA/CA-VLM/CA-Motion/FFN，由p_V/p_M/action时间融合生成12d调制；保留psi0_joint",
+      "paths": [
+        "VLMExpert/src/psi/models/dual_source_action.py",
+        "VLMExpert/src/psi/models/frozen_motion.py",
+        "VLMExpert/src/psi/models/psi0.py",
+        "VLMExpert/src/psi/config/model_psi0.py",
+        "VLMExpert/src/psi/config/transform.py",
+        "VLMExpert/src/psi/trainers/qwen3vl_mixin.py",
+        "VLMExpert/src/psi/trainers/posttrain.py",
+        "VLMExpert/src/psi/trainers/finetune.py",
+        "VLMExpert/src/psi/trainers/sonic.py",
+        "VLMExpert/tests/test_dual_source_action.py",
+        "VLMExpert/tests/test_dual_source_integration.py",
+        "VLMExpert/tests/test_dual_source_data.py",
+        "VLMExpert/tests/test_vlm_features.py",
+        "VLMExpert/README.md"
+      ],
+      "validation": "docs/dual_source_action_validation.json",
+      "note": "数据集需提供对齐的六帧DINO历史；HTTP服务历史输入尚需接线；原快照验收计数仅描述导入时状态"
+    },
+    {
+      "date": "2026-10-18",
       "change": "对原action expert输入tokens做masked mean pooling，新增p_V提取接口；完整tokens和checkpoint参数结构保留，暂不修改action block",
       "paths": [
         "VLMExpert/src/psi/models/psi0.py",

@@ -13,6 +13,7 @@ from typing import Dict, Optional, List, Union, Any, TYPE_CHECKING
 from torch.utils.data import DataLoader
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, Qwen3VLProcessor
 from psi.trainers.qwen3vl_mixin import PaddedCollatorForTogether
+from psi.config.model_psi0 import motion_model_kwargs
 
 if TYPE_CHECKING:    
     from psi.config.config import TrainConfig
@@ -132,7 +133,18 @@ class SonicTrainer(Trainer):
             from safetensors.torch import load_file
             ckpt_path = self.model_cfg.pretrained_action_header_path
             state_dict = load_file(f"{ckpt_path}/action_header.safetensors")
-            if (state_dict["action_proj_in.dec_pos"].shape[0] != self.model_cfg.action_chunk_size or
+            if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+                motion_prefix = "motion_conditioner."
+                motion_state = {key[len(motion_prefix):]: value for key, value in state_dict.items()
+                                if key.startswith(motion_prefix)}
+                header_state = {key: value for key, value in state_dict.items()
+                                if not key.startswith(motion_prefix)}
+                if header_state and all(key.startswith("action_header.") for key in header_state):
+                    header_state = {key[len("action_header."):]: value for key, value in header_state.items()}
+                self.model.action_header.load_state_dict(header_state, strict=True)
+                if motion_state:
+                    self.model.motion_conditioner.load_state_dict(motion_state, strict=True)
+            elif (state_dict["action_proj_in.dec_pos"].shape[0] != self.model_cfg.action_chunk_size or
                 state_dict["action_proj_out.linear.weight"].shape[0] != self.model_cfg.action_dim
             ):
                 # only load transformer blocks when action dimension does not match
@@ -155,7 +167,11 @@ class SonicTrainer(Trainer):
             self.model.config.hidden_size = vlm_model.config.text_config.hidden_size
 
         # Set VLM parameters trainability based on tune_vlm flag
-        if not self.model_cfg.tune_vlm:
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            self.model.vlm_model.requires_grad_(False)
+            self.model.vlm_model.eval()
+            overwatch.info("dual_source_v1 keeps the VLM frozen in eval mode")
+        elif not self.model_cfg.tune_vlm:
             for p in self.model.vlm_model.parameters():
                 p.requires_grad = False
             overwatch.info("VLM parameters are frozen (tune_vlm=False)")
@@ -179,6 +195,9 @@ class SonicTrainer(Trainer):
         vlm_model_params = []
         other_params = []
         for name, param in self.model.named_parameters():
+            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1"
+                    and not param.requires_grad):
+                continue
             if name.startswith("action_header."):
                 action_header_params.append(param)
             elif name.startswith("vlm_model."):
@@ -410,6 +429,18 @@ class SonicTrainer(Trainer):
     @torch.no_grad()
     def inference(self, eval_model, repacked_batch):
 
+        motion_kwargs = motion_model_kwargs(self.model_cfg, repacked_batch)
+        context_kwargs = motion_kwargs
+        if getattr(self.model_cfg, "action_architecture", "psi0_joint") == "dual_source_v1":
+            context_kwargs = dict(
+                vlm_features=eval_model.extract_vlm_features(
+                    input_ids=repacked_batch["input_ids"],
+                    attention_mask=repacked_batch["attention_mask"],
+                    pixel_values=repacked_batch["pixel_values"],
+                    image_grid_thw=repacked_batch["image_grid_thw"],
+                ),
+                motion_features=eval_model.extract_motion_features(**motion_kwargs),
+            )
         traj2ds = repacked_batch["traj2ds"] if "traj2ds" in repacked_batch else None  # (B, 3, H, W)
         obs = repacked_batch["states"]  # (B,1,M)
 
@@ -434,6 +465,7 @@ class SonicTrainer(Trainer):
                 timestep=batched_timestep,
                 traj2ds=traj2ds,
                 return_dict=True,
+                **context_kwargs,
             ).action
 
             action_samples = self.noise_scheduler.step(
@@ -539,6 +571,7 @@ class SonicTrainer(Trainer):
         }
 
     def forward_and_loss(self, model, batch) -> dict[str, torch.Tensor]:
+        motion_kwargs = motion_model_kwargs(self.model_cfg, batch)
         bsz, Tp, Da = batch["actions"].shape
 
         if self.noise_scheduler_name == "ddpm":
@@ -595,6 +628,7 @@ class SonicTrainer(Trainer):
             timestep=timesteps,
             traj2ds=batch["traj2ds"] if "traj2ds" in batch else None,  # (B, C, 3, H, W)
             return_dict=True,
+            **motion_kwargs,
         )
         action_pred = model_output.action
         loss_action = F.mse_loss(

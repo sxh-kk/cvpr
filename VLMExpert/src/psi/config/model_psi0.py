@@ -1,12 +1,18 @@
 import os
 from pathlib import Path
 from tyro.conf import subcommand as cmd
-from typing import Union, Annotated, Optional, List
+from typing import Union, Annotated, Optional, List, Literal
 from psi.config.config import ModelConfig
 from pydantic import Field, model_validator
 
 class Psi0ModelConfig(ModelConfig):
     ######################### hfm_action ############################
+    action_architecture: Literal["psi0_joint", "dual_source_v1"] = "psi0_joint"
+    # The frozen motion source always supplies all 11 tokens of width 768.
+    # Leave the checkpoint unset for dependency injection; actual use must resolve it.
+    motion_checkpoint: Optional[str] = None
+    motion_use_ema: bool = True
+    motion_feature_seed: int = 0
     # pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-3-medium-diffusers"
     resnet_store_path: str | None = None # = "cache/checkpoints/resnet18/IN_1M_resnet18.pth"
     pretrained_action_header_path: str | None = None
@@ -150,6 +156,30 @@ class Psi0ModelConfig(ModelConfig):
     # lora_dropout: float = 0.0                 # [TrainingArguments] LoRA dropout
 
     @model_validator(mode="after")
+    def _validate_action_architecture(self) -> "Psi0ModelConfig":
+        if self.action_architecture != "dual_source_v1":
+            return self
+        incompatible = [
+            name for name in ("tune_vlm", "tune_mm_llm", "tune_mm_vision", "tune_mm_mlp",
+                              "combined_temb", "use_dit", "use_film")
+            if getattr(self, name)
+        ]
+        if self.vlm_layer_indices is not None:
+            incompatible.append("vlm_layer_indices (must be None: last VLM layer only)")
+        if self.pooled_text_encoder is not None:
+            incompatible.append("pooled_text_encoder (must be None: no CLIP branch)")
+        if self.n_conditions != 0:
+            incompatible.append("n_conditions (must be 0)")
+        if incompatible:
+            raise ValueError("dual_source_v1 requires frozen VLM and independent motion conditioning; "
+                             "incompatible settings: " + ", ".join(incompatible))
+        if not 0 <= self.state_drop_prob <= 1:
+            raise ValueError("dual_source_v1 state_drop_prob must be between 0 and 1")
+        if self.state_drop_prob > 0 and not self.state_null_token:
+            raise ValueError("dual_source_v1 state_drop_prob > 0 requires state_null_token=True")
+        return self
+
+    @model_validator(mode="after")
     def _resolve_psi_home_paths(self) -> "Psi0ModelConfig":
         psi_home = os.environ.get("PSI_HOME", "/psi")
         if psi_home is None:
@@ -162,4 +192,30 @@ class Psi0ModelConfig(ModelConfig):
         self.model_name_or_path = _resolve(self.model_name_or_path)
         self.pretrained_action_header_path = _resolve(self.pretrained_action_header_path)
         self.resnet_store_path = _resolve(self.resnet_store_path)
+        self.motion_checkpoint = _resolve(self.motion_checkpoint)
         return self
+
+
+def motion_model_kwargs(model_cfg, batch) -> dict:
+    """Forward genuine six-frame DINO history only for the dual-source action model.
+
+    Datasets must supply these features from aligned historical RGB. Current-only
+    images and future label masks cannot substitute for the missing history.
+    """
+    if getattr(model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1":
+        return {}
+    history = batch.get("motion_img_embs")
+    if history is None:
+        raise ValueError("dual_source_v1 requires batch['motion_img_embs'] [B,6,5,1024] from six "
+                         "real 5Hz historical RGB frames ending at the VLM current frame; "
+                         "the current dataset must provide this history, without repeating the "
+                         "current image or using future labels")
+    import torch
+    if not isinstance(history, torch.Tensor) or not history.is_floating_point():
+        raise ValueError("motion_img_embs must be a floating-point tensor [B,6,5,1024]")
+    if history.ndim != 4 or tuple(history.shape[1:]) != (6, 5, 1024) or history.shape[0] < 1:
+        raise ValueError("motion_img_embs must have shape [B,6,5,1024] with B >= 1")
+    prefix = batch.get("input_ids")
+    if prefix is not None and history.shape[0] != prefix.shape[0]:
+        raise ValueError("motion_img_embs batch must match the VLM input_ids batch")
+    return {"motion_img_embs": history}

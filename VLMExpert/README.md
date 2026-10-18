@@ -1,8 +1,88 @@
-## 本仓库扩展：VLM tokens 池化
+## 本仓库扩展：双来源 Action Expert
+
+`action_architecture="dual_source_v1"` 实现双来源串行结构。VLM 与 MotionExpert 固定权重并保持
+`eval()`；action expert 的输入投影、融合网络、调制头、注意力及输出头可训练。
+原官方架构仍用 `action_architecture="psi0_joint"`，默认值保留以便读取旧模型。
+
+每个 block 执行 `Action Self-Attention → Cross-Attention VLM → Cross-Attention Motion → FFN`。
+四个分支各有 AdaLN 和门控残差；每层独立 `ModHead` 输出四组 `gamma/beta/g`，共 `12d`。
+调制采用 `(1 + gamma) * LayerNorm(x) + beta`。仅调制头零初始化，attention／FFN 的输出投影
+和最终动作 linear 保留常规初始化，避免与零 gate 形成永久无梯度分支。
+
+- `H_V [B,1,N,Dv]`：固定使用 VLM 最后一层的完整多模态序列，padding 同时从均值和注意力排除。
+- `H_M [B,11,768]`：MotionExpert 在自身 `t_M=1` 完整高斯输入上前向一次，包含全部历史6／未来5位置。
+- `p_V` 为有效 VLM tokens 均值，`p_M` 为全部11个 motion tokens 均值，不使用未来标签 mask。
+- 两路摘要分别归一化、投影，与 action 时间 embedding 拼接，经 `f_fuse` 得到调制条件；旧 CLIP 分支不参与。
+- 两路完整 memory 独立归一化、投影后供 cross-attention 读取，各 block 不更新 memory。
+- 当前 proprio state 投影为 action 序列首 token，输出前移除。RTC 保留逐 action token 时间，
+  已知动作前缀及 state 使用 `time_embed(0)`。
+
+首次新建模型示例（先将 `vlm` 加载为需要的 EgoDex 微调权重）：
+
+```python
+from psi.config.model_psi0 import Psi0ModelConfig
+from psi.models.psi0 import Psi0Model
+
+cfg = Psi0ModelConfig(
+    action_architecture="dual_source_v1",
+    model_name_or_path="/absolute/path/to/egodex-vlm",
+    motion_checkpoint="/absolute/path/to/motion.ckpt",
+    motion_use_ema=True,  # 按所选权重身份明确设置
+    view_feature_dim=vlm.config.text_config.hidden_size,
+    n_conditions=0,
+)
+model = Psi0Model(cfg, vlm).to("cuda").train()
+output = model(
+    input_ids=input_ids, attention_mask=attention_mask,
+    pixel_values=pixel_values, image_grid_thw=image_grid_thw,
+    action_samples=noisy_actions, states=states, timestep=action_t,
+    motion_img_embs=motion_img_embs,  # [B,6,5,1024]
+    return_vlm_features=True,
+)
+# output.action, output.vlm_features.p_v, output.motion_features.p_m
+```
+
+`motion_img_embs` 必须是六个真实5Hz历史时刻的 DINO CLS＋4 register 特征，最后时刻对应 VLM 当前帧。
+两路复用同一份处理后的当前 RGB，历史窗口共享增强；DINO 权重身份、归一化和视觉尺寸必须遵守
+Motion checkpoint 的视觉协议，跨尺寸适配须显式声明。接口不会从张量形状推断这些来源关系。
+标准 transform／collator 会保留并堆叠该字段，三个 action trainer 会转交给模型；数据集需实际提供它。
+携带历史特征时，`observations` 必须已经是同一共享窗口处理后的当前 RGB，模型 transform 不再单独
+裁切或改变颜色；该路径要求关闭本地 `img_aug/view_aug`，窗口增强应在上游统一完成。
+现有单帧数据源不会自动得到历史，缺失时明确报错，不复制当前图或读取未来标签。
+
+训练每个 batch、四种 `predict_action*` 采样及三个 trainer 的评估入口均只提取一次两路特征；
+去噪循环复用它们。`motion_feature_seed=0` 默认使用独立 RNG 生成固定噪声，不改 action 的全局 RNG；
+相同 batch 布局和输入可复现，重排 batch 会改变样本对应的噪声位置。
+需要复用时可先调用 `extract_motion_features(motion_img_embs=...)`，再传 `motion_features=...`；
+`forward` 也接收本模型 `extract_vlm_features()` 产生的冻结 `vlm_features`。
+复用特征必须属于同一观察窗口，两套参数与提取上下文仍保持冻结，训练 block 在其外执行。
+
+新模式拒绝 layerwise VLM、VLM 解冻、旧 DiT／CLIP／FiLM／traj2ds 条件。
+state dropout 大于零时需启用 `state_null_token=True`，缺失 state 使用专门的 null token。
+新 head 的 tensor 架构签名可随 safetensors 保存；旧 joint head、缺参数或配置不匹配的权重会被拒绝，
+包括 `strict=False`。新任务从头训练新 head，不恢复旧 optimizer。
+完整 checkpoint 包含冻结的 Motion 网络权重；恢复时仍需显式原 Motion checkpoint 来重建其配置和统计协议。
+从本目录直接运行需 `PYTHONPATH=src:..`，或在专用环境安装仓库根目录的 MotionExpert 包。
+
+本轮不启动训练或安装环境。现有 HTTP／机器人服务还没有历史 DINO 请求字段，双来源模型应先通过
+上述 Python 接口使用；服务部署及数据集历史生成尚需按真实数据来源另行接线。
+
+```bash
+cd VLMExpert
+CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:..:. \
+  python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py \
+    tests/test_dual_source_action.py tests/test_dual_source_integration.py tests/test_dual_source_data.py
+```
+
+本次验证范围见 [双来源验证记录](../docs/dual_source_action_validation.json)。
+
+## VLM tokens 池化接口
 
 `Psi0Model` 在原来传入 action expert 的完整 hidden tokens 上增加 masked mean pooling，
 得到 `p_V`。输入包含图像、指令及聊天模板的有效 tokens，padding 不参与均值；不重新选择层、
-不增加归一化或可学习参数。FP16／BF16 输入使用 FP32 累加，输出保持输入 dtype，训练时保留梯度。
+不增加归一化或可学习参数。FP16／BF16 输入使用 FP32 累加，输出保持输入 dtype；
+`psi0_joint` 保留调用方的梯度模式，`dual_source_v1` 按本轮方案冻结提取。
 
 ```python
 features = model.extract_vlm_features(
@@ -16,19 +96,20 @@ p_v = features.p_v            # 默认 [B, D]
 ```
 
 `N` 是完整多模态序列长度，`D` 由所加载的 VLM 决定。默认取原来的最后一层，`V=1`；
-显式配置 `vlm_layer_indices` 时，`V` 是选中的层数，逐层池化，不混合各层。
+仅 `psi0_joint` 可显式配置 `vlm_layer_indices`，此时 `V` 是选中的层数，逐层池化，不混合各层。
+`dual_source_v1` 固定 `V=1`。
 `features.pooled_tokens` 始终是 `[B,V,D]`；`p_v` 在 `V>1` 时也是 `[B,V,D]`。
 `attention_mask` 为 `[B,N]` 的 0/1 或 bool；传 `None` 表示全部有效，每个样本至少需一个有效 token。
 
 `forward` 和四个 `predict_action*` 方法共用该提取接口，每个观察输入只提取／池化一次。
 默认输出保持原样；传入 `return_vlm_features=True` 可通过返回对象的 `.action`、
 `.vlm_features.p_v` 同时取得动作与摘要。完整 tokens 仍进入原注意力，特征对象另存于
-`joint_attention_kwargs["vlm_features"]`，供后续 action expert 改造使用。
-现有 action block 暂不消费 `p_V`，原 CLIP `pooled_projections` 路径保留。
+`joint_attention_kwargs["vlm_features"]`，供双来源 action expert 读取。
+`psi0_joint` 保留原 CLIP `pooled_projections` 路径；`dual_source_v1` 使用 `p_V`、`p_M` 和 action 时间调制。
 
 提取使用当前实例加载的 VLM 权重；使用 EgoDex 微调结果时需先加载对应权重。
 输入必须是观察 prefix，不能包含 teacher forcing 的真实 FAST 动作答案。
-本步不增加 GLOBAL token，不改 checkpoint 参数结构，不连接 MotionExpert，也不启动微调。
+池化接口不增加 GLOBAL token 或可学习参数；双来源 action head 是单独的新参数结构。
 
 轻量回归验证（PyTorch、pytest；接线检查用实际方法和模型替身，无需下载权重）：
 
@@ -38,7 +119,7 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. \
   python -m pytest -p no:cacheprovider -q tests/test_vlm_features.py
 ```
 
-本次 CPU／单卡 BF16 检查的范围及限制见 [验证记录](../docs/vlm_pooling_validation.json)。
+初始池化接口的 CPU／单卡 BF16 验证见 [池化验证记录](../docs/vlm_pooling_validation.json)。
 
 以下保留官方上游说明；源码快照来源见 [版本记录](../docs/psi0_upstream.json)。
 

@@ -1,7 +1,9 @@
+import os
+from pathlib import Path
 from tyro.conf import subcommand as cmd
 from typing import Union, Annotated, Optional, List
 from psi.config.config import ModelConfig
-from pydantic import Field
+from pydantic import Field, model_validator
 
 class Psi0ModelConfig(ModelConfig):
     ######################### hfm_action ############################
@@ -22,6 +24,7 @@ class Psi0ModelConfig(ModelConfig):
     img_chunk: int = 1 # ?
     n_cams: int = 1 
     use_obs: str = "add_token"
+    # DEPRECATED: kept only so legacy checkpoints load.
     dropout: float = 0.1
     noise_scheduler: str = "flow"
     train_diffusion_steps: int = 1000
@@ -57,7 +60,54 @@ class Psi0ModelConfig(ModelConfig):
     use_film: bool = False
     combined_temb: bool = False
 
+    # combined_temb consumes an SD3-style `pooled_projections` vector (global adaLN
+    # conditioning). It is produced by a FROZEN text encoder over the instruction.
+    pooled_text_encoder: Optional[str] = None            # None | "clip"
+    pooled_text_encoder_path: str = "openai/clip-vit-large-patch14"
+    pooled_projection_dim: int = 2048
+    # Optional on-disk cache of {instruction: pooled_emb}. Loaded at startup if it
+    # exists and re-saved after precompute, so the frozen embeddings are computed
+    # once and reused across runs (offline precompute). None = in-memory only.
+    pooled_cache_path: Optional[str] = None
+
+    """
+        Final action head: LayerNorm + (1+scale) identity path, zero-init modulation.
+        Set False only to reproduce checkpoints trained with the old `x * scale`
+        head, which could be unstable when multi-task finetuning.
+    """
+    final_layer_norm: bool = True
+
+    """
+        Query/key normalization inside the action-head attention ("rms_norm",
+        "layer_norm", or None), important for stabilizing the multi-task finetuning.
+    """
+    qk_norm: Optional[str] = None
+
     use_dit: bool = False
+
+    # layerwise  VLM conditioning fusion with action features
+    vlm_layer_indices: Optional[List[int]] = None
+
+    # Random state drop (train-only): with this probability the proprioceptive state is dropped.
+    # Default mode (state token in the VLM context): the token is masked out of attention.
+    # With state_as_action_token: the normalized state VECTOR is zeroed before projection, so the
+    # token, its bias and its positional embedding stay in place whether or not it was dropped.
+    state_drop_prob: float = 0.0
+
+    # Prepend the proprio state as token 0 of the ACTION stream ([state | a_1..a_Tp]) so it joins
+    # the action self-attention and AdaLN in every block, instead of being one token among the
+    # VLM context. 
+    state_as_action_token: bool = False
+
+    # With state_as_action_token: a dropped state (state_drop_prob) is replaced by a LEARNED
+    # null token instead of the zero vector's projection (Linear bias + state_pos). The zero
+    # vector is a legitimate pose in normalized space, so "no state" and "neutral joints" were
+    # aliased; a dedicated token lets the policy learn a distinct "state missing" embedding.
+    # Fresh parameter (missing from older action-header checkpoints; strict=False loads it).
+    state_null_token: bool = False
+
+    # DEPRECATED: kept only so legacy checkpoints load; use state_drop_prob instead.
+    state_feature_dropout: float = 0.2
 
     ################### qwen3vl ####################
     # Training Schedule
@@ -76,12 +126,13 @@ class Psi0ModelConfig(ModelConfig):
     # dataset_use: str = "egodex"               # [DataArguments] Dataset specification
     # output_dir: str = "./outputs/hfm_qwen3vl" # Output directory for checkpoints
     # cache_dir: str = "./cache/models"         # [TrainingArguments] Model cache location
-    gradient_checkpointing: bool = True  # [TrainingArguments] Enable gradient checkpointing
+    gradient_checkpointing: bool = False  # [TrainingArguments] Enable gradient checkpointing
 
-    # Learning Rate Configuration
-    lang_backbone_lr: float = 1e-5 
+    # Learning Rate Configuration.
+    lang_backbone_lr: float = 1e-7  # [TrainingArguments] LLM-specific LR
     mm_projector_lr: float = 1e-5   # [TrainingArguments] Projector-specific LR
     vision_tower_lr: float = 1e-6   # [TrainingArguments] Vision encoder LR
+
     optim: str = "adamw_torch"      # [TrainingArguments] Optimizer selection
 
     # Sequence Configuration
@@ -95,5 +146,20 @@ class Psi0ModelConfig(ModelConfig):
 
 
     # lora_r: int = 8                          # [TrainingArguments] LoRA r
-    # lora_alpha: int= 16                      # [TrainingArguments] LoRA alpha 
+    # lora_alpha: int= 16                      # [TrainingArguments] LoRA alpha
     # lora_dropout: float = 0.0                 # [TrainingArguments] LoRA dropout
+
+    @model_validator(mode="after")
+    def _resolve_psi_home_paths(self) -> "Psi0ModelConfig":
+        psi_home = os.environ.get("PSI_HOME", "/psi")
+        if psi_home is None:
+            return self
+        def _resolve(p: str | None) -> str | None:
+            if p is None or Path(p).is_absolute():
+                return p
+            candidate = Path(psi_home) / p
+            return str(candidate) if candidate.exists() else p
+        self.model_name_or_path = _resolve(self.model_name_or_path)
+        self.pretrained_action_header_path = _resolve(self.pretrained_action_header_path)
+        self.resnet_store_path = _resolve(self.resnet_store_path)
+        return self

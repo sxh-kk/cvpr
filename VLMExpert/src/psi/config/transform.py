@@ -5,35 +5,54 @@ import base64
 import copy
 import json
 import math
+import random
 import time
-from collections.abc import Mapping
 from io import BytesIO
 from typing import (TYPE_CHECKING, Annotated, Any, Dict, List, Optional, Tuple,
                     Union)
+from typing_extensions import Self, Annotated
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from torchvision.transforms import v2
 from psi.config.augmentation import *
 from psi.utils import get_asset_dir, pt_to_pil, resolve_path, pad_to_len
-from psi.data.humanoid.wbt_hand_protocol import (
-    NATIVE_DIM as WBT_NATIVE_DIM,
-    WBT_HAND_PROTOCOL,
-    WBT_NATIVE_PROTOCOL,
-    G1_BODY_JOINT_NAMES,
-    PROTOCOL_NAMES,
-    canonicalize_hand,
-    protocol_metadata,
-    validate_protocol_vector,
-    validate_robot_vector,
-)
 
 IGNORE_INDEX = -100
 
+
 class RepackTransform(BaseModel):
+    dataset_name: str = "default"
+    goal_sampling: bool = False
+    goal_future_offsets: List[float] = Field(default_factory=lambda: [1.0, 2.0, 3.0, 4.0])
+    goal_end_segment_prob: float = 0.5
+
+    # When True and meta/paraphrases.json was loaded for this dataset, render the
+    # task/subtask prompt from a random member of {canonical}+full+simple per sample.
+    use_paraphrases: bool = False
+    _para_lookup: dict | None = PrivateAttr(default=None)
+
+    def set_paraphrases(self, table: dict | None) -> None:
+        if not table:
+            self._para_lookup = None
+            return
+        lut: dict[str, dict[str, list[str]]] = {}
+        for section in ("tasks", "subtasks"):
+            lut[section] = {
+                str(canon).strip().lower(): [str(canon), *v.get("full", []), *v.get("simple", [])]
+                for canon, v in (table.get(section) or {}).items()
+            }
+        self._para_lookup = lut
+
+    def _maybe_paraphrase(self, text: str, section: str, is_training: bool) -> str:
+        if not (self.use_paraphrases and is_training) or self._para_lookup is None or not text:
+            return text
+        cands = self._para_lookup.get(section, {}).get(str(text).strip().lower())
+        return random.choice(cands) if cands else text
+
     def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
         return data
 
@@ -47,6 +66,39 @@ class ModelTransform(BaseModel):
         return data
 
 class FieldTransform(BaseModel):
+
+    @staticmethod
+    def _bounds(field_transform) -> Tuple[np.ndarray, np.ndarray]:
+        los, his = [], []
+        # modality_dims: dict[str, int] = {}
+        for action_key in field_transform.action_transform.apply_to:
+            mode = field_transform.action_transform.normalization_modes.get(action_key, "min_max")
+            stats = field_transform.action_transform.normalization_statistics.get(action_key, {})
+            if not stats:
+                continue
+            if mode in ("min_max", "bounds"):
+                lo = np.array(stats["min"], dtype=np.float32)
+                hi = np.array(stats["max"], dtype=np.float32)
+            elif mode in ("q99", "bounds_q99"):
+                lo = np.array(stats["q01"], dtype=np.float32)
+                hi = np.array(stats["q99"], dtype=np.float32)
+            elif mode == "mean_std":
+                std = np.array(stats["std"], dtype=np.float32)
+                mean = np.array(stats["mean"], dtype=np.float32)
+                lo, hi = mean - std, mean + std
+            else:
+                raise NotImplementedError(f"Unsupported normalization mode for denormalization: {mode}")
+            los.append(lo)
+            his.append(hi)
+            # modality_dims[action_key] = lo.shape[0]
+        if not los:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+        return np.concatenate(los), np.concatenate(his) #, modality_dims
+
+    def denormalize_L1_action_err(self, L1_err, dataset_name: list[str]):
+        # overwrite by subclass
+        ...
+
     def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
         return data
 
@@ -54,7 +106,7 @@ class DataTransform(BaseModel):
     repack: RepackTransform
     model: ModelTransform
     field: FieldTransform
-    
+
     def __call__(self, data:dict[str, Any], **kwargs) -> dict[str, Any]:
         data = self.repack(data, **kwargs)
         data = self.field(data, **kwargs)
@@ -82,6 +134,110 @@ class EgodexRepackTransform(BaseModel):
             instruction=data["instruction"].lower(),
             dataset=data.get("dataset_name", self.dataset_name),
             actions_mask=mask, #(Tp, Da)
+        )
+        
+class EgoverseRepackTransform(BaseModel):
+    """Repack raw EgoVerse data into the standard Psi 48 DoF action format.
+
+    Input keys (from EgoVerseDataset / MultiDataset):
+        observations.images.front_img_1  : torch.Tensor [3, H, W] float32 in [0,1]
+        actions_keypoints                : torch.Tensor [T, 140]
+        observations.state.keypoints     : torch.Tensor [140]
+        embodiment                       : str  "aria" | "mecka" | "scale"
+        metadata.task_description : str instruction
+
+    140-dim layout (keypoints_headframe_quat):
+        [0:7]    left wrist  (xyz + wxyz quaternion)
+        [7:70]   left  21 keypoints x 3 = 63 dims (head frame)
+        [70:77]  right wrist (xyz + wxyz quaternion)
+        [77:140] right 21 keypoints x 3 = 63 dims (head frame)
+
+    Output 48-dim (24 per arm):
+        [0:3]   wrist xyz
+        [3:9]   wrist 6D rotation (first two cols of R)
+        [9:24]  5 fingertip xyz (thumb, index, middle, ring, pinky)
+    """
+
+    dataset_name: str = "egoverse"
+    pad_action_dim: int | None = None
+    pad_state_dim: int | None = None
+
+    @staticmethod
+    def _to_numpy(t) -> np.ndarray:
+        if isinstance(t, torch.Tensor):
+            return t.detach().cpu().numpy()
+        return np.asarray(t, dtype=np.float32)
+
+    @staticmethod
+    def _quat_wxyz_to_rot6d(q: np.ndarray) -> np.ndarray:
+        """q: (..., 4) wxyz → (..., 6) first two columns of rotation matrix."""
+        w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+        col0 = np.stack([1 - 2*(y*y + z*z), 2*(x*y + w*z), 2*(x*z - w*y)], axis=-1)
+        col1 = np.stack([2*(x*y - w*z), 1 - 2*(x*x + z*z), 2*(y*z + w*x)], axis=-1)
+        return np.concatenate([col0, col1], axis=-1)
+
+    @staticmethod
+    def _fingertip_indices(embodiment: str) -> list:
+        """Return 5 fingertip joint indices within the 21-joint array."""
+        e = embodiment.lower()
+        if "mecka" in e or "scale" in e:
+            # MediaPipe ordering: THUMB_TIP=4, INDEX_TIP=8, MIDDLE_TIP=12, RING_TIP=16, PINKY_TIP=20
+            return [4, 8, 12, 16, 20]
+        # Aria ordering: THUMB_TIP=0, INDEX_TIP=1, MIDDLE_TIP=2, RING_TIP=3, PINKY_TIP=4
+        return [0, 1, 2, 3, 4]
+
+    def _convert_140_to_48(self, kp: np.ndarray, embodiment: str) -> np.ndarray:
+        """(..., 140) keypoints → (..., 48) compact representation."""
+        left_wrist = kp[..., 0:7]
+        left_kp21  = kp[..., 7:70].reshape(*kp.shape[:-1], 21, 3)
+        right_wrist = kp[..., 70:77]
+        right_kp21  = kp[..., 77:140].reshape(*kp.shape[:-1], 21, 3)
+
+        tip_idx = self._fingertip_indices(embodiment)
+
+        def arm_24(wrist, kp21):
+            xyz   = wrist[..., 0:3]
+            rot6d = self._quat_wxyz_to_rot6d(wrist[..., 3:7])
+            tips  = kp21[..., tip_idx, :].reshape(*kp21.shape[:-2], 15)
+            return np.concatenate([xyz, rot6d, tips], axis=-1)
+
+        return np.concatenate([arm_24(left_wrist, left_kp21),
+                                arm_24(right_wrist, right_kp21)], axis=-1)
+
+    def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
+        embodiment = data["embodiment"]
+
+        # Image: [3, H, W] float32 [0,1] → PIL RGB
+        img_np = self._to_numpy(data["observations.images.front_img_1"])
+        img_hw = (img_np * 255).clip(0, 255).astype(np.uint8).transpose(1, 2, 0)
+        observations = [Image.fromarray(img_hw)]
+
+        # State: [140] → [1, 48]
+        state_kp = self._to_numpy(data["observations.state.keypoints"]).astype(np.float32)
+        state_48 = self._convert_140_to_48(state_kp, embodiment)[np.newaxis]  # [1, 48]
+
+        # Actions: [T, 140] → [T, 48]
+        action_kp = self._to_numpy(data["actions_keypoints"]).astype(np.float32)
+        actions_48 = self._convert_140_to_48(action_kp, embodiment)  # [T, 48]
+
+        # Optional padding
+        states, _ = (pad_to_len(state_48, self.pad_state_dim)
+                     if self.pad_state_dim is not None else (state_48, None))
+        if self.pad_action_dim is not None:
+            actions, mask = pad_to_len(actions_48, self.pad_action_dim)
+        else:
+            actions = actions_48
+            mask = np.ones(actions.shape, dtype=bool)
+
+        instruction = data.get("metadata.task_description", "")
+
+        return dict(
+            observations=observations,          # list of PIL Image
+            states=states,                      # [1, 48]
+            actions=actions,                    # [T, 48]
+            instruction=instruction.lower(),
+            dataset=data.get("dataset_name", self.dataset_name),
+            actions_mask=mask,                  # [T, 48]
         )
 
 class HEPretrainRepackTransform(RepackTransform):
@@ -335,6 +491,14 @@ class RealRepackTransform(LerobotRepackTransform):
     num_past_frames: int = 0
     action_chunk_size: int = 30
 
+    # Temporal state augmentation (skipped when the transform kwargs carry no_aug=True,
+    # i.e. val split / deploy), same semantics as SonicRepackTransform: the proprio state
+    # paired with (o_t, a_t..a_{t+Tp-1}) is s_{t+k}, k ~ U{-J..J} frames
+    # (J = state_temporal_jitter), with probability state_temporal_jitter_prob; else k = 0.
+    # LeRobot clamps the window to the episode (boundary frame repeated). 0 = off.
+    state_temporal_jitter: int = 0
+    state_temporal_jitter_prob: float = 1.0
+
     pad_action_dim: int | None = None
     pad_state_dim: int | None = None
 
@@ -343,15 +507,27 @@ class RealRepackTransform(LerobotRepackTransform):
         for image_key in self.image_keys:
             delta[image_key] = [-t/fps for t in range(self.num_past_frames, -1, -1)]
 
-        delta[self.state_key] = [-t/fps for t in range(self.num_past_frames, -1, -1)]
+        J = self.state_temporal_jitter
+        # [-(past+J) .. +J]; __call__ slices the (past+1)-frame window at offset k.
+        delta[self.state_key] = [t/fps for t in range(-(self.num_past_frames + J), J + 1)]
         delta[self.action_key] = [t/fps for t in range(self.action_chunk_size)]
         return delta
 
     def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
-        states, _ = pad_to_len(data[self.state_key], self.pad_state_dim) if self.pad_state_dim is not None else (data[self.state_key], None)
+        states = np.array(data[self.state_key])  # (past+1+2J, Ds)
+        J = self.state_temporal_jitter
+        if J > 0:
+            k = 0
+            if not kwargs.get("no_aug", False) and np.random.rand() < self.state_temporal_jitter_prob:
+                k = int(np.random.randint(-J, J + 1))
+            # window index of s_t is past+J; keep the (past+1) frames ending at s_{t+k}
+            end = self.num_past_frames + J + k + 1
+            states = states[end - (self.num_past_frames + 1):end]
+        if self.pad_state_dim is not None:
+            states, _ = pad_to_len(states, self.pad_state_dim)
 
         if self.pad_action_dim is not None:
-            actions, mask = pad_to_len(data[self.action_key], self.pad_action_dim) 
+            actions, mask = pad_to_len(data[self.action_key], self.pad_action_dim)
         else:
             actions = data[self.action_key]
             mask = np.ones_like(actions, dtype=bool)
@@ -408,7 +584,7 @@ class SimpleRepackTransform(LerobotRepackTransform):
             "actions_mask": mask
         }
 
-class IdentityTransform(BaseModel):
+class IdentityTransform(FieldTransform):
     # boilerplate transform config
     # define primitive data types only! eg., int, float, str
     # container types are allowed eg., list[int], dict[str, float]
@@ -438,6 +614,11 @@ class ActionStateTransform(FieldTransform):
     state_min: Optional[List[float]] = None
     state_max: Optional[List[float]] = None
     normalize_state: bool = False  # whether to normalize states
+
+    # Gaussian noise on the NORMALIZED state (needs normalize_state; skipped when the
+    # transform kwargs carry no_aug=True): N(0, std) per dim in [-1, 1] units, skipping
+    # constant/padded dims, clipped back to [-1, 1]. 0.05 = 2.5% of a dim's range. 0 = off.
+    state_noise_std: float = 0.0
 
     pad_action_dim: int | None = None
     pad_state_dim: int | None = None
@@ -480,6 +661,8 @@ class ActionStateTransform(FieldTransform):
         action_max = np.array(self.action_max, dtype=np.float32)
         if self.normalize_state:
             data["states"] = self.normalize_state_func(data["states"])
+            if self.state_noise_std > 0 and not kwargs.get("no_aug", False):
+                data["states"] = self.perturb_state(data["states"])
 
         # tolerate near-zero, not just exact zero
         ill_mask = np.abs(action_max - action_min) < 1e-4 * (np.abs(action_max) + np.abs(action_min) + 1e-8) 
@@ -502,6 +685,15 @@ class ActionStateTransform(FieldTransform):
         data["actions"] = actions
 
         return data
+
+    def perturb_state(self, states: np.ndarray) -> np.ndarray:
+        """Additive Gaussian noise on normalized states; constant (zero-range/padded) dims untouched."""
+        state_min = np.array(self.state_min, dtype=np.float32)
+        state_max = np.array(self.state_max, dtype=np.float32)
+        live = np.abs(state_max - state_min) >= 1e-4 * (np.abs(state_max) + np.abs(state_min) + 1e-8)
+        noise = np.random.normal(0.0, self.state_noise_std, size=states.shape).astype(np.float32)
+        noise *= live.astype(np.float32)
+        return np.clip(states + noise, -1, 1).astype(np.float32)
 
     def normalize(self, action, **kwargs):
         data = {"actions": action}
@@ -529,7 +721,7 @@ class ActionStateTransform(FieldTransform):
         reversed_array = (array + 1) / 2 * (action_max - action_min) + action_min
         return reversed_array
 
-    def denormalize_L1_action_err(self, L1_err):
+    def denormalize_L1_action_err(self, L1_err, dataset_name: list[str] | None = None):
         """return denormalized L1 err loss"""
         
         array_class = torch.tensor if torch.is_tensor(L1_err) else np.array
@@ -553,7 +745,47 @@ class ActionStateTransform(FieldTransform):
                 result = where(action_norm_masks, 0.5 * L1_err * (high - low), L1_err) # type:ignore
             else:
                 result = 0.5 * L1_err * (high - low)
-            return result
+            
+            if dataset_name is None:
+                return result # backward compatibility
+            
+            # action L1 errors
+            avg_action_errors_denormed = result.mean(0)  # (Da,) NOTE only if the error is L1 (linear)
+            # hand_joints(14) + arm_joints(14) + rpy(3) + height(1) + vx + vy + vyaw + dyaw
+            # NOTE: the per-modality split below is HARDCODED to the legacy Psi0+AMO 36-D whole-body action layout.
+            assert avg_action_errors_denormed.shape[-1] == 36, (
+                "denormalize_L1_action_err per-modality breakdown is hardcoded to the G1 "
+                f"36-D whole-body action layout, but got action dim "
+                f"{avg_action_errors_denormed.shape[-1]}. Pass dataset_name=None to skip the "
+                "breakdown, or override denormalize_L1_action_err for this embodiment."
+            )
+            hand_joints_end = 14
+            arm_joints_end = 28
+            rpy_end = 31
+            height_end = 32
+            torso_vx_end = 33
+            torso_vy_end = 34
+            torso_vyaw_end = 35
+        
+            labels_denormed = [
+                "err_l1_hand_joints",
+                "err_l1_arm_joints",
+                "err_l1_torso_rpy",
+                "err_l1_height",
+                "err_l1_vx",
+                "err_l1_vy",
+                "err_l1_vyaw",
+                "err_l1_target_yaw",
+            ]
+        
+            avg_lr_action_err_denormed = np.split(
+                avg_action_errors_denormed, [
+                    hand_joints_end, arm_joints_end, rpy_end, height_end, torso_vx_end, torso_vy_end, torso_vyaw_end
+                ], axis=-1
+            )
+            dataset = dataset_name[0] if dataset_name is not None else "unknown"
+            return {dataset:dict(zip(labels_denormed, avg_lr_action_err_denormed))}
+            
         else:
             raise NotImplementedError
     
@@ -609,9 +841,7 @@ class Qwen3vlModelTransform(ModelTransform):
         no_aug: bool = False,
         vlm_processor = None, 
         action_tokenizer = None, 
-        global_token_id = None,
-        model_max_length = None,
-        max_instruction_tokens = 512,
+        is_eval: bool = False,
         **kwargs
     ) -> dict[str, Any]:
         if vlm_processor is None or action_tokenizer is None:
@@ -646,14 +876,16 @@ class Qwen3vlModelTransform(ModelTransform):
         state = data["states"]
         action = data["actions"]
         inputs, num_answer_tokens_list = self.build_qwenvl_inputs(
-            vlm_processor, action_tokenizer, [images], [instruction], [state], [action],
-            global_token_id=global_token_id, model_max_length=model_max_length,
-            max_instruction_tokens=max_instruction_tokens,
+            vlm_processor, action_tokenizer, [images], [instruction], [state], [action], is_eval=is_eval
         )
+        labels = copy.deepcopy(inputs["input_ids"])
+        # keep loss on the answer + EOS + formatting tokens
+        labels[:, : -(num_answer_tokens_list[0] + 2)] = IGNORE_INDEX 
+        inputs["labels"] = labels
         inputs["dataset_name"] = data.get("dataset", "unknown")
         inputs["raw_actions"] = action
         # inputs["raw_instruction"] = instruction
-        inputs["raw_images"] = np.stack([np.array(img) for img in images])
+        inputs["observations"] = np.stack([np.array(img) for img in images])
         return inputs
 
     def build_qwenvl_inputs(
@@ -664,19 +896,58 @@ class Qwen3vlModelTransform(ModelTransform):
         instructions,
         states,
         actions,
+        is_eval: bool = False,
         **kwargs,
     ):
-        from psi.models.global_vlm import build_vlm_inputs
+        """adapted from Qwen_VL_Interface.build_qwenvl_inputs"""
+        # Create messages: one message per sample
+        messages = []
+        num_answer_tokens_list = []
+        assert len(images) == len(
+            instructions
+        ), "Images and instructions must have the same length"
 
-        action_texts = [action_tokenizer(action) for action in actions]
-        num_answer_tokens_list = [len(vlm_processor.tokenizer.encode(
-            text, add_special_tokens=False,
-        )) for text in action_texts]
-        inputs = build_vlm_inputs(
-            vlm_processor, images, instructions, action_texts=action_texts,
-            global_token_id=kwargs.get("global_token_id"),
-            model_max_length=kwargs.get("model_max_length"),
-            max_instruction_tokens=kwargs.get("max_instruction_tokens", 512),
+        for imgs, instruction, action in zip(images, instructions, actions):
+            tokenized_action = action_tokenizer(action)
+            raw_action_tokens = vlm_processor.tokenizer(tokenized_action)["input_ids"]
+            num_answer_tokens = len(raw_action_tokens)
+            num_answer_tokens_list.append(num_answer_tokens)
+
+            message = []
+            content = [{"type": "image", "image": img} for img in imgs]
+            content.append({"type": "text", "text": instruction})
+            user_msg = {"role": "user", "content": content}
+            message.append(user_msg)
+            if not is_eval:
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": tokenized_action}
+                    ],  # squeeze batch dim
+                }
+                message.append(assistant_msg)
+            messages.append(message)
+
+        # Prepare text prompts using processor
+        # default process is json --> message --> texts --> input_ids
+        texts = [
+            vlm_processor.apply_chat_template(
+                m, tokenize=False, add_generation_prompt=is_eval
+            )
+            for m in messages
+        ]
+
+        try:
+            from qwen_vl_utils import process_vision_info
+        except:
+            raise ImportError("qwen_vl_utils not found, make sure to install it if using Qwen-VL model!")
+        image_inputs, video_inputs = process_vision_info(messages, image_patch_size=16)  # type: ignore
+        inputs = vlm_processor(
+            text=texts,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
         )
         return inputs, num_answer_tokens_list
 
@@ -744,426 +1015,6 @@ class HEPosttrainRepackTransform(RepackTransform):
             "obs_mask": data["obs_mask"], #torch.from_numpy(data["obs_mask"]),
         }
 
-
-class WBTNativePosttrainRepackTransform(RepackTransform):
-    """Repack raw WBT fields into the native 48D action-expert protocol."""
-
-    dataset_name: str = "wbt-native"
-    protocol: str = WBT_NATIVE_PROTOCOL
-    hand_protocol: str = WBT_HAND_PROTOCOL
-    num_past_frames: int = 0
-    action_chunk_size: int = 30
-    use_delta_actions: bool = False
-    hand_layout_id: str | None = None
-    state_hand_layout_id: str | None = None
-    action_hand_layout_id: str | None = None
-    preserve_raw_hand: bool = True
-    quaternion_tolerance: float = 5e-2
-    expected_fps: float = 30.0
-    pad_action_dim: int | None = None
-    pad_state_dim: int | None = None
-
-    @model_validator(mode="after")
-    def validate_config(self):
-        if self.protocol != WBT_NATIVE_PROTOCOL:
-            raise ValueError(
-                f"WBTNativePosttrainRepackTransform requires protocol={WBT_NATIVE_PROTOCOL!r}"
-            )
-        if self.hand_protocol != WBT_HAND_PROTOCOL:
-            raise ValueError(
-                f"WBTNativePosttrainRepackTransform requires hand_protocol={WBT_HAND_PROTOCOL!r}"
-            )
-        if self.num_past_frames < 0:
-            raise ValueError("num_past_frames must be non-negative")
-        if self.action_chunk_size <= 0:
-            raise ValueError("action_chunk_size must be positive")
-        if not np.isfinite(self.expected_fps) or self.expected_fps <= 0:
-            raise ValueError("expected_fps must be finite and positive")
-        if self.use_delta_actions:
-            raise ValueError("WBT-native-v1 contains absolute desired targets; delta actions are unsupported")
-        if not self.preserve_raw_hand:
-            raise ValueError("WBT-native-v1 requires raw hand provenance")
-        if not 0.0 < self.quaternion_tolerance < 1.0:
-            raise ValueError("quaternion_tolerance must be in (0, 1)")
-        if self.pad_action_dim not in (None, WBT_NATIVE_DIM):
-            raise ValueError("WBT-native-v1 action dimension is fixed at 48; padding to another dimension is invalid")
-        if self.pad_state_dim not in (None, WBT_NATIVE_DIM):
-            raise ValueError("WBT-native-v1 state dimension is fixed at 48; padding to another dimension is invalid")
-        return self
-
-    @staticmethod
-    def _to_numpy(value: Any, name: str) -> np.ndarray:
-        if hasattr(value, "detach"):
-            value = value.detach().cpu().numpy()
-        try:
-            array = np.asarray(value, dtype=np.float32)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{name} cannot be converted to float32") from exc
-        if not np.isfinite(array).all():
-            raise ValueError(f"{name} contains NaN or Inf")
-        return array
-
-    @classmethod
-    def _sequence(cls, value: Any, dim: int, name: str) -> np.ndarray:
-        array = cls._to_numpy(value, name)
-        if array.ndim == 1:
-            if array.shape[0] != dim:
-                raise ValueError(f"{name} expected ({dim},), got {array.shape}")
-            return array[None, :]
-        if array.ndim != 2 or array.shape[1] != dim:
-            raise ValueError(f"{name} expected shape (T,{dim}), got {array.shape}")
-        return array
-
-    @staticmethod
-    def _fit_sequence(
-        array: np.ndarray,
-        target_len: int,
-        *,
-        name: str,
-        pad_at_start: bool,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        if array.ndim != 2:
-            raise ValueError(f"{name} must be two-dimensional, got {array.shape}")
-        if array.shape[0] == 0:
-            raise ValueError(f"{name} cannot be empty")
-        if array.shape[0] > target_len:
-            raise ValueError(
-                f"{name} has {array.shape[0]} frames but protocol expects at most {target_len}; "
-                "check action_chunk_size/num_past_frames"
-            )
-        missing = target_len - array.shape[0]
-        if missing == 0:
-            return array.astype(np.float32, copy=False), np.ones(target_len, dtype=np.float32)
-        if pad_at_start:
-            padding = np.repeat(array[:1], missing, axis=0)
-            result = np.concatenate([padding, array], axis=0)
-            mask = np.concatenate(
-                [np.zeros(missing, dtype=np.float32), np.ones(array.shape[0], dtype=np.float32)]
-            )
-        else:
-            padding = np.repeat(array[-1:], missing, axis=0)
-            result = np.concatenate([array, padding], axis=0)
-            mask = np.concatenate(
-                [np.ones(array.shape[0], dtype=np.float32), np.zeros(missing, dtype=np.float32)]
-            )
-        return result.astype(np.float32, copy=False), mask
-
-    @staticmethod
-    def _fit_mask(value: Any, target_len: int, name: str) -> np.ndarray:
-        mask_array = np.asarray(value, dtype=np.float32)
-        if mask_array.ndim == 2:
-            if mask_array.shape[1] == 1:
-                mask_array = mask_array[:, 0]
-            else:
-                # The protocol masks complete action time steps.  Accept a
-                # repeated per-dimension mask only when all dimensions agree.
-                if not np.allclose(mask_array, mask_array[:, :1], equal_nan=False):
-                    raise ValueError(f"{name} must mask complete time steps, got {mask_array.shape}")
-                mask_array = mask_array[:, 0]
-        elif mask_array.ndim != 1:
-            raise ValueError(f"{name} must have shape (T,) or (T,D), got {mask_array.shape}")
-        mask = mask_array
-        if mask.shape[0] == 0:
-            raise ValueError(f"{name} cannot be empty")
-        if mask.shape[0] > target_len:
-            raise ValueError(f"{name} has {mask.shape[0]} entries but expected at most {target_len}")
-        if mask.shape[0] < target_len:
-            mask = np.concatenate([mask, np.zeros(target_len - mask.shape[0], dtype=np.float32)])
-        if not np.isfinite(mask).all() or np.any(
-            ~(np.isclose(mask, 0.0) | np.isclose(mask, 1.0))
-        ):
-            raise ValueError(f"{name} must contain only finite binary values")
-        return np.where(mask > 0.5, 1.0, 0.0).astype(np.float32)
-
-    @staticmethod
-    def _image_to_pil(image: Any) -> Image.Image:
-        if isinstance(image, Image.Image):
-            return image.convert("RGB")
-        if hasattr(image, "detach"):
-            image = image.detach().cpu().numpy()
-        array = np.asarray(image)
-        if array.ndim != 3:
-            raise ValueError(f"WBT image must have three dimensions, got {array.shape}")
-        if array.shape[0] in (1, 3) and array.shape[-1] not in (1, 3):
-            array = np.transpose(array, (1, 2, 0))
-        if array.shape[-1] == 1:
-            array = np.repeat(array, 3, axis=-1)
-        if array.shape[-1] != 3:
-            raise ValueError(f"WBT image must have three channels, got {array.shape}")
-        if array.size == 0:
-            raise ValueError("WBT image cannot be empty")
-        minimum = float(np.min(array))
-        maximum = float(np.max(array))
-        if np.issubdtype(array.dtype, np.floating):
-            if not np.isfinite(array).all():
-                raise ValueError("WBT image contains NaN or Inf")
-            # WBT reader returns uint8; this branch supports synthetic tests and
-            # alternate readers that return [0, 1] float images.
-            if minimum >= -1e-6 and maximum <= 1.0 + 1e-6:
-                array = array * 255.0
-            elif minimum < 0.0 or maximum > 255.0:
-                raise ValueError("WBT float image values must be in [0, 1] or [0, 255]")
-        elif minimum < 0.0 or maximum > 255.0:
-            raise ValueError("WBT integer image values must be in [0, 255]")
-        return Image.fromarray(np.rint(array).astype(np.uint8))
-
-    def _images(self, data: dict[str, Any], target_len: int, obs_mask: np.ndarray) -> list[Image.Image]:
-        if obs_mask.shape != (target_len,):
-            raise ValueError(
-                f"obs_mask must have shape ({target_len},), got {obs_mask.shape}"
-            )
-        image_key = "observation.images.head_stereo_left"
-        if image_key not in data:
-            for candidate in (
-                "observation.images.cam_0",
-            ):
-                if candidate in data:
-                    image_key = candidate
-                    break
-        if image_key not in data:
-            raise KeyError("WBT sample is missing observation.images.head_stereo_left")
-        raw = data[image_key]
-        if isinstance(raw, Image.Image):
-            values = [raw]
-        elif isinstance(raw, (list, tuple)):
-            values = list(raw)
-        elif hasattr(raw, "detach"):
-            array = raw.detach().cpu()
-            if array.ndim == 3:
-                values = [array]
-            elif array.ndim == 4:
-                values = [array[i] for i in range(array.shape[0])]
-            else:
-                raise ValueError(f"WBT image sequence has unexpected shape {tuple(array.shape)}")
-        else:
-            array = np.asarray(raw)
-            if array.ndim == 3:
-                values = [array]
-            elif array.ndim == 4:
-                values = [array[i] for i in range(array.shape[0])]
-            else:
-                values = []
-        if not values:
-            raise ValueError("WBT sample contains no observation images")
-        if len(values) > target_len:
-            raise ValueError(f"WBT sample has {len(values)} observation images but expected at most {target_len}")
-        if len(values) < target_len:
-            missing = target_len - len(values)
-            # Historical frames are padded with the earliest available frame.
-            values = [values[0]] * missing + values
-        return [self._image_to_pil(value) for value in values]
-
-    @staticmethod
-    def _instruction(data: dict[str, Any]) -> str:
-        value = data.get("task", data.get("instruction", ""))
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", errors="replace")
-        instruction = re.sub(r"\s+", " ", str(value)).strip().lower()
-        if not instruction:
-            raise ValueError("WBT task instruction cannot be empty")
-        return instruction
-
-    def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
-        sample_dataset = data.get("dataset_name")
-        if sample_dataset is not None and sample_dataset != self.dataset_name:
-            raise ValueError(
-                f"WBT transform received dataset_name={sample_dataset!r}; "
-                f"expected {self.dataset_name!r}"
-            )
-        sample_protocol = data.get("protocol")
-        if sample_protocol is not None and sample_protocol != self.protocol:
-            raise ValueError(
-                f"WBT sample protocol {data.get('protocol')!r} does not match {self.protocol!r}"
-            )
-        sample_hand_protocol = data.get("hand_protocol")
-        if sample_hand_protocol is not None and sample_hand_protocol != self.hand_protocol:
-            raise ValueError(
-                "WBT sample hand protocol does not match "
-                f"{self.hand_protocol!r}"
-            )
-        state_robot = self._sequence(
-            data["observation.state.robot_q_current"], 36, "observation.state.robot_q_current"
-        )
-        state_hand = self._sequence(
-            data["observation.state.hand_state"], 12, "observation.state.hand_state"
-        )
-        action_robot = self._sequence(
-            data["action.robot_q_desired"], 36, "action.robot_q_desired"
-        )
-        action_hand = self._sequence(data["action.hand_cmd"], 12, "action.hand_cmd")
-
-        # Validate root/body vectors before hand canonicalization so a malformed
-        # quaternion cannot be hidden by later concatenation.
-        validate_robot_vector(
-            state_robot,
-            name="observation.state.robot_q_current",
-            quaternion_tolerance=self.quaternion_tolerance,
-        )
-        validate_robot_vector(
-            action_robot,
-            name="action.robot_q_desired",
-            quaternion_tolerance=self.quaternion_tolerance,
-        )
-
-        state_layout = (
-            self.state_hand_layout_id
-            or data.get("state_hand_layout_id")
-            or self.hand_layout_id
-        )
-        action_layout = (
-            self.action_hand_layout_id
-            or data.get("action_hand_layout_id")
-            or self.hand_layout_id
-        )
-        if state_layout is None or action_layout is None:
-            raise ValueError(
-                "WBT hand layout is required; provide state/action_hand_layout_id or hand_layout_id"
-            )
-        canonical_state_hand, state_hand_meta = canonicalize_hand(
-            state_hand, str(state_layout), validate_range=True
-        )
-        canonical_action_hand, action_hand_meta = canonicalize_hand(
-            action_hand, str(action_layout), validate_range=True
-        )
-
-        states = np.concatenate([state_robot, canonical_state_hand], axis=-1).astype(np.float32)
-        actions = np.concatenate([action_robot, canonical_action_hand], axis=-1).astype(np.float32)
-        states, generated_obs_mask = self._fit_sequence(
-            states,
-            self.num_past_frames + 1,
-            name="states",
-            pad_at_start=True,
-        )
-        actions, generated_action_mask = self._fit_sequence(
-            actions,
-            self.action_chunk_size,
-            name="actions",
-            pad_at_start=False,
-        )
-
-        if "obs_mask" in data:
-            obs_mask = self._fit_mask(data["obs_mask"], states.shape[0], "obs_mask")
-        else:
-            obs_mask = generated_obs_mask
-        if "action_mask" in data:
-            action_mask = self._fit_mask(data["action_mask"], actions.shape[0], "action_mask")
-        elif "actions_mask" in data:
-            action_mask = self._fit_mask(data["actions_mask"], actions.shape[0], "actions_mask")
-        else:
-            action_mask = generated_action_mask
-        # A caller-provided mask may invalidate additional steps, but it may not
-        # mark sequence-padding inserted above as valid.
-        obs_mask = np.minimum(obs_mask, generated_obs_mask)
-        action_mask = np.minimum(action_mask, generated_action_mask)
-
-        validate_protocol_vector(
-            states, name="states", quaternion_tolerance=self.quaternion_tolerance
-        )
-        validate_protocol_vector(
-            actions, name="actions", quaternion_tolerance=self.quaternion_tolerance
-        )
-        supplied_metadata = data.get("protocol_metadata")
-        if supplied_metadata is not None:
-            if not isinstance(supplied_metadata, Mapping):
-                raise ValueError("protocol_metadata must be a mapping")
-            if supplied_metadata.get("protocol") != self.protocol:
-                raise ValueError(
-                    "WBT sample protocol metadata does not match "
-                    f"{self.protocol!r}"
-                )
-            if supplied_metadata.get("state_dim") != WBT_NATIVE_DIM or supplied_metadata.get("action_dim") != WBT_NATIVE_DIM:
-                raise ValueError("WBT protocol metadata must declare 48D state and action")
-            if supplied_metadata.get("dimensions") != list(PROTOCOL_NAMES):
-                raise ValueError("WBT protocol metadata has an incompatible dimension order")
-            if supplied_metadata.get("hand_protocol") != self.hand_protocol:
-                raise ValueError("WBT protocol metadata has an incompatible hand protocol")
-            sampling = supplied_metadata.get("sampling")
-            if (
-                not isinstance(sampling, Mapping)
-                or sampling.get("fps") != self.expected_fps
-            ):
-                raise ValueError("WBT protocol metadata has an incompatible sampling rate")
-            if (
-                supplied_metadata.get("use_delta_actions") is not False
-                or supplied_metadata.get("absolute_action") is not True
-            ):
-                raise ValueError("WBT protocol metadata must declare absolute actions")
-            root_metadata = supplied_metadata.get("root")
-            if (
-                not isinstance(root_metadata, Mapping)
-                or root_metadata.get("quaternion_order") != "wxyz"
-                or root_metadata.get("coordinate_frame") != "wbt_export"
-                or root_metadata.get("episode_relative_transform") is not False
-            ):
-                raise ValueError("WBT protocol metadata has incompatible root-frame semantics")
-            body_metadata = supplied_metadata.get("body")
-            if (
-                not isinstance(body_metadata, Mapping)
-                or body_metadata.get("joint_names") != list(G1_BODY_JOINT_NAMES)
-                or body_metadata.get("source_vector_slice") != [7, 36]
-                or body_metadata.get("units") != "radians"
-            ):
-                raise ValueError("WBT protocol metadata has an incompatible G1 body joint order")
-            metadata_layouts = supplied_metadata.get("hand_layout_ids", {})
-            metadata_state = metadata_layouts.get("state") if isinstance(metadata_layouts, Mapping) else None
-            metadata_action = metadata_layouts.get("action") if isinstance(metadata_layouts, Mapping) else None
-            if metadata_state != str(state_layout):
-                raise ValueError("WBT state hand layout conflicts with protocol metadata")
-            if metadata_action != str(action_layout):
-                raise ValueError("WBT action hand layout conflicts with protocol metadata")
-        action_mask_2d = np.repeat(action_mask[:, None], WBT_NATIVE_DIM, axis=1).astype(np.float32)
-        output: dict[str, Any] = {
-            "observations": self._images(data, states.shape[0], obs_mask),
-            "states": states,
-            "actions": actions,
-            "instruction": self._instruction(data),
-            "dataset": data.get("dataset_name", self.dataset_name),
-            "repo_id": data.get("repo_id"),
-            "protocol": self.protocol,
-            "hand_protocol": self.hand_protocol,
-            "state_hand_layout_id": str(state_layout),
-            "action_hand_layout_id": str(action_layout),
-            "hand_layout_ids": {
-                "state": str(state_layout),
-                "action": str(action_layout),
-            },
-            "actions_mask": action_mask_2d,
-            "obs_mask": obs_mask.astype(np.float32),
-            "protocol_metadata": supplied_metadata
-            or protocol_metadata(
-                state_hand_layout_id=str(state_layout),
-                action_hand_layout_id=str(action_layout),
-                use_delta_actions=False,
-                fps=self.expected_fps,
-            ),
-        }
-        if self.preserve_raw_hand:
-            output["raw_observation_hand"] = state_hand.copy()
-            output["raw_action_hand"] = action_hand.copy()
-            output["hand_provenance"] = {
-                "state": state_hand_meta,
-                "action": action_hand_meta,
-            }
-        return output
-
-    def delta_timestamps(self, fps: int) -> dict[str, list[float]]:
-        if fps <= 0:
-            raise ValueError("fps must be positive")
-        if abs(float(fps) - self.expected_fps) > 1e-6:
-            raise ValueError(
-                f"WBT-native-v1 expects {self.expected_fps:g} FPS, got {fps:g}"
-            )
-        return {
-            "observation.state.robot_q_current": [
-                -t / fps for t in range(self.num_past_frames, -1, -1)
-            ],
-            "observation.state.hand_state": [
-                -t / fps for t in range(self.num_past_frames, -1, -1)
-            ],
-            "action.robot_q_desired": [t / fps for t in range(self.action_chunk_size)],
-            "action.hand_cmd": [t / fps for t in range(self.action_chunk_size)],
-        }
-
 class MixedRepackTransform(RepackTransform):
     dataset_name: str = "mixed"
 
@@ -1198,7 +1049,14 @@ class Psi0ModelTransform(ModelTransform):
     color_jitter: ColorJitter = Field(default_factory=lambda: ColorJitter())
     gaussian_noise: GaussianNoise = Field(default_factory=lambda: GaussianNoise(mean=0, std=3, prob_skip=0.1))
     img_aug: bool = False
-    
+
+    # Random crop-and-resize-back viewport perturbation, applied after resize+center_crop
+    # at that resolution, before the color jitter. Like img_aug it is skipped when the
+    # caller passes no_aug=True (val split, deploy, mock clients).
+    view_aug: bool = False
+    view_aug_min_scale: float = 0.85
+    view_aug_prob: float = 1.0
+
     # for mixed dataset with different image sizes
     adaptive_resize: bool = False
     img_sizes: dict[str, Any] = Field(default_factory=lambda: {
@@ -1209,7 +1067,13 @@ class Psi0ModelTransform(ModelTransform):
     def __call__(
         self, data: dict[str, Any], vlm_processor=None, no_aug=False, **kwargs
     ) -> dict[str, Any]:
-        do_img_aug = False if no_aug else self.img_aug
+        """
+            ...
+            data["observations"]: List of PIL Images
+        """
+        # no_aug=True (val split, deploy, mock clients) disables every image augmentation.
+        do_img_aug = self.img_aug and not no_aug
+        do_view_aug = self.view_aug and not no_aug
         if self.adaptive_resize:
             assert data["dataset"] is not None
             match data["dataset"]:
@@ -1221,13 +1085,19 @@ class Psi0ModelTransform(ModelTransform):
                     target_size = (256, 256)
             resizer = ResizeImage(size=tuple(target_size))() # type: ignore
             center_crop = CenterCrop(size=tuple(target_size))() # type: ignore
+            view_size = tuple(target_size)
         else:
             resizer = self.resize()
             center_crop = self.center_crop()
-            
+            view_size = self.center_crop.size
+            if isinstance(view_size, int):
+                view_size = (view_size, view_size)
+
         t1 = v2.Compose([
             resizer,
             center_crop,
+            RandomViewPerturb(size=tuple(view_size), min_scale=self.view_aug_min_scale, prob=self.view_aug_prob)()
+                if do_view_aug else v2.Identity(),
             self.color_jitter() if do_img_aug else v2.Identity(),
         ])
 
@@ -1242,7 +1112,7 @@ class Psi0ModelTransform(ModelTransform):
         if "actions_mask" in data:
             inputs["actions_mask"] = data["actions_mask"]
 
-        inputs["raw_images"] = images
+        inputs["observations"] = images
         inputs['actions'] = data["actions"]
         inputs['states'] = data["states"]
         inputs['instruction'] = data["instruction"]

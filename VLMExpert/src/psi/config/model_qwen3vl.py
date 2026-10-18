@@ -1,5 +1,5 @@
 from tyro.conf import subcommand as cmd
-from typing import Union, Annotated, Literal
+from typing import Union, Annotated
 from psi.config.config import ModelConfig
 
 from .tokenizer import (
@@ -29,14 +29,6 @@ class Qwen3VLModelConfig(ModelConfig):
 
     # Sequence Configuration
     model_max_length: int = 8192 # [TrainingArguments] Max sequence length
-    max_instruction_tokens: int = 512
-
-    use_global_token: bool = False
-    global_token: str = "<GLOBAL>"
-    global_token_id: int | None = None
-    require_global_checkpoint: bool = False
-    pretraining_stage: Literal["egodex", "he", "mixed"] = "egodex"
-    attn_implementation: str = "flash_attention_2"
 
     lora_r: int = 8                          # [TrainingArguments] LoRA r
     lora_alpha: int= 16                      # [TrainingArguments] LoRA alpha 

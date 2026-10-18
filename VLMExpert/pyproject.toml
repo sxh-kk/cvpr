@@ -3,7 +3,7 @@ name = "psi"
 version = "0.0.0"
 description = "Psi: towards humanoid foundation model"
 readme = "README.md"
-requires-python = "==3.10.*"
+requires-python = "==3.11.*"
 dependencies = [
     "albumentations==1.4.18",
     "datasets==3.6.0",
@@ -24,10 +24,11 @@ dependencies = [
     "typer>=0.19.1",
     "tyro==0.9.32",
     "vuer[all]>=0.0.68",
-    "wandb>=0.20.0",
+    "wandb[media]>=0.20.0",
     "simplejpeg>=1.9.0",
     "dotenv",
     "gdown>=5.2.0",
+    "decord2",
 ]
 
 [build-system]
@@ -55,6 +56,7 @@ viz = [
     "transforms3d>=0.4.2",
     "vuer[all]>=0.0.68",
     "viser>=1.0.15",
+    "matplotlib",
     #"pin>=3.8.0",
     #"numpy<2.0.0",
 ]
@@ -64,14 +66,15 @@ psi = [
     "torch==2.7.0",
     "torchvision==0.22.0",
     "torchcodec==0.4.0",
-    "transformers==4.57.0",
+    "transformers==4.57.1",
     "deepspeed==0.17.1",
-    # "flash_attn==2.7.4.post1",
+    #"flash_attn==2.7.4.post1",
     "triton==3.3.0",
     "accelerate==1.7.0",
     "peft==0.17.1",
     "qwen-vl-utils==0.0.14",
     "sentencepiece",
+    "evdev<1.7",
     "lerobot @ git+https://github.com/songlin/lerobot.git@09929d8057b044b53aecaf5c6d7eb71f99e8beb9"
 ]
 
@@ -80,8 +83,66 @@ psi = [
 #   "nvidia-curobo[isaacsim]",
 #]
 
+egoverse = [
+    "projectaria-tools[all]==2.0.0",
+    "pyyaml",
+    "matplotlib",
+    "packaging",
+    "ipython",
+    "rich",
+    "hydra-core",
+    "hydra-submitit-launcher==1.2.0",
+    "black",
+    "gpustat",
+    "nvidia-ml-py",
+    "termcolor",
+    "pyquaternion",
+    "rospkg",
+    "av", # ==12.0.0
+    "dm-control==1.0.8",
+    "mink==0.0.13",
+    "mujoco==3.4.0",
+    "mujoco-py==2.1.2.14",
+    "submitit",
+    "arm_pytorch_utilities",
+    "pytorch-kinematics",
+    "lightning",
+    "positional-encodings[pytorch]",
+    "pandas",
+    "overrides",
+    "zarr==3.1.5",
+    "tabulate",
+    "timm",
+    "boto3",
+    "cloudpathlib",
+    "sqlalchemy",
+    "psycopg[binary]",
+    "ray",
+    "geomloss",
+    "tslearn",
+    "typing_extensions",
+    "pyarrow",
+    "prettytable",
+    "s5cmd",
+    "mediapy",
+    "pytest",
+    "pre-commit",
+    "ruff",
+]
+
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }]
+flash-attn = ["wheel", { requirement = "torch", match-runtime = true }]
 
 [project.scripts]
-serve_psi0 = "psi.deploy.psi0_serve_simple:main"
+serve_psi0_simple = "psi.deploy.serve_psi0_simple:main"
+serve_psi0_simple_multi = "psi.deploy.serve_psi0_simple_multi:main"
+serve_psi0_amo = "psi.deploy.serve_psi0_amo:main"
+serve_psi0_sonic = "psi.deploy.serve_psi0_sonic:main"
+serve_psi0_sonic_http = "psi.deploy.serve_psi0_sonic_http:main"
+serve_psi0_sonic_subgoal = "psi.deploy.serve_psi0_sonic_subgoal:main"
+serve_psi0_dexmate = "psi.deploy.serve_psi0_dexmate:main"
+download_ckpt = "psi.deploy.download_ckpt:main"
+upload_ckpt_hf = "psi.deploy.upload_ckpt_hf:main"
+upload_ckpt_ms = "psi.deploy.upload_ckpt_ms:main"
+download_ckpt_ms = "psi.deploy.download_ckpt_ms:main"
+upload_dataset_ms = "psi.deploy.upload_dataset_ms:main"

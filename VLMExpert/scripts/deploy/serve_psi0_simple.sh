@@ -2,7 +2,7 @@
 
 set -e
 
-source .venv-psi/bin/activate
+source "${PSI_VENV:-$([ -d /workspace/.venv-psi ] && echo /workspace/.venv-psi || echo .venv-psi)}/bin/activate"
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 echo "Serving on GPU $CUDA_VISIBLE_DEVICES"
@@ -16,7 +16,7 @@ fi
 RUN_DIR=$1
 CKPT_STEP=$2
 
-serve_psi0 \
+serve_psi0_simple \
     --host 0.0.0.0 \
     --port 22085 \
     --policy=psi0 \

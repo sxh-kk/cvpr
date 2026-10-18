@@ -1,13 +1,18 @@
 # cvpr
 
-MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert保留原工程。
+MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert同步官方Ψ₀工程。
 
 | 模块 | 当前用途 | 说明 |
 | --- | --- | --- |
 | MotionExpert | 5Hz历史5帧＋当前帧，预测未来5帧；一步完整11个hidden作为运动先验，可反传 | [接口与训练](MotionExpert/README.md) |
 | ImageProcess | 与Ψ₀共享当前RGB、尺寸和窗口增强 | [配置与接口](ImageProcess/README.md) |
 | pipeline | 从SMPL-H归档和MCAP／MP4提取原生30Hz DINO | [格式与命令](pipeline/README.md) |
-| VLMExpert | 原Ψ₀／Qwen工程 | [原说明](VLMExpert/README.md) |
+| VLMExpert | 官方Ψ₀／Qwen工程，上游 `cda3fdf` | [官方说明](VLMExpert/README.md) |
+
+VLMExpert于2026-10-18替换为官方Psi0 `main` 的固定快照，恢复官方训练、推理、SONIC与基线代码。
+此前GLOBAL token／WBT定制保留在Git历史中，本次不与MotionExpert接线。
+使用独立Python 3.11环境；源码版本、依赖和权重排除记录见 [上游快照](docs/psi0_upstream.json)，
+安装与本仓库的展开依赖约定见 [迁移说明](docs/MIGRATION.md#vlmexpert-环境与路径)。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
 v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，

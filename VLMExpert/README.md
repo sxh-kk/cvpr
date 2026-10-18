@@ -1,9 +1,4 @@
-本目录是 VLMExpert 的迁移快照，Python 包名仍为 `psi`。当前 GLOBAL token 预训练与
-WBT 适配见 [project.md](project.md) 和 [dataset_WBT.md](dataset_WBT.md)。
-本公开仓库不包含 checkpoint、控制模型权重或训练数据；环境、依赖和权重补齐方式见
-[迁移文档](../docs/MIGRATION.md)。下面保留原 PSI0 工程说明与引用信息。
-
-<h1 align="center">[RSS26'] Ψ₀: An Open Foundation Model <br/> Towards Universal Humanoid Loco-Manipulation
+<h1 align="center">[RSS'26] Ψ₀: An Open Foundation Model <br/> Towards Universal Humanoid Loco-Manipulation
 </h1>
 
 <p align="center">
@@ -31,7 +26,7 @@ $\Psi_0$ is an open vision-language-action (VLA) model for dexterous humanoid lo
 
 Our foundation model is capable of acquiring new long-horizontal dexterous loco-manipulation skill by fine-tuning using as few as 80 trajectories. ***Our key finding is that scaling the right data in the right way.***
 
-At the top, the $\Psi_0$ model consists of two end-to-end trained components: a vision–language backbone (System-2) and a multimodal diffusion transformer (System-1) action expert. The backbone is based on Qwen’s Qwen3-VL-2B-Instruct, which extracts vision–language features from observations and instructions. These features condition a flow-based multimodal diffusion transformer inspired by Stable Diffusion 3. The action expert (≈500M parameters) predicts future whole-body action chunks, enabling efficient fusion of visual, linguistic, and action representations. At the lowest level (System-0), an RL-based tracking controller executes the predicted lower-body action commands, ensuring stable and precise physical control.
+At the top, the $\Psi_0$ model consists of two end-to-end trained components: a vision–language backbone (System-2) and a multimodal diffusion transformer (System-1) action expert. The backbone is based on Qwen’s Qwen3-VL-2B-Instruct, which extracts vision–language features from observations and instructions. These features condition a flow-based multimodal diffusion transformer inspired by Stable **Diffusion** 3. The action expert (≈500M parameters) predicts future whole-body action chunks, enabling efficient fusion of visual, linguistic, and action representations. At the lowest level (System-0), an RL-based tracking controller executes the predicted lower-body action commands, ensuring stable and precise physical control.
 
 <p align="center">
   <img src="assets/media/arch.png" alt="Psi0 model" />
@@ -42,10 +37,12 @@ At the top, the $\Psi_0$ model consists of two end-to-end trained components: a 
 
 ## 📢 News & Updates
 
-* [2026-07-14] Released DreamZero baseline for SIMPLE.
-* [2026-06-13] Released SONIC integration for Psi-0.
-* [2026-06-03] 🎉🎉🎉 Psi-0 won the Best Paper Award at the 2nd 3D-LLM/VLA Workshop at CVPR 2026.
-
+- [x] [2026-09-13] Released new Psi-0 [checkpoints](#checkpoints) specifically trained for [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl) and its training recipes: [post-train](scripts/train/psi0/posttrain-psix-unifolm-g1-sonic1.0.sh) and [fine-tune](scripts/train/psi0/finetune-sonic-psi-dream-baseline.sh). Checkout out this [release node](examples/psi0_for_sonic.md).
+- [x] [2026-08-30] Released [SIMPLE SONIC wholebody training recipe](scripts/train/psi0/finetune-sonic-simple-psi0.sh).
+- [x] [2026-08-30] Released [docker support](#docker-support).
+- [x] [2026-07-14] Released DreamZero baseline for SIMPLE.
+- [x] [2026-06-13] Released SONIC integration for Psi-0.
+- [x] [2026-06-03] 🎉🎉🎉 Psi-0 won the Best Paper Award at the 2nd 3D-LLM/VLA Workshop at CVPR 2026.
 
 
 ## Table of Contents
@@ -98,7 +95,7 @@ Set up the $\Psi_0$ environment:
 > ℹ️ We manage the $\Psi_0$ environment and all the baselines through `uv` and they all share the same `src/` code.  See [Environment Management](baselines/README.md) for more details.
 
 ```
-uv venv .venv-psi --python 3.10
+uv venv .venv-psi --python 3.11
 source .venv-psi/bin/activate
 GIT_LFS_SKIP_SMUDGE=1 uv sync \
   --group serve \
@@ -109,29 +106,63 @@ GIT_LFS_SKIP_SMUDGE=1 uv sync \
 uv pip install flash_attn==2.7.4.post1 --no-build-isolation
 ```
 
-> If you want to support `SIMPLE` evaluation, you can use the following commands to install `SIMPLE` along with `Psi0`. See also [quickstart](examples/quick_start/psi.md).
 
-```
-git submodule update --init --recursive
-GIT_LFS_SKIP_SMUDGE=1 uv sync --all-groups --index-strategy unsafe-best-match --active
-uv pip install flash_attn==2.7.4.post1 --no-build-isolation
-UV_PROJECT_ENVIRONMENT=${pwd}/.venv-psi ./scripts/install_curobo.sh
-```
+> **Intel GPU (XPU) inference:** Psi0 supports inference on Intel GPUs. After `uv sync` above, install the XPU-enabled PyTorch wheels:
+> ```bash
+> uv pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/xpu
+> ```
+> Skip the `flash_attn` installation on XPU; FlashAttention is CUDA-only and Psi0 uses PyTorch SDPA when it is unavailable. The serving CLI defaults to `cuda:0`, so explicitly pass `--device xpu:0` when serving on XPU.
 
 Test installation, a version number should be displayed.
 ```bash
 python -c "import psi;print(psi.__version__);"
 ```
 
-Verify `SIMPLE` installation
-``` bash
-python -c "import simple; print(simple.__version__)"
-```
-
 Verify the shared `lerobot` stack is importable.
 ```bash
 python -c "from psi.data.lerobot.compat import LEROBOT_LAYOUT; print(LEROBOT_LAYOUT)"
 ```
+
+#### Docker Support
+
+Pull the prebuilt image from the GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/physical-superintelligence-lab/psi0:latest
+docker tag ghcr.io/physical-superintelligence-lab/psi0:latest psi:train
+```
+
+The retag is what lets `docker-compose.yml` find it — it refers to the image as
+`psi:${PSI_TAG:-train}`, and `PSI_TAG` overrides only the tag, not the registry
+path. Use a dated tag such as `:260830` to pin an exact build.
+
+The image holds **dependencies only** — python 3.11, torch 2.7 cu12 and
+flash-attn in `/workspace/.venv-psi`, on a plain CUDA base. Your checkout stays
+outside it and is bind-mounted, so `psi` is installed editable and source edits
+take effect on a container restart rather than a rebuild.
+
+Serve a checkpoint with it:
+
+```bash
+docker compose up serve-psi0-sonic-http
+```
+
+Every argument is overridable from the shell or `.env` (`PORT`, `RUN`,
+`CKPT_STEP`, `ACTION_EXEC_HORIZON`, `RTC_FLAG`, `GPUS`, ...), and
+`docker compose run --rm serve-psi0-sonic-http --help` lists the server's own
+options.
+
+If you want to build it locally:
+
+```bash
+docker compose build psi     # or: docker build -f scripts/train/Dockerfile -t psi:train .
+```
+
+See [scripts/train/README.md](scripts/train/README.md) for the enroot/cluster
+recipe and for how dependencies are pinned.
+
+<details>
+<summary> [Deprecated.] Psi-0 with AMO</summary>
 
 ### Data Collection
 > 📂 We open-sourced all the 9 real-world tasks. You can directly download the data and jump to the [Fine-Tuning](#training-real).
@@ -269,7 +300,7 @@ bash ./real/scripts/deploy_psi0-rtc.sh
 For detailed real-world deployment environment setup, please also refer to the dedicated documentation:
 
 [Real-World Teleoperation Guide](real/README.md)
-
+</details>
 
 <a id="psi0-sonic"></a>
 ### Ψ₀ with SONIC
@@ -346,8 +377,10 @@ bash ./real/scripts/deploy_psi0-sonic-rtc-robot.sh
 bash ./real/scripts/deploy_psi0-sonic-rtc-client.sh
 ```
 
-## Baselines
+<details>
+<summary>Baselines </summary>
 
+## Baselines
 <a id="groot-n16"></a>
 
 ### GR00T
@@ -407,6 +440,7 @@ See dedicated doc here [baseline/dp](baselines/dp/README.md)
 
 ### ACT
 See dedicated doc here [baseline/act](baselines/act/README.md)
+</details>
 
 ## Simulation
 
@@ -483,6 +517,8 @@ uv run --active --group psi --group serve serve_psi0 \
   --action-exec-horizon=24 \
   --rtc
 ```
+
+For Intel XPU, add `--device xpu:0` to the command above.
 
 Run open-loop evaluation (offline)
 
@@ -563,7 +599,7 @@ The policy rollout videos will be found in folder `third_party/SIMPLE/data/evals
 
 Download and cache the official `Qwen/Qwen3-VL-2B-Instruct` weights.
 ```
-scripts/predownload_qwen3vl.py
+python scripts/predownload_qwen3vl.py
 ```
 
 Pre-train on the [EgoDex dataset](https://github.com/apple/ml-egodex)
@@ -625,6 +661,20 @@ python scripts/save_posttrain_action_expert.py
 
 The released checkpoints on [HuggingFace Psi-Model](https://huggingface.co/USC-PSI-Lab/psi-model) is listed
 
+***Newest checkpoints for Psi-0 + SONIC whoblebody control***:
+
+| Checkpoint | Description | Remote Directory |
+|---|---|---|
+| $\Psi_0$ VLM<br/>(EgoDex) | Pre-trained VLM backbone (EgoDex 390K steps) | `psi0/pre.fast.2605160748.ckpt.ego390k` |
+| $\Psi_0$ VLM<br/>(Sonic-v1.0) | Post-trained VLM On [50H UnifoLM](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main/sonic)  | `psi0/postpre.sonic1.0.unifolm.2609092156.40k` |
+| $\Psi_0$ Action Expert<br/>(Sonic-v1.0) | Post-trained Action Expert On [50H UnifoLM](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main/sonic) | `psi0/postpre.sonic1.0.unifolm.2609092156.40k` |
+| $\Psi_0$ VLM + Action Expert <br/>(Sonic) | Fine-tuned VLM On `5h Psi-Dream data`  | `psi0/sonic-checkpoints/multi-task.psi-dream.2609092156` |
+|---|---|---|
+| $\Psi_0$ VLM<br/>(Sonic-v1.1) | Post-trained VLM On [50H UnifoLM](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main/sonic)  | `psi0/postpre.sonic1.1.unifolm.2609181726.40k` |
+| $\Psi_0$ Action Expert<br/>(Sonic-v1.1) | Post-trained Action Expert On [50H UnifoLM](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main/sonic) | `psi0/postpre.sonic1.1.unifolm.2609181726.40k` |
+
+`Old` Psi-0 + AMO decoupled wholebody control:
+
 | Checkpoint | Description | Remote Directory |
 |---|---|---|
 | $\Psi_0$ VLM<br/>(Baseline) | Pre-trained VLM backbone (EgoDex 200K steps + HE 30K steps) | `psi0/pre.fast.1by1.2601091803.ckpt.ego200k.he30k` |
@@ -645,10 +695,12 @@ Download the selected models
 > Edit `.env` to use `HF_ENDPOINT=https://hf-mirror.com` if needed.
 
 ```
+export CKPT_DIR=<Remote Directory>
+
 python scripts/data/download.py \
   --repo-id=USC-PSI-Lab/psi-model \
-  --remote-dir=<Remote Directory> \
-  --local-dir=$PSI_HOME/cache/checkpoints/<Remote Directory> \
+  --remote-dir=$CKPT_DIR \
+  --local-dir=$PSI_HOME/cache/checkpoints/$CKPT_DIR \
   --repo-type=model
 ```
 
@@ -691,6 +743,7 @@ uv pip install wandb==0.18.0
 
 update `torch` and `flash-attn`
 ```
+uv pip uninstall torch torchvision
 uv pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install flash-attn --no-build-isolation
 ```

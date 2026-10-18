@@ -35,95 +35,49 @@ DINO提取还需原始MCAP／MP4及DINO预训练权重，修改record中的原�
 
 ## VLMExpert 环境与路径
 
-目录名称是 `VLMExpert`，安装包和导入名仍为 `psi`。它依赖 Python 3.10、PyTorch 2.7.0、Transformers 4.57.0 等，完整声明见 `pyproject.toml` 与 `uv.lock`。
-与 MotionExpert 分开安装，避免不同 Transformers 版本互相覆盖。
+`VLMExpert` 于2026-10-18整体替换为 [官方Psi0](https://github.com/physical-superintelligence-lab/Psi0)
+`main` 的固定版本 `cda3fdfafe47cb6fa75400d013de1bd36e3cea05`，Python包名仍为 `psi`。
+除移除上游遗留的一行凭据注释外，源代码、配置和官方README保持该版本内容；此前GLOBAL token／WBT定制及其专用入口已退役，
+可从替换前的Git提交恢复。本次没有将官方Ψ₀与MotionExpert或ImageProcess接线。
+版本、展开依赖和排除文件记录见 [psi0_upstream.json](psi0_upstream.json)。
+`docs/inventory` 仍是初次迁移的历史快照，不用于核对本次更新。
 
-按原工程使用 uv：
+### 独立安装
+
+新版要求 **Python 3.11**、PyTorch 2.7.0、Transformers 4.57.1，LeRobot固定到
+`songlin/lerobot@09929d8057b044b53aecaf5c6d7eb71f99e8beb9`；完整版本以
+`VLMExpert/pyproject.toml` 和 `uv.lock` 为准。与MotionExpert、DINO提取环境分开安装，
+不要在正在运行的训练环境中升级依赖。
 
 ```bash
 cd VLMExpert
-uv venv .venv-psi --python 3.10
+uv venv .venv-psi --python 3.11
 source .venv-psi/bin/activate
 GIT_LFS_SKIP_SMUDGE=1 uv sync --group serve --group viz --group psi \
   --index-strategy unsafe-best-match --active
+# CUDA环境按官方说明另装Flash Attention：
 uv pip install flash_attn==2.7.4.post1 --no-build-isolation
 cp .env.sample .env
 ```
 
-`flash_attn` 的安装需要兼容 CUDA / 编译环境。CPU 单元测试与代码中的 SDPA 提取路径不需要执行 Flash Attention GPU 内核。
-`.env` 根据机器编辑；原训练入口要求它能够被 `load_dotenv()` 读取。
+`.env` 中的 `PSI_HOME`、数据、缓存和日志路径按本机设置，数据、权重、checkpoint和运行环境放在仓库外。
+CUDA、XPU、Docker、训练和部署的具体要求见 [官方README](../VLMExpert/README.md)。
+本次只同步源代码，没有安装或替换任何现有环境。
 
-| 变量 | 迁移配置 |
-| --- | --- |
-| `PSI_HOME` | 本机独立的缓存 / 数据 / 模型根目录，例如 `/data/psi` |
-| `DATA_HOME`、`HF_LEROBOT_HOME` | 数据与 LeRobot 数据根目录 |
-| `HF_HOME`、`TORCH_HOME`、`UV_CACHE_DIR` | 模型与依赖缓存目录 |
-| `HF_TOKEN` | 按模型 / 数据访问需求设置，保存在本机环境中 |
-| `WANDB_API_KEY`、`WANDB_ENTITY` | 按实际日志账号设置；默认 GLOBAL 启动脚本使用 wandb |
+官方README仍有引用已移除脚本的旧示例；启动前以实际 `scripts/train/psi0/` 脚本和
+`pyproject.toml` 注册入口为准。当前 `serve_psi0_simple` 仍硬性检查CUDA，未验收其XPU路径。
 
-`.env.sample` 中的 `/hfm` 是示例值，迁移时应替换。只复制 `.env.sample`；本次上传没有包含原 `.env`。
+### 展开的仿真与控制依赖
 
-### GLOBAL 预训练
+本仓库继续将 `third_party/SIMPLE`、`third_party/GR00T-WholeBodyControl` 及嵌套依赖展开为普通文件，
+按官方Psi0固定的子模块commit同步，而非跟随各依赖的最新分支。
+`VLMExpert/.gitmodules` 等上游文件保留来源信息，但当前Git仓库没有相应gitlink，
+因此不要使用官方README中的 `git submodule update --init --recursive` 补齐本仓库依赖。
+SIMPLE、cuRobo、Isaac Sim、机器人SDK等运行环境仍需按相应上游说明另行安装。
 
-外部准备 EgoDex、HE 数据，以及 `Qwen/Qwen3-VL-2B-Instruct` 模型。仓库内保留 FAST tokenizer 的词表与处理配置。
-两个阶段分别进行约 200K / 30K optimizer steps，正式启动前确认数据根目录、GPU 数、有效 batch size 与日志配置。
-
-```bash
-export PSI_PYTHON="$PWD/.venv-psi/bin/python"
-export CUDA_VISIBLE_DEVICES=0,1
-export EGODEX_DATA_ROOT=/data/egodex
-export HE_DATA_ROOT=/data/HE_RAW
-export QWEN_CHECKPOINT=/models/Qwen3-VL-2B-Instruct
-export FAST_CHECKPOINT="$PWD/src/fast/egodex-rel-50w-1x48-v2048-s100"
-
-bash scripts/train/psi0/pretrain-egodex-psi0-fast.sh
-```
-
-EgoDex 完成后，将实际产物导出到外部目录，再启动 HE：
-
-```bash
-export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-python scripts/save_pretrain_qwen3vl_backbone.py /models/egodex-run \
-  --output /models/egodex-global-export --dtype bfloat16
-bash scripts/train/psi0/pretrain-he-psi0-fast.sh /models/egodex-global-export
-```
-
-HE 是新阶段，加载 EgoDex 模型 / processor 后重新建立优化器、scheduler 和阶段步数；同阶段 resume 才恢复完整训练状态。
-模型、processor、tokenizer、特殊 token 配置与 `pretraining_metadata.json` 必须来自同一份产物。
-checkpoint 不在此仓库内，文档中的 `/models/...` 均由使用者另行提供。
-
-### 下游特征接口
-
-在 VLMExpert 环境中可按以下方式加载另行提供的 GLOBAL backbone：
-
-```python
-from PIL import Image
-import torch
-from psi.models.global_vlm import load_global_backbone, extract_global_features
-
-model, processor = load_global_backbone(
-    "/models/he-global-export", device="cuda:0", dtype=torch.bfloat16
-)
-features = extract_global_features(
-    model, processor, [[Image.open("/data/observation.jpg").convert("RGB")]],
-    ["Pick up the object."]
-)
-global_hidden = features.global_hidden
-ordinary_mask = features.ordinary_mask
-```
-
-输入不含真实动作答案；GLOBAL 特征通过一次前向得到。详细输入布局、mask、保存恢复与表示定义见 `VLMExpert/project.md`。
-独立评估入口是 `scripts/eval_global_vlm.py`，其输入 JSONL 需要预处理图像、instruction 和归一化动作。
-
-### WBT / 仿真 / 机器人依赖
-
-WBT 使用 `src/psi/config/train/posttrain_wbt_psi0_config.py`，默认数据根目录 `/hfm/data/WBT` 应改成实际路径。
-数据和动作协议说明见 `dataset_WBT.md`；仓库保留 `assets/stats/wbt_native_stats.json`。
-
-`third_party/SIMPLE`、`third_party/GR00T-WholeBodyControl` 与其中的依赖源码均已展开。
-此快照不需要执行 `git submodule update --init --recursive` 来补齐这些源码；上游仓库 URL 记录在 `upstream_dependencies.json`。
-原 checkout 缺少可用 Git 元数据，因此本次不声称这些目录对应某个已验证的上游 commit；当前仓库 commit 与文件 SHA-256 定义这份快照。
-
-需要 SIMPLE 仿真时，继续按原 README / `examples/quick_start/simple.md` 安装 SIMPLE、cuRobo、Isaac Sim 等运行依赖。
-源码与 SDK 资源不等于已安装的运行环境。AMO、SONIC、adapter、EgoVLA 网络等权重均须从原项目文档指向的位置另行准备，按原相对路径放回。
-第三方源码的本地新增文件可能被其 `.gitignore` 忽略，提交前可用 `git check-ignore` 检查；明确需要的新增源码可逐文件添加。
+模型权重和数据不随源码同步；例如AMO、SONIC、EgoVLA网络与checkpoint须从官方文档指定位置准备。
+大体积演示视频、Isaac USD／USDA以及本仓无法复用的新增仿真二进制资源亦不随本次源码同步，
+具体排除路径见版本记录，使用相应场景或机器人模型前从固定上游版本另行准备。
+展开依赖内的 `.gitattributes` 不复制，由根仓库统一管理Git LFS资源。
+保留原有必要的归一化及人体模型资源，不把训练权重重新提交到Git。
+仿真、真机部署及模型训练尚需在专用环境中验收；源码一致性与CPU测试不代表已通过这些运行验收。

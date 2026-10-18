@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # New action head + trainable EgoDex VLM/MotionExpert. Does not modify the baseline recipe.
 # Required: EGO_DEX_VLM_PATH, MOTION_EXPERT_CHECKPOINT, UNIFOLM_DINO_ROOT,
-#           UNIFOLM_DINO_TRAIN_ID, UNIFOLM_DINO_VAL_ID.
-# The packs must already expose motion_img_embs [6,5,1024] and matching processed RGB.
+#           UNIFOLM_DINO_TRAIN_ID, UNIFOLM_DINO_VAL_ID, UNIFOLM_DINO_CACHE.
+# Cache packs are native30Hz offline DINO, using the same canonical256x320 profile.
 # Review without starting workers: bash "$0" --dry-run [experiment]
 set -euo pipefail
 
@@ -13,9 +13,10 @@ if (( $# > 1 )); then echo "Usage: $0 [--dry-run] [experiment]" >&2; exit 2; fi
 
 : "${EGO_DEX_VLM_PATH:?Set the explicit EgoDex-pretrained VLM directory}"
 : "${MOTION_EXPERT_CHECKPOINT:?Set an explicit compatible MotionExpert checkpoint file}"
-: "${UNIFOLM_DINO_ROOT:?Set the UnifoLM data root with real aligned DINO history attached}"
-: "${UNIFOLM_DINO_TRAIN_ID:?Set the history-enabled training pack ID}"
-: "${UNIFOLM_DINO_VAL_ID:?Set the history-enabled validation pack ID}"
+: "${UNIFOLM_DINO_ROOT:?Set the UnifoLM data root, e.g. /gaozt-test1/datasets/UnifoLM}"
+: "${UNIFOLM_DINO_TRAIN_ID:?Set the original training pack ID}"
+: "${UNIFOLM_DINO_VAL_ID:?Set the original validation pack ID}"
+: "${UNIFOLM_DINO_CACHE:?Set the completed native30Hz DINO cache root with per-pack subdirectories}"
 
 recipe_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$recipe_root"
@@ -33,6 +34,17 @@ if (( ! dry_run )); then
     [[ -d "$EGO_DEX_VLM_PATH" ]] || { echo "Missing VLM directory: $EGO_DEX_VLM_PATH" >&2; exit 1; }
     [[ -f "$MOTION_EXPERT_CHECKPOINT" ]] || { echo "Missing MotionExpert checkpoint: $MOTION_EXPERT_CHECKPOINT" >&2; exit 1; }
     for pack_id in "$UNIFOLM_DINO_TRAIN_ID" "$UNIFOLM_DINO_VAL_ID"; do
+        [[ -s "$UNIFOLM_DINO_CACHE/$pack_id/manifest.json" ]] || {
+            echo "Missing completed DINO cache manifest: $UNIFOLM_DINO_CACHE/$pack_id/manifest.json" >&2; exit 1;
+        }
+        "$python_bin" - "$UNIFOLM_DINO_CACHE/$pack_id/manifest.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+if json.loads(path.read_text()).get("state") != "complete":
+    raise SystemExit(f"Incomplete DINO cache: {path}; finish extraction before training")
+PY
         for metadata in modality.json stats_psi0.json; do
             [[ -s "$UNIFOLM_DINO_ROOT/$pack_id/meta/$metadata" ]] || {
                 echo "Missing pack metadata: $pack_id/meta/$metadata" >&2; exit 1;
@@ -59,6 +71,7 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
     "--log.report_to=${REPORT_TO:-wandb}"
     "--data.root_dir=$UNIFOLM_DINO_ROOT" "--data.train_repo_ids=$UNIFOLM_DINO_TRAIN_ID"
     "--data.val_repo_ids=$UNIFOLM_DINO_VAL_ID"
+    "--data.dino-cache-root=$UNIFOLM_DINO_CACHE" --data.shared-image-profile=256x320
     --data.transform.repack.dataset-name=unifolm_sonic
     --data.transform.repack.image-keys observation.images.egocentric
     --data.transform.repack.instruction-key=task_description

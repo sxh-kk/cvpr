@@ -1050,6 +1050,9 @@ class MixedRepackTransform(RepackTransform):
     
 
 class Psi0ModelTransform(ModelTransform):
+    # Set from LerobotDataConfig when native DINO history is enabled. Geometry
+    # then belongs to that shared processor, before branching to either encoder.
+    shared_image_profile: str | None = None
     resize: ResizeImage = Field(default_factory=lambda: ResizeImage(size=(224)))
     center_crop: CenterCrop = Field(default_factory=lambda: CenterCrop(size=224))
     color_jitter: ColorJitter = Field(default_factory=lambda: ColorJitter())
@@ -1083,6 +1086,12 @@ class Psi0ModelTransform(ModelTransform):
                                  "across the entire history window; disable Psi0ModelTransform img_aug/view_aug")
             # This RGB was already processed alongside the supplied DINO history.
             images = data["observations"]
+            if getattr(self, "shared_image_profile", None) is not None:
+                from ImageProcess import SharedImageProcessor
+                expected_hw = SharedImageProcessor(self.shared_image_profile).profile.output_hw
+                if not images or any(np.asarray(image).shape != (*expected_hw, 3)
+                                     or np.asarray(image).dtype != np.uint8 for image in images):
+                    raise ValueError("Cached DINO and Psi0 current RGB must use the configured shared image profile")
         else:
             # no_aug=True (val split, deploy, mock clients) disables every image augmentation.
             do_img_aug = self.img_aug and not no_aug

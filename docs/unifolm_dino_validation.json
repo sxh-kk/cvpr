@@ -1,0 +1,155 @@
+{
+  "date_utc": "2026-10-18",
+  "baseline_commit": "e6a1dae74a8a83f7e7515096a5319c91a8e30fab",
+  "scope": "UnifoLM官方ZIP准备与原生30Hz DINO缓存/历史读取，统一Psi0共享RGB配置；不启动训练",
+  "source_sha256": {
+    "ImageProcess/configs/256x320.json": "6a1ad3564754d641d4febb1a30d261248fbbad534dd5652380cd1923948cbeb3",
+    "ImageProcess/processor.py": "6f1b78b3c2a2d987eec827693d0f2785fe39cf98cb079bc790828e1fe486d3be",
+    "VLMExpert/scripts/data/extract_unifolm_dino.py": "91ecd24a7e1b7ef7e05daab860b600b89c5f4335efca7e5b912d9b61fcc0118a",
+    "VLMExpert/scripts/data/prepare_unifolm.py": "cef9fb3f0a2df58f75c46b1c92bcdbb4d6b31003e1cbd2066d3f8b21872f82c5",
+    "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh": "28a9e26f1e404897d727999ea8b5af2b7b29b4f6e304799a38ee88e999073ecb",
+    "VLMExpert/src/psi/config/data_lerobot.py": "e445032e5bbfb7f8fcbf23bdbab4bbe04dfc80fe7d1f1f5cd528a1064d475ce6",
+    "VLMExpert/src/psi/config/transform.py": "0c6f2c58de480ae18a2378ebf3a58cbfe6e1e0363806d49374ee9e2a4e904fab",
+    "VLMExpert/src/psi/data/lerobot/dino_cache.py": "4acbcf11c403717bfb66659f83eca2e868799ff10e80519cb8e48a7a306404f4",
+    "VLMExpert/src/psi/data/lerobot/lerobot_ext.py": "f1f3592afbac674c26bf7da461629167271fd4e693f72be39b3fc6fc9b337b59",
+    "VLMExpert/src/psi/data/lerobot/motion_history.py": "f15aa4a1fe2dc4c8dba26ffc84974a45189059a7ebbe3b9415b15b3a98bc1825",
+    "VLMExpert/tests/test_dual_source_data.py": "8bd58fba7384debb55cb3475480c709670fd75839ee2e6bfa4a3890e23ae1496",
+    "VLMExpert/tests/test_extract_unifolm_dino.py": "4b5edc7e2a915ef2eaf9bd2be1d0a7f7625b4f5b4315063e527aa6537550ba3f",
+    "VLMExpert/tests/test_prepare_unifolm.py": "274af2082c0514a1d799d6ef3d5d4ad172d17f56561284a48b68a2893174e186",
+    "VLMExpert/tests/test_unifolm_dino_history.py": "4668b7fe2a856a43de9d888d44801b10c66a9450826844ed79b4cfee103b5697",
+    "pipeline/src/egomotion_pipeline/features.py": "7e5ab6fd864b337cfc28de6f0778251421cf2f23ac413cbb487ec45122568839"
+  },
+  "cpu": {
+    "passed": 64,
+    "subtests": 16,
+    "duration_seconds": 2.76,
+    "gpu_count": 0,
+    "numpy": "1.26.4",
+    "pillow": "11.3.0",
+    "command": "cd VLMExpert && OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/gaozt-test1/datasets/UnifoLM/.pipeline/imageprocess-psi0-deps:src:..:. /gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/dino-torch260-cu118/bin/python -m pytest -p no:cacheprovider -q tests/test_unifolm_dino_history.py tests/test_extract_unifolm_dino.py tests/test_dual_source_data.py tests/test_prepare_unifolm.py",
+    "coverage": [
+      "native30Hz帧/PTS与Parquet身份、完整1秒历史、中间帧/边无效过滤与nativephase保留",
+      "FP16/FP32缓存、mmap/LRU/fork/pickle和六行复制；完整profile/权重/source绑定，拒stale/incomplete",
+      "实际wrapper/config/model-transform方法AST、原action/state原idx与episode/sampleweight保留、共享uint8 RGB尺寸和逐像素一致",
+      "逐episode原子提交/恢复/跳过已完成编码、多shard锁及最终complete状态",
+      "官方包SHA/CRC、安全ZIP解压、越界/符号链接残留拒绝，外部文件不被覆盖",
+      "训练脚本在torchrun前拒绝extracting缓存，未启动模型/训练worker",
+      "持久HTTP分块：拒绝错误range/长度/编码、失败保留完成块、重跑跳过已验证块、损坏receipt恢复、最终官方全包SHA与symlink写入保护"
+    ]
+  },
+  "real_validation_cache": {
+    "passed": true,
+    "source": "/gaozt-test1/datasets/UnifoLM/unifolm_sonic_lerobot_val",
+    "cache": "/gaozt-test1/datasets/UnifoLM/dino/256x320/unifolm_sonic_lerobot_val",
+    "native_frames": 4688,
+    "eligible_samples": 4418,
+    "episodes": 9,
+    "feature_storage_dtype": "float16",
+    "feature_bytes": 48005120,
+    "gpu_count": 1,
+    "batch": 32,
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "real_dino": true,
+    "real_vlm": false,
+    "training_started": false,
+    "all_features_and_source_checksums_verified": true,
+    "all_histories_finite": true,
+    "worker_mmap_bound": 2,
+    "profile": {
+      "height": 256,
+      "implementation": "psi0-shared-rgb-pil-v1",
+      "input": "RGB uint8 HWC",
+      "normalization": "encoder_specific_outside_shared_processor",
+      "numpy_version": "1.26.4",
+      "output": "RGB uint8 HWC",
+      "pillow_version": "11.3.0",
+      "profile": {
+        "augmentation": {
+          "posttrain": {
+            "brightness": [
+              0.8,
+              1.2
+            ],
+            "contrast": [
+              0.8,
+              1.2
+            ],
+            "hue": [
+              -0.05,
+              0.05
+            ],
+            "random_order": true,
+            "saturation": [
+              0.8,
+              1.2
+            ]
+          },
+          "robust": {
+            "antialias": true,
+            "interpolation": "bilinear",
+            "keep_aspect_ratio": true,
+            "min_scale": 0.85,
+            "probability": 1.0
+          }
+        },
+        "geometry": {
+          "center_crop_hw": [
+            240,
+            320
+          ],
+          "grid_factor": 32,
+          "max_pixels": 16777216,
+          "min_pixels": 65536,
+          "output_hw": [
+            256,
+            320
+          ],
+          "output_interpolation": "bicubic",
+          "resize_hw": [
+            240,
+            320
+          ],
+          "resize_interpolation": "nearest"
+        },
+        "profile_id": "psi0_256x320_v1",
+        "schema_version": 1,
+        "source": {
+          "repository": "https://github.com/physical-superintelligence-lab/Psi0",
+          "revision": "2830f9367fc12ca49d9b4df4348726daae9db15d"
+        }
+      },
+      "profile_id": "psi0_256x320_v1",
+      "profile_sha256": "c0e155d336f3db4cc947944ff0d9b7afa3db283a088da0227579952fa24b45af",
+      "width": 320
+    },
+    "weights_sha256": "38ec7e9a6bff2cc86bf363a1d87c4ada1160e72b2e27de6e09d468fa412dc3b9",
+    "first_32_frames_recomputed_bit_exact": true,
+    "recomputed_max_absolute_difference": 0.0,
+    "current_vlm_rgb_matches_dino_input_bit_exact": true,
+    "read_seconds": 0.8885798971168697,
+    "gpu_peak_allocated_bytes": 1758138368,
+    "limits": "Direct real Parquet/MP4/cache and production history reader audit; full installed LeRobot/Qwen training stack not executed"
+  },
+  "dataset": {
+    "repo": "USC-PSI-Lab/psi-data",
+    "revision": "e78fb93cc28912a3031a10b8656d32d7f0a2b867",
+    "root": "/gaozt-test1/datasets/UnifoLM",
+    "train_zip_bytes": 38855909476,
+    "train_zip_sha256": "76434453893802090c91bd64ef47c258617494efcea76e2cfdb68295b1710cc9",
+    "val_zip_bytes": 33487126,
+    "val_zip_sha256": "3d264d6454d59e83be5dadaa17f122b732a8c6cb86a2429c33c1f4fc912fc4b7",
+    "state": "train_download_in_progress"
+  },
+  "review": [
+    "独立检查了提取/读取/原Sonic像素路径及pinned LeRobot边界源码；官方split遗留全量from/to不用于本地frame映射",
+    "修复prepare遗留symlink临时文件可覆盖外部目标的问题，原复现现在拒绝且外部文件保持不变",
+    "缓存匹配Psi0 uv.lock中的NumPy1.26.4/Pillow11.3.0；只在独立数据准备目录叠加两包，未修改现有Motion/DINO环境",
+    "原HF SDK遇响应解码错误退出会删除临时整包；改用持久8MiB HTTP范围下载，官方小范围206已实测，失败不丢已完成分块"
+  ],
+  "limits": [
+    "完整安装的LeRobot/Qwen3VL/EgoDex训练栈未运行；wrapper/config实际方法采用AST+生产reader验证，真实数据Parquet/MP4/cache与真实DINO另行验收",
+    "本轮不重复模型或分布式训练数值验收，不把数据读取耗时或单卡重算当完整训练吞吐",
+    "Motion预训练为H256xW480，本UnifoLM后训练明确使用相同DINO权重适配H256xW320",
+    "未启动UnifoLM训练，未停止/重启/改动正在运行的MotionExpert训练；HTTP服务历史缓冲仍需另接"
+  ]
+}

@@ -41,8 +41,11 @@ DINO提取还需原始MCAP／MP4及DINO预训练权重，修改record中的原�
 可从替换前的Git提交恢复。当前在该快照上增加了 VLM tokens 的 masked mean pooling 接口，以及
 `dual_source_v1` 双来源 action expert。新模式支持联合训练 VLM／Motion 与新 action expert，使用最后层 VLM tokens 和完整11个 motion hidden，
 由两路池化摘要及 action 时间调制串行 SA／CA-VLM／CA-Motion／FFN；旧 `psi0_joint` 路径保留。
-模块README说明了本地接口，后附官方说明。新模式接收真实历史 DINO 特征，数据集历史生成与现有服务入口尚需接线，
-不能直接把单帧官方训练／部署命令当作双来源运行入口。共享 RGB 协议由调用方遵守，未增加隐式图像变换。
+模块README说明了本地接口，后附官方说明。新模式接收真实历史 DINO 特征；UnifoLM 已新增原生30Hz
+提取器与 LeRobot 历史读取，数据位于 `/gaozt-test1/datasets/UnifoLM`，缓存以episode保存mmap。
+DINO 与当前 VLM RGB 共用 `data.shared_image_profile=256x320`，绑定完整配置、NumPy/Pillow版本与权重身份；
+迁移时源路径或文件身份改变会拒绝旧缓存，需按新路径重新验收。现有服务入口的历史缓冲仍需接线。
+不能直接把单帧官方部署命令当作双来源入口；数据准备和训练是分开的命令。
 完整恢复仍需原 Motion checkpoint／统计来重建其协议，联合更新后的 Motion 网络权重同时随完整模型保存。
 新任务使用模块 README 中的双来源 UnifoLM 配方，不恢复冻结阶段的 optimizer；两套 expert 各自也可显式冻结。
 版本、展开依赖和排除文件记录见 [psi0_upstream.json](psi0_upstream.json)。

@@ -638,6 +638,22 @@
   "local_extensions": [
     {
       "date": "2026-10-18",
+      "change": "接通UnifoLM官方SONIC数据准备、原生30Hz DINO提取及LeRobot历史6帧mmap读取；DINO缓存与Psi0共用shared_image_profile并匹配锁定图像依赖，保留原动作/state查询",
+      "paths": [
+        "VLMExpert/scripts/data/prepare_unifolm.py",
+        "VLMExpert/scripts/data/extract_unifolm_dino.py",
+        "VLMExpert/src/psi/data/lerobot/dino_cache.py",
+        "VLMExpert/src/psi/data/lerobot/motion_history.py",
+        "VLMExpert/src/psi/data/lerobot/lerobot_ext.py",
+        "VLMExpert/src/psi/config/data_lerobot.py",
+        "VLMExpert/src/psi/config/transform.py",
+        "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh"
+      ],
+      "validation": "docs/unifolm_dino_validation.json",
+      "note": "下载和特征准备不启动训练；原生缓存按同episode真实时间读取6个5Hz时刻，末帧与当前VLM RGB一致，不足历史/断点过滤；HTTP服务历史缓冲仍需接线"
+    },
+    {
+      "date": "2026-10-18",
       "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
       "change": "按UnifoLM主配方解冻VLM并联合训练MotionExpert与新action head；保留token及池化autograd、组件学习率、MoE动态unused DDP与冻结开关",
       "paths": [

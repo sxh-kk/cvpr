@@ -19,6 +19,8 @@ VLMExpert于2026-10-18替换为官方Psi0 `main` 的固定快照，恢复官方�
 由 `p_V/p_M/action time` 融合调制。训练与采样需提供真实历史 DINO `[B,6,5,1024]`，
 当前帧与 VLM 对齐；不会从单帧输入伪造历史。旧 `psi0_joint` 路径保留，新旧 head checkpoint 不兼容。
 UnifoLM 配方解冻两套 expert，DINO 保持冻结；VLM 使用官方分组学习率，Motion 使用独立学习率。
+UnifoLM 放在 `/gaozt-test1/datasets/UnifoLM`，原生30Hz DINO 提取与历史6帧读取已接通，
+缓存和 Ψ₀ 共用 `shared_image_profile=256x320`；数据准备命令见 [UnifoLM 数据链路](VLMExpert/README.md#unifolm-下载dino-提取与读取)。
 Python接口、数据与服务接线边界见 [双来源说明](VLMExpert/README.md#本仓库扩展双来源-action-expert)。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。

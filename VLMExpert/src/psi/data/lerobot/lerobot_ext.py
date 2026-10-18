@@ -85,12 +85,60 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
             video_backend="pyav",
         )
         self._cache = {}
+        self.motion_history = None
+        if data_cfg.dino_cache_root is not None:
+            from pathlib import Path
+            from types import SimpleNamespace
+            from .motion_history import MotionHistoryIndex
+            packs = getattr(self.base_dataset, "_datasets", None) or [self.base_dataset]
+            ids = data_cfg.train_repo_ids if split == "train" else data_cfg.val_repo_ids
+            self.motion_history = MotionHistoryIndex(
+                data_cfg.dino_cache_root, packs, ids,
+                [Path(data_cfg.root_dir) / repo_id for repo_id in ids],
+                data_cfg.transform.repack.image_keys[0],
+                shared_image_profile=data_cfg.shared_image_profile,
+                max_open_episodes=data_cfg.dino_max_open_episodes,
+            )
+            # Official split metadata may retain ranges from the unsplit pack.
+            # LeRobot clamps action/state queries using these in-memory ranges;
+            # derive them from actual local rows, never stale JSON global offsets.
+            for pack, ranges in zip(packs, self.motion_history.source_episode_ranges):
+                size = max(ranges) + 1
+                starts = torch.full((size,), -1, dtype=torch.long)
+                stops = torch.full((size,), -1, dtype=torch.long)
+                for episode, (start, stop) in ranges.items():
+                    starts[episode], stops[episode] = start, stop
+                pack.episode_data_index = {"from": starts, "to": stops}
+            # TransformableDataset's existing mixture iterator expects these
+            # episode views. Keep this API instance-local so legacy iteration
+            # retains its original plain-LeRobot path.
+            self.datasets = [SimpleNamespace(sharded_trajectories=[[
+                episode for pack, episode in self.motion_history.episode_slices if pack == index
+            ]]) for index in range(len(packs))]
+            self.iter_episode = self._iter_motion_episode
 
     def __getitem__(self, idx) -> dict:
-        return self.base_dataset[idx]
+        if self.motion_history is None:
+            return self.base_dataset[idx]
+        # Query all actions/states using the original index and unchanged
+        # LeRobot delta_timestamps; only the set of eligible current rows shrinks.
+        sample = dict(self.base_dataset[int(self.motion_history.original_indices[idx])])
+        if "motion_img_embs" in sample:
+            raise ValueError("Source dataset already supplies motion_img_embs; do not mix two history providers")
+        sample["motion_img_embs"] = self.motion_history.get_history(idx)
+        return self.motion_history.process_current_rgb(sample)
 
     def __len__(self):
-        return len(self.base_dataset)
+        return len(self.base_dataset) if self.motion_history is None else len(self.motion_history.original_indices)
+
+    def _iter_motion_episode(self, eps_idx, dataset_index=None):
+        matches = [key for key in self.motion_history.episode_slices
+                   if key[1] == eps_idx and (dataset_index is None or key[0] == dataset_index)]
+        if len(matches) != 1:
+            raise ValueError("Choose an eligible episode and dataset_index for unambiguous DINO-history iteration")
+        rows = self.motion_history.episode_slices[matches[0]]
+        for index in range(rows.start, rows.stop):
+            yield self[index]
 
     def frame_task_weights(self, rules: dict[str, float]) -> torch.Tensor:
         """Per-frame sampling weight from `rules` {task substring (lower) -> weight}.
@@ -114,6 +162,8 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
                     per_task[int(ti)] = max(ws)
             chunks.append(per_task[task_index])
         weights = np.concatenate(chunks)
+        if self.motion_history is not None:
+            weights = weights[self.motion_history.original_indices]
         assert len(weights) == len(self), f"weights {len(weights)} != frames {len(self)}"
         boosted = weights != 1.0
         if boosted.any():
@@ -132,14 +182,22 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
 
     @property
     def episode_data_index(self):
+        if self.motion_history is not None:
+            ranges = list(self.motion_history.episode_slices.values())
+            return {"from": torch.tensor([item.start for item in ranges], dtype=torch.long),
+                    "to": torch.tensor([item.stop for item in ranges], dtype=torch.long)}
         return self.base_dataset.episode_data_index # type: ignore
 
     @property
     def num_episodes(self):
+        if self.motion_history is not None:
+            return len(self.motion_history.episode_slices)
         return self.base_dataset.num_episodes
     
     @property
     def num_frames(self):
+        if self.motion_history is not None:
+            return len(self)
         return self.base_dataset.num_frames
     
     @property

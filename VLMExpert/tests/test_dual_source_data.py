@@ -156,6 +156,19 @@ def test_history_path_keeps_processed_current_rgb_without_applying_image_ops(act
     assert output["motion_img_embs"] is data["motion_img_embs"]
 
 
+def test_history_transform_enforces_the_configured_shared_rgb_profile(actual_data_methods):
+    model = _transform_chain(actual_data_methods).model
+    model.shared_image_profile = "256x320"
+    data = _processed_model_input()
+
+    output = model(data, no_aug=True)
+    assert output["observations"] is data["observations"]
+    assert output["observations"][0].size == (320, 256)
+    for invalid in (Image.new("RGB", (224, 224)), np.zeros((256, 320, 3), dtype=np.float32)):
+        with pytest.raises(ValueError, match="shared image profile"):
+            model({**data, "observations": [invalid]}, no_aug=True)
+
+
 @pytest.mark.parametrize("option", ["img_aug", "view_aug"])
 def test_history_path_rejects_independent_random_augmentation(actual_data_methods, option):
     model = _transform_chain(actual_data_methods).model

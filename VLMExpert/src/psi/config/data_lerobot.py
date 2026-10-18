@@ -9,11 +9,16 @@ import json
 if TYPE_CHECKING:
     from psi.data.dataset import TransformableDataset
 
-from psi.config.transform import ActionStateTransform
+from psi.config.transform import ActionStateTransform, Psi0ModelTransform
 class LerobotDataConfig(DataConfig):
     root_dir: str
     train_repo_ids: List[str] = Field(default_factory=list)
     val_repo_ids: List[str] = Field(default_factory=list)
+    # Optional native30Hz offline DINO cache root (per-pack subdirectories).
+    # The same named/JSON ImageProcess profile governs cached DINO and current VLM RGB.
+    dino_cache_root: Optional[str] = None
+    shared_image_profile: str = "256x320"
+    dino_max_open_episodes: int = 8
 
     # Per-frame sampling weights by task, train split only: entries "<substring>=<weight>",
     # matched case-insensitively against the frame's task string (meta/tasks.jsonl). A frame
@@ -51,6 +56,34 @@ class LerobotDataConfig(DataConfig):
             candidate = Path(psi_home) / p
             return str(candidate) if candidate.exists() else p
         self.root_dir = _resolve(self.root_dir)
+        self.dino_cache_root = _resolve(self.dino_cache_root)
+        return self
+
+    @model_validator(mode="after")
+    def check_dino_history(self) -> "LerobotDataConfig":
+        if self.dino_cache_root is None:
+            return self
+        from ImageProcess import SharedImageProcessor
+        model = self.transform.model
+        repack = self.transform.repack
+        if not isinstance(model, Psi0ModelTransform):
+            raise ValueError("dino_cache_root is supported only by Psi0ModelTransform")
+        if model.img_aug or model.view_aug or model.adaptive_resize:
+            raise ValueError("Cached DINO requires one shared image profile; disable independent img_aug/view_aug/adaptive_resize")
+        if getattr(repack, "num_past_frames", 0) != 0:
+            raise ValueError("Cached DINO supplies history separately; VLM image must be the single current frame")
+        if len(getattr(repack, "image_keys", [])) != 1:
+            raise ValueError("DINO history requires exactly one configured current VLM image key")
+        if type(self.dino_max_open_episodes) is not int or self.dino_max_open_episodes < 1:
+            raise ValueError("dino_max_open_episodes must be a positive integer")
+        profile = SharedImageProcessor(self.shared_image_profile).profile
+        if model.shared_image_profile not in (None, self.shared_image_profile):
+            raise ValueError("Psi0 model and DINO data must use the same shared_image_profile")
+        model.shared_image_profile = self.shared_image_profile
+        # Serialized model config describes the shared output rather than stale224.
+        # Actual geometry runs once in the reader, and model transform bypasses it.
+        model.resize.size = tuple(profile.output_hw)
+        model.center_crop.size = tuple(profile.output_hw)
         return self
 
     @model_validator(mode="after")

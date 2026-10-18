@@ -52,7 +52,9 @@ output = model(
 `motion_img_embs` 必须是六个真实5Hz历史时刻的 DINO CLS＋4 register 特征，最后时刻对应 VLM 当前帧。
 两路复用同一份处理后的当前 RGB，历史窗口共享增强；DINO 权重身份、归一化和视觉尺寸必须遵守
 Motion checkpoint 的视觉协议，跨尺寸适配须显式声明。接口不会从张量形状推断这些来源关系。
-标准 transform／collator 会保留并堆叠该字段，三个 action trainer 会转交给模型；数据集需实际提供它。
+标准 transform／collator 会保留并堆叠该字段，三个 action trainer 会转交给模型。
+UnifoLM 的 LeRobot wrapper 在配置 `dino_cache_root` 后，会从原生缓存读取历史并处理共享当前 RGB，
+无需把整份特征写入 Parquet；其他数据源仍需提供真实历史。
 携带历史特征时，`observations` 必须已经是同一共享窗口处理后的当前 RGB，模型 transform 不再单独
 裁切或改变颜色；该路径要求关闭本地 `img_aug/view_aug`，窗口增强应在上游统一完成。
 现有单帧数据源不会自动得到历史，缺失时明确报错，不复制当前图或读取未来标签。
@@ -74,13 +76,91 @@ state dropout 大于零时需启用 `state_null_token=True`，缺失 state 使�
 完整 checkpoint 包含联合更新后的 Motion 网络权重；恢复时仍需显式原 Motion checkpoint 来重建其配置和统计协议。
 从本目录直接运行需 `PYTHONPATH=src:..`，或在专用环境安装仓库根目录的 MotionExpert 包。
 
+### UnifoLM 下载、DINO 提取与读取
+
+数据根目录为 `/gaozt-test1/datasets/UnifoLM`，与 EgoSuite、EgoExo-4D-HM 等并列。
+使用 [官方 SONIC 数据包](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/e78fb93cc28912a3031a10b8656d32d7f0a2b867/sonic)，
+固定 revision `e78fb93cc28912a3031a10b8656d32d7f0a2b867`。训练 ZIP 为38,855,909,476字节，
+下载准备脚本按8MiB持久分块保存，校验每次 HTTP 206 的范围与完整长度，失败只重试当前块；
+重跑复用已完成且本地 SHA 匹配的块。最终以官方整包 SHA256、解压 CRC 和 train/val 共享统计验收，
+安全拒绝越界 ZIP 或符号链接残留。本地分块 SHA 用于恢复校验，不是官方分块校验值。
+脚本只准备数据，不启动训练；已存在的数据需通过原成员 CRC 才能复用。
+
+```bash
+# 从仓库根目录运行；下载仅使用 Python 标准库，数据与缓存始终在仓库外。
+python VLMExpert/scripts/data/prepare_unifolm.py --root /gaozt-test1/datasets/UnifoLM
+# 默认64个并发请求，可用 --download-workers 调整；完成块保存在 .pipeline/downloads。
+# 已完整下载时可用 --skip-download，只校验与解压。
+```
+
+两套 pack 保留官方 action/state/SONIC1.1 tokens、split 与元数据。目录布局：
+
+```text
+/gaozt-test1/datasets/UnifoLM/
+  archives/official/sonic/           # 固定版本 ZIP
+  unifolm_sonic_lerobot_train/      # 原始 LeRobot pack
+  unifolm_sonic_lerobot_val/
+  dino/256x320/
+    unifolm_sonic_lerobot_train/
+      manifest.json
+      episodes/00000000/{features.npy,frames.npz,receipt.json}
+    unifolm_sonic_lerobot_val/
+  .pipeline/                       # 下载／提取日志、收据及本机验证记录
+```
+
+**DINO 缓存与 Ψ₀ 读取端共用 `data.shared_image_profile`，当前为 `256x320`。**
+唯一几何来源是 [ImageProcess 配置](../ImageProcess/configs/256x320.json)：
+共享中间处理后输出 H256×W320；DINO 只再做自己的 rescale／ImageNet normalization，关闭二次 resize/crop。
+模型 transform 的 profile 与最终 resize/crop 配置自动同步，缓存分支校验输入 RGB 的尺寸与 uint8 类型。
+完整 profile/hash/实现、NumPy/Pillow 版本、DINO 本地权重/config SHA 和原始视频／Parquet 身份随缓存保存。
+提取与读取需匹配 Ψ₀ `uv.lock` 的 NumPy1.26.4／Pillow11.3.0；不一致会明确拒绝。
+这次后训练使用与 Motion 预训练 H256×W480 相同的 DINO 权重，并显式适配到 H256×W320；
+原 Motion 预训练的图像配置和缓存不修改。
+
+```bash
+python VLMExpert/scripts/data/extract_unifolm_dino.py \
+  --dataset-root /gaozt-test1/datasets/UnifoLM/unifolm_sonic_lerobot_val \
+  --output /gaozt-test1/datasets/UnifoLM/dino/256x320/unifolm_sonic_lerobot_val \
+  --model-path /gaozt-test1/datasets/MixEgoMotion/weights/dinov2-with-registers-large/e4c89a4e05589de9b3e188688a303d0f3c04d0f3 \
+  --shared-image-profile 256x320 --device cuda:0 \
+  --batch-size 32 --workers 4 --inference-precision bf16 --storage-dtype float16
+# 提取训练集时把 dataset-root/output 的 pack ID 换为 unifolm_sonic_lerobot_train。
+```
+
+每个 episode 保存**所有原生30Hz**特征 `[T,5,1024]`，不保存 Motion hidden，后续 Motion 可继续联合训练。
+当前配置使用 BF16 encoder inference／FP16 存储，读取时每次复制六行；DINO 参数冻结。
+同一批参数可以通过 `--num-shards N --shard-index I` 分配到多个独立 GPU 进程共写同一输出根目录，
+所有 shard 必须使用同一 profile、权重、精度与 episode 选择。每个 episode 有独立锁，
+写入完成后才提交 receipt；只有所有 episode 齐全才把 manifest 标为 complete。
+原参数重跑会复用已提交 episode，未完成 episode 重新提取；来源或配置改变时拒绝复用。
+
+训练读取设置：
+
+```python
+# LerobotDataConfig 字段；动作、state 与原来的 delta_timestamps 查询保持一致。
+dino_cache_root = "/gaozt-test1/datasets/UnifoLM/dino/256x320"
+shared_image_profile = "256x320"
+dino_max_open_episodes = 8
+```
+
+wrapper 按原始 row/episode/frame/timestamp 建立过滤映射，逐时刻取
+`t-1.0, t-0.8, t-0.6, t-0.4, t-0.2, t`，返回 `[6,5,1024]` 的 `motion_img_embs`；
+VLM 当前帧保持原动作查询的30Hz时刻。缺少真实一秒历史、跨 episode、缺帧、时间断点、
+任一中间原生帧无效的窗口都排除，不重复首帧、不借未来图像。
+过滤后的任务采样权重及 episode 迭代同步调整；官方 split 元数据遗留的旧全量范围不用于本地行映射。
+特征以每 worker 有界 LRU/mmap 按需读取，不预载整份缓存。
+当前离线缓存关闭随机颜色／裁切增强，也拒绝独立 `img_aug/view_aug/adaptive_resize`；
+若要随机增强，需要两路共用增强窗口并在线运行冻结 DINO，不能复用这份确定性缓存。
+数据与 GPU 验证范围见 [UnifoLM 验证记录](../docs/unifolm_dino_validation.json)。
+
 ### UnifoLM 联合训练配方
 
 使用 [posttrain-dual-source-unifolm.sh](scripts/train/psi0/posttrain-dual-source-unifolm.sh)，
-必须显式提供 EgoDex VLM、Motion checkpoint 和已准备好的 UnifoLM 历史数据路径／ID；
+必须显式提供 EgoDex VLM、Motion checkpoint、UnifoLM 数据路径／ID，以及
+`UNIFOLM_DINO_CACHE=/gaozt-test1/datasets/UnifoLM/dino/256x320`；
 脚本的 `--dry-run` 可先打印命令，不启动训练；`MOTION_USE_EMA=1/0` 指定初始化权重选择。
-数据仍需实际提供对齐的 `motion_img_embs` 与共享当前 RGB，
-直接使用原始单帧 UnifoLM 数据不会自动生成这些字段。
+数据 wrapper 自动把已完成的原生 DINO 缓存接入 `motion_img_embs`，并生成同 profile 的当前 RGB；
+缺少或未完成的缓存明确报错，下载 ZIP 本身不会自动产生 DINO。
 
 | 参数组 | 初始学习率 | 来源 |
 | --- | --- | --- |
@@ -101,8 +181,8 @@ Motion 仅冻结当前 hidden 接口不使用的运动输出头、被完整遮�
 该模式 DDP 使用 `find_unused_parameters=True, static_graph=False`。
 新 head 从头初始化，不能沿用冻结阶段或原 joint head 的 optimizer 状态。
 
-本轮不启动训练或安装环境。现有 HTTP／机器人服务还没有历史 DINO 请求字段，双来源模型应先通过
-上述 Python 接口使用；服务部署及数据集历史生成尚需按真实数据来源另行接线。
+数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
+双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。
 
 ```bash
 cd VLMExpert

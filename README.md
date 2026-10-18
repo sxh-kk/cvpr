@@ -4,7 +4,7 @@ MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert保留原�
 
 | 模块 | 当前用途 | 说明 |
 | --- | --- | --- |
-| MotionExpert | 5Hz历史5帧＋当前帧，预测未来5帧；一步11hidden均值作为运动先验，可反传 | [接口与训练](MotionExpert/README.md) |
+| MotionExpert | 5Hz历史5帧＋当前帧，预测未来5帧；一步完整11个hidden作为运动先验，可反传 | [接口与训练](MotionExpert/README.md) |
 | ImageProcess | 与Ψ₀共享当前RGB、尺寸和窗口增强 | [配置与接口](ImageProcess/README.md) |
 | pipeline | 从SMPL-H归档和MCAP／MP4提取原生30Hz DINO | [格式与命令](pipeline/README.md) |
 | VLMExpert | 原Ψ₀／Qwen工程 | [原说明](VLMExpert/README.md) |
@@ -20,6 +20,7 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 
 模型已去掉可学习GLOBAL token。`forward_features()` 在 `t=1` 完整Gaussian上前向一次，返回
 `one_step_hidden [B,11,768]` 和严格的 `one_step_global = one_step_hidden.mean(1) [B,768]`。
+下游使用完整 `one_step_hidden`；`one_step_global` 保留为可选摘要及既有冻结读出的接口。
 保留autograd，未来标签可用性不影响部署输入。self-attention Q/K/V全归一化，cross context独立归一化。
 架构为 `e7_smplh12_hands21_meanpool_qkvnorm_v2`，旧GLOBAL／旧注意力checkpoint拒绝直接恢复；
 旧第60轮热启动配置已移除，当前配置从头建立新任务。
@@ -42,6 +43,11 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 具体命令、采样与解释边界见 [冻结运动先验验证](MotionExpert/README.md#冻结运动先验验证)。
 支持在已验收20／100轮job上只读复用样本和基线，仅新增第160轮提取、读出及配对比较；
 冻结先验的train／val指标与全量test动作指标分别报告，原20／100轮结果保留。
+完整hidden另用 `MotionExpert.probe_tokens` 和 `MotionExpert.token_probe_fit` 对比历史6／未来5／全部11与DINO，
+四组读出头各290,886参数，保留时间与输入有效mask；不在读取前求均值或降维。
+协议与限速命令见 [完整token等参数读出对照](MotionExpert/README.md#完整token等参数读出对照)。
+第100轮四组、三个读出seed的GPU对照已完成；完整11个hidden相对DINO的腕位移误差在EgoSuite／HM
+分别降低约11.8%／7.0%。11与未来5的差异较小，不能据此证明历史重建损失必要或真实下游收益。
 配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。
 修复流程状态位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_repair.json`。
 当前训练PID、日志和启动配置位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_training.json`。

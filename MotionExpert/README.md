@@ -1,7 +1,7 @@
 # MotionExpert
 
 在5Hz上读取历史5帧＋当前帧图像，联合重建历史运动并预测未来5帧。当前图像与Ψ₀当前图像相同。
-后训练在完整高斯噪声 `t=1` 上执行一次网络调用，得到11个motion hidden，直接mean pooling成一个global token；
+后训练在完整高斯噪声 `t=1` 上执行一次网络调用，得到完整11个motion hidden供下游输入，同时提供mean pooling摘要；
 该接口保留反传能力，下游模型不在本模块内。**没有可学习GLOBAL token。**
 
 ## 时间、图像与条件
@@ -279,7 +279,7 @@ encoder = DinoEncoder(json.load(open("pipeline/configs/dino.local.json")))
 window = encoder.encode_window(history_rgb, stage="posttrain", seed=123)
 img_embs = torch.from_numpy(window["img_embs"])[None].to("cuda")
 features = expert.forward_features({"img_embs": img_embs}, seed=0)
-prior = features["one_step_global"]
+prior = features["one_step_hidden"]  # [B,11,768]，保留所有时刻；不预先mean pooling
 # Ψ₀使用window["rgb"][-1]；下游loss经prior反传更新运动网络。
 ```
 
@@ -351,6 +351,79 @@ cd /root/workspace/wbc/guanzerong/cvpr
 四项配对组95%区间均在0以上。HM接触切换F1从0.2361提高至0.2623，其余分量存在取舍。
 在这项冻结位移读出中，100轮为三者中较好的候选；结果不直接等同于完整test动作或下游收益。
 报告与新增GPU记录：`/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-frozen-prior20-100-160-20261018T050747947054Z/`。
+
+## 完整token等参数读出对照
+
+`probe_tokens` 只补提第100轮的完整 `one_step_hidden [B,11,768]`，复用已验收20／100轮job的
+30,704个train窗、7,604个val窗、标签、DINO和逐窗噪声，不重新扫描归档或拟合原来的ridge。
+同一次专家前向的hidden分别取历史／当前6个、未来5个和全部11个，另设历史6帧的DINO 30-token基线。
+未来hidden仍经过历史图像条件和全窗口attention；此对照只检验token读取价值，不能证明历史重建监督的因果收益。
+四组都预测未来5帧的双腕位移、相机地面参考系XY位移与转向、双脚接触和相对当前帧的接触状态变化，
+共70维编码目标。位移统一在当前帧固定的地面参考系中计算；接触变化指端点状态不同，
+不表示两个时刻之间曾发生过任意切换。本实验不测量完整245维动作的重建误差。
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python -u \
+  -m MotionExpert.probe_tokens \
+  --reuse-job /gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-frozen-prior20-100-20261017T153935Z \
+  --job-dir /gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/token-probe-new-run \
+  --gpus 0,1,2,3,4,5,6,7 --batch-size 128 --sleep-seconds 12 --memory-fraction .06
+
+/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/motionexpert-torch260-cu118/bin/python -u \
+  -m MotionExpert.token_probe_fit \
+  --job /gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/token-probe-new-run \
+  --device cuda:0 --batch-size 256 --max-epochs 40 --patience 6 \
+  --seeds 17 29 43 --sleep-seconds .02
+```
+
+提取必须保持基线的batch大小与逻辑分组；当前为B128。硬top-k MoE在不同batch的浮点舍入下可能改变路由，
+因此通过增加休眠限速，不缩小batch或放宽旧特征配对容差。物理GPU子集可逐波执行原8个逻辑分片。
+只在提取验收完成后运行读出。四组均使用4个可学习query的attention汇聚和70维线性输出，
+每组严格为290,886个可训练参数，不在读出前mean pooling。
+运动768维按固定半正交矩阵等距升为1024维；DINO保留原生1024维，不做PCA或降维。
+三个运动分支共享同一变换和统计；时间编码保留原索引，DINO保留CLS/register身份并屏蔽无效图像token。
+等参数量不代表特征内在秩、编码器或输入token计算量完全相同。
+
+每个seed的四组使用相同初始化和批次顺序；只在原train内部人物／录制连通组holdout选择轮数，
+再从相同初始化用全train拟合，val只评分。特征及目标统计分别仅由当前拟合分区估计。
+报告三个独立读出seed的指标均值、标准差、逐seed配对连通组区间，以及RMSE、接触切换和有效覆盖。
+三个seed不是三次MotionExpert训练，也不将预测集成为一个结果。
+三个seed复用同一逐窗噪声，不估计更换噪声或重新训练专家带来的不确定性。
+本次使用新的attention读出，分数不能与旧mean＋ridge或DINO PCA＋ridge直接归因比较。
+
+产物保存在独立job：`tokens.npy`、`image-valid.npy`、`extraction-complete.json`、
+`token-*-head.pt`、`token-metrics.json`、`token-report.md`及各阶段GPU检查。
+优先使用空闲GPU；共享训练GPU时会争用算力，应明确记录并限速，不能保证零吞吐影响。
+`control.json` 和 `fit-control.json` 的 `paused`／`sleep_seconds` 仅控制诊断，不操作训练。
+
+2026-10-18，第100轮EMA的四组对照已完成。以下为7,604个val窗上三个独立读出seed的均值±标准差，
+按未来0.2至1.0秒的五个时距汇总有效观测；每组均为290,886参数。
+
+| 来源 | 输入 | 双腕位移cm↓ | 参考XY位移cm↓ | 转向°↓ |
+|---|---|---:|---:|---:|
+| EgoSuite | 历史6（含当前） | 12.171 ± 0.180 | 7.617 ± 0.199 | 6.151 ± 0.189 |
+| EgoSuite | 未来5 | 11.913 ± 0.015 | 7.143 ± 0.058 | 5.947 ± 0.082 |
+| EgoSuite | 全部11 | 11.632 ± 0.148 | 7.111 ± 0.126 | 5.829 ± 0.055 |
+| EgoSuite | DINO历史6帧 | 13.194 ± 0.270 | 8.921 ± 0.343 | 6.878 ± 0.253 |
+| EgoExo4D-HM | 历史6（含当前） | 29.009 ± 0.172 | 18.080 ± 0.177 | 14.662 ± 0.135 |
+| EgoExo4D-HM | 未来5 | 28.851 ± 0.200 | 18.039 ± 0.210 | 14.744 ± 0.012 |
+| EgoExo4D-HM | 全部11 | 28.712 ± 0.272 | 18.006 ± 0.168 | 14.891 ± 0.044 |
+| EgoExo4D-HM | DINO历史6帧 | 30.864 ± 0.211 | 20.628 ± 0.289 | 15.502 ± 0.234 |
+
+全部11个相对DINO的双腕误差降低约11.8%／7.0%，参考XY误差降低约20.3%／12.7%；
+两来源三个seed的上述配对组bootstrap 95%区间均低于0，未做多重比较校正。
+全部11与未来5的腕误差差值仅约0.281cm／0.139cm，部分区间跨0，HM一个seed排序反转；
+不能据此断言11个在各项任务上都更好，也不能证明历史重建损失的因果收益。
+脚接触仍需看balanced accuracy和状态变化：EgoSuite全部11的这两项仅0.5420／F1 0.0414，
+其接触正类约92.94%，较高的普通接触F1不能单独作为有效运动证据。
+
+八卡B128完整hidden提取与旧均值特征逐窗精确一致；单卡B256完成12个head、24项分阶段GPU检查，
+34项相关CPU回归通过。全部内部拟合按patience停止，无40轮预算触顶。
+正式训练未停止、未重启或改配置；诊断限速共享GPU，不宣称零吞吐影响。
+分析、完整指标、配对区间与独立review保存在：
+`/gaozt-test1/datasets/MixEgoMotion/.pipeline/jobs/motionexpert-token-ablation100-20261018T054910Z-paired128/`。
+其中 `analysis.md` 解释结果及边界，`token-metrics.json` 保存逐seed指标与训练曲线。
 
 ## 检查记录
 

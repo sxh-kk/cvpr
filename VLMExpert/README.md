@@ -114,6 +114,8 @@ python VLMExpert/scripts/data/prepare_unifolm.py --root /gaozt-test1/datasets/Un
 模型 transform 的 profile 与最终 resize/crop 配置自动同步，缓存分支校验输入 RGB 的尺寸与 uint8 类型。
 完整 profile/hash/实现、NumPy/Pillow 版本、DINO 本地权重/config SHA 和原始视频／Parquet 身份随缓存保存。
 提取与读取需匹配 Ψ₀ `uv.lock` 的 NumPy1.26.4／Pillow11.3.0；不一致会明确拒绝。
+视频解码使用同一 `uv.lock` 的 PyAV16.0.1。本机验证集早先由 PyAV17.1.0 提取，
+已与16.0.1逐帧比对全部4688帧的 RGB、PTS 和时间戳，完全一致，可继续使用。
 这次后训练使用与 Motion 预训练 H256×W480 相同的 DINO 权重，并显式适配到 H256×W320；
 原 Motion 预训练的图像配置和缓存不修改。
 

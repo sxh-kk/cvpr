@@ -22,7 +22,7 @@
   "cpu": {
     "passed": 64,
     "subtests": 16,
-    "duration_seconds": 2.76,
+    "duration_seconds": 2.81,
     "gpu_count": 0,
     "numpy": "1.26.4",
     "pillow": "11.3.0",
@@ -35,7 +35,8 @@
       "官方包SHA/CRC、安全ZIP解压、越界/符号链接残留拒绝，外部文件不被覆盖",
       "训练脚本在torchrun前拒绝extracting缓存，未启动模型/训练worker",
       "持久HTTP分块：拒绝错误range/长度/编码、失败保留完成块、重跑跳过已验证块、损坏receipt恢复、最终官方全包SHA与symlink写入保护"
-    ]
+    ],
+    "av": "16.0.1"
   },
   "real_validation_cache": {
     "passed": true,
@@ -128,7 +129,9 @@
     "current_vlm_rgb_matches_dino_input_bit_exact": true,
     "read_seconds": 0.8885798971168697,
     "gpu_peak_allocated_bytes": 1758138368,
-    "limits": "Direct real Parquet/MP4/cache and production history reader audit; full installed LeRobot/Qwen training stack not executed"
+    "limits": "Direct real Parquet/MP4/cache and production history reader audit; full installed LeRobot/Qwen training stack not executed",
+    "encoding_av_version": "17.1.0",
+    "all_cached_source_frames_bit_exact_with_psi0_av_16_0_1": true
   },
   "dataset": {
     "repo": "USC-PSI-Lab/psi-data",
@@ -138,18 +141,216 @@
     "train_zip_sha256": "76434453893802090c91bd64ef47c258617494efcea76e2cfdb68295b1710cc9",
     "val_zip_bytes": 33487126,
     "val_zip_sha256": "3d264d6454d59e83be5dadaa17f122b732a8c6cb86a2429c33c1f4fc912fc4b7",
-    "state": "train_download_in_progress"
+    "state": "downloaded_verified_unpacked",
+    "packs": {
+      "unifolm_sonic_lerobot_train": {
+        "archive": "/gaozt-test1/datasets/UnifoLM/archives/official/sonic/unifolm_sonic_lerobot_train.zip",
+        "size": 38855909476,
+        "sha256": "76434453893802090c91bd64ef47c258617494efcea76e2cfdb68295b1710cc9",
+        "files": 14497,
+        "episodes": 7244,
+        "frames": 5416386,
+        "fps": 30
+      },
+      "unifolm_sonic_lerobot_val": {
+        "archive": "/gaozt-test1/datasets/UnifoLM/archives/official/sonic/unifolm_sonic_lerobot_val.zip",
+        "size": 33487126,
+        "sha256": "3d264d6454d59e83be5dadaa17f122b732a8c6cb86a2429c33c1f4fc912fc4b7",
+        "files": 27,
+        "episodes": 9,
+        "frames": 4688,
+        "fps": 30
+      }
+    },
+    "stats_sha256": "931f2b536b2fd47e8d0964ad966202ccbda852d05ea88074be321987200a6ac4",
+    "training_started": false
   },
   "review": [
     "独立检查了提取/读取/原Sonic像素路径及pinned LeRobot边界源码；官方split遗留全量from/to不用于本地frame映射",
     "修复prepare遗留symlink临时文件可覆盖外部目标的问题，原复现现在拒绝且外部文件保持不变",
     "缓存匹配Psi0 uv.lock中的NumPy1.26.4/Pillow11.3.0；只在独立数据准备目录叠加两包，未修改现有Motion/DINO环境",
-    "原HF SDK遇响应解码错误退出会删除临时整包；改用持久8MiB HTTP范围下载，官方小范围206已实测，失败不丢已完成分块"
+    "原HF SDK遇响应解码错误退出会删除临时整包；改用持久8MiB HTTP范围下载，官方小范围206已实测，失败不丢已完成分块",
+    "新增数据准备环境的PyAV16.0.1与Psi0 uv.lock一致；旧val av17.1与16.0.1完整4688帧RGB/时序精确一致，无需重提val缓存。train实际用16.0.1提取。"
   ],
   "limits": [
     "完整安装的LeRobot/Qwen3VL/EgoDex训练栈未运行；wrapper/config实际方法采用AST+生产reader验证，真实数据Parquet/MP4/cache与真实DINO另行验收",
     "本轮不重复模型或分布式训练数值验收，不把数据读取耗时或单卡重算当完整训练吞吐",
     "Motion预训练为H256xW480，本UnifoLM后训练明确使用相同DINO权重适配H256xW320",
     "未启动UnifoLM训练，未停止/重启/改动正在运行的MotionExpert训练；HTTP服务历史缓冲仍需另接"
-  ]
+  ],
+  "decoder_parity": {
+    "av_versions": [
+      "17.1.0",
+      "16.0.1"
+    ],
+    "cpu_only": true,
+    "decoders": [
+      {
+        "av_module": "/gaozt-test1/datasets/MixEgoMotion/.pipeline/runtimes/dino-torch260-cu118/lib/python3.10/site-packages/av/__init__.py",
+        "av_version": "17.1.0",
+        "elapsed_seconds": 15.323816713877022,
+        "ffmpeg_library_versions": {
+          "libavcodec": [
+            62,
+            28,
+            101
+          ],
+          "libavdevice": [
+            62,
+            3,
+            101
+          ],
+          "libavfilter": [
+            11,
+            14,
+            101
+          ],
+          "libavformat": [
+            62,
+            12,
+            101
+          ],
+          "libavutil": [
+            60,
+            26,
+            101
+          ],
+          "libswresample": [
+            6,
+            3,
+            101
+          ],
+          "libswscale": [
+            9,
+            5,
+            101
+          ]
+        },
+        "frames_file_sha256": "fd25a1dedc6d00eda28c2e21e840fad13e4db0f7f0dc5b4cc718f752d2b5db02",
+        "numpy_module": "/gaozt-test1/datasets/UnifoLM/.pipeline/validation-av17-image-deps/numpy/__init__.py",
+        "pillow_module": "/gaozt-test1/datasets/UnifoLM/.pipeline/validation-av17-image-deps/PIL/__init__.py"
+      },
+      {
+        "av_module": "/gaozt-test1/datasets/UnifoLM/.pipeline/imageprocess-psi0-deps/av/__init__.py",
+        "av_version": "16.0.1",
+        "elapsed_seconds": 12.006890362128615,
+        "ffmpeg_library_versions": {
+          "libavcodec": [
+            62,
+            11,
+            100
+          ],
+          "libavdevice": [
+            62,
+            1,
+            100
+          ],
+          "libavfilter": [
+            11,
+            4,
+            100
+          ],
+          "libavformat": [
+            62,
+            3,
+            100
+          ],
+          "libavutil": [
+            60,
+            8,
+            100
+          ],
+          "libswresample": [
+            6,
+            1,
+            100
+          ],
+          "libswscale": [
+            9,
+            1,
+            100
+          ]
+        },
+        "frames_file_sha256": "fd25a1dedc6d00eda28c2e21e840fad13e4db0f7f0dc5b4cc718f752d2b5db02",
+        "numpy_module": "/gaozt-test1/datasets/UnifoLM/.pipeline/imageprocess-psi0-deps/numpy/__init__.py",
+        "pillow_module": "/gaozt-test1/datasets/UnifoLM/.pipeline/imageprocess-psi0-deps/PIL/__init__.py"
+      }
+    ],
+    "episodes": 9,
+    "frames_compared": 4688,
+    "gpu_used": false,
+    "mismatch_examples": [],
+    "numpy_version": "1.26.4",
+    "passed": true,
+    "pillow_version": "11.3.0",
+    "pts_or_time_base_mismatches": 0,
+    "raw_rgb_sha256_mismatches": 0,
+    "scope": "All nine original validation MP4s; raw RGB uint8 sha256, shape, PTS/time-base and exact rational presentation timestamps. No GPU, DINO inference, cache regeneration or training.",
+    "shape_mismatches": 0,
+    "timestamp_mismatches": 0
+  },
+  "train_dino_extraction": {
+    "state": "extracting",
+    "cache_root": "/gaozt-test1/datasets/UnifoLM/dino/256x320/unifolm_sonic_lerobot_train",
+    "shared_image_profile": "256x320",
+    "decoder_av": "16.0.1",
+    "gpu_count": 2,
+    "batch_per_gpu": 64,
+    "workers_per_gpu": 4,
+    "inference_precision": "bf16",
+    "storage_dtype": "float16",
+    "cache_complete": false,
+    "training_started": false,
+    "first_committed_episode_audit": {
+      "passed": true,
+      "scope": "First two committed training episodes; incomplete pack remains unavailable for training",
+      "source": "/gaozt-test1/datasets/UnifoLM/unifolm_sonic_lerobot_train",
+      "cache": "/gaozt-test1/datasets/UnifoLM/dino/256x320/unifolm_sonic_lerobot_train",
+      "episodes": [
+        {
+          "episode_index": 0,
+          "native_frames": 1173,
+          "shape": [
+            1173,
+            5,
+            1024
+          ],
+          "dtype": "float16",
+          "source_and_features_sha_verified": true,
+          "all_features_finite": true,
+          "first_history_rows": [
+            0,
+            6,
+            12,
+            18,
+            24,
+            30
+          ],
+          "max_pts_difference_seconds": 1.7801920577653618e-06
+        },
+        {
+          "episode_index": 1,
+          "native_frames": 962,
+          "shape": [
+            962,
+            5,
+            1024
+          ],
+          "dtype": "float16",
+          "source_and_features_sha_verified": true,
+          "all_features_finite": true,
+          "first_history_rows": [
+            0,
+            6,
+            12,
+            18,
+            24,
+            30
+          ],
+          "max_pts_difference_seconds": 8.900960288826809e-07
+        }
+      ],
+      "training_started": false
+    }
+  }
 }

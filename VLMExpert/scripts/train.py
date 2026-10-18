@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dotenv import load_dotenv
-assert load_dotenv(), "Failed to load .env file. Make sure it exists and is properly formatted."
+# A sourced launch environment is sufficient; .env remains an optional fallback.
+load_dotenv()
 import os
 import builtins
 import importlib

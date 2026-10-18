@@ -4,13 +4,15 @@
 #           UNIFOLM_DINO_TRAIN_ID, UNIFOLM_DINO_VAL_ID, UNIFOLM_DINO_CACHE.
 # Cache packs are native30Hz offline DINO, using the same canonical256x320 profile.
 # Only the VLM current frame receives Psi0 color augmentation; Motion keeps clean history.
-# Review without starting workers: bash "$0" --dry-run [experiment]
+# Review without starting workers: --dry-run prints; --check-only also checks inputs.
 set -euo pipefail
 
 dry_run=0
+check_only=0
 if [[ "${1:-}" == "--dry-run" ]]; then dry_run=1; shift; fi
+if [[ "${1:-}" == "--check-only" ]]; then check_only=1; shift; fi
 experiment="${1:-dual_source_unifolm}"
-if (( $# > 1 )); then echo "Usage: $0 [--dry-run] [experiment]" >&2; exit 2; fi
+if (( $# > 1 )); then echo "Usage: $0 [--dry-run|--check-only] [experiment]" >&2; exit 2; fi
 
 : "${EGO_DEX_VLM_PATH:?Set the explicit EgoDex-pretrained VLM directory}"
 : "${MOTION_EXPERT_CHECKPOINT:?Set an explicit compatible MotionExpert checkpoint file}"
@@ -55,12 +57,41 @@ PY
     cmp -s "$train_stats" "$UNIFOLM_DINO_ROOT/$UNIFOLM_DINO_VAL_ID/meta/stats_psi0.json" || {
         echo "Train and validation packs must share stats_psi0.json" >&2; exit 1;
     }
+    if [[ -n "${UNIFOLM_INIT_WEIGHTS_RECORD:-}" ]]; then
+        "$python_bin" - "$UNIFOLM_INIT_WEIGHTS_RECORD" "$EGO_DEX_VLM_PATH" "$MOTION_EXPERT_CHECKPOINT" "${MOTION_USE_EMA:-1}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+record, vlm, motion, ema = sys.argv[1:]
+binding = json.loads(Path(record).read_text())
+for section, path, size_key, mtime_key in (
+    ("vlm", Path(vlm) / "model.safetensors", "model_bytes", "model_mtime_ns"),
+    ("motion", Path(motion), "bytes", "mtime_ns"),
+):
+    item = binding[section]
+    expected = Path(vlm) if section == "vlm" else path
+    if Path(item["path"]).resolve() != expected.resolve():
+        raise SystemExit(f"{section} path differs from the fixed initialization record")
+    stat = path.stat()
+    if (stat.st_size, stat.st_mtime_ns) != (item[size_key], item[mtime_key]):
+        raise SystemExit(f"{section} changed since SHA validation; revalidate before training")
+for name, expected in binding["vlm"]["config_tokenizer_hashes"].items():
+    if hashlib.sha256((Path(vlm) / name).read_bytes()).hexdigest() != expected:
+        raise SystemExit(f"VLM config/tokenizer changed: {name}")
+if binding["motion"]["use_ema"] != (ema in ("1", "true")):
+    raise SystemExit("Motion EMA setting differs from the fixed initialization record")
+print("Fixed local initialization metadata verified; full SHA recheck is available separately.")
+PY
+    fi
 fi
 
 command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="${NPROC_PER_NODE:-1}"
     scripts/train.py posttrain_sonic_psi0_config
     --seed=292285 "--exp=$experiment" --train.name=posttrain
+    "--train.output_dir=${UNIFOLM_RUN_ROOT:-$UNIFOLM_DINO_ROOT/.pipeline/training}"
     --train.data_parallel=ddp --train.mixed_precision=bf16
+    --train.optimizer-foreach=False
     "--train.num_workers=${NUM_WORKERS:-8}" "--train.train_batch_size=${BATCH_SIZE:-16}"
     "--train.gradient_accumulation_steps=${GRAD_ACCUM_STEPS:-2}"
     --train.learning_rate=1e-4 "--train.max_training_steps=${MAX_STEPS:-40000}"
@@ -108,5 +139,5 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
 printf 'Command:'
 printf ' %q' "${command[@]}"
 printf '\n'
-if (( dry_run )); then exit 0; fi
+if (( dry_run || check_only )); then exit 0; fi
 exec "${command[@]}"

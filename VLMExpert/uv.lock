@@ -194,7 +194,7 @@ version = "0.11.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "ipywidgets" },
-    { name = "psygnal" },
+    { name = "psygnal", version = "0.15.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/79/31/0491d707c674b34267f55d96d6a7148e55e7b6718a271686232cf295fbe2/anywidget-0.11.0.tar.gz", hash = "sha256:6695fbef9449cf8c27f421b96c5837aa37f909ec1f60cfa33add333e1b70b169", size = 426999, upload-time = "2026-04-27T23:42:09.576Z" }
@@ -217,7 +217,7 @@ version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ipywidgets" },
-    { name = "psygnal" },
+    { name = "psygnal", version = "0.15.1", source = { registry = "https://pypi.org/simple" } },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/79/31/0491d707c674b34267f55d96d6a7148e55e7b6718a271686232cf295fbe2/anywidget-0.11.0.tar.gz", hash = "sha256:6695fbef9449cf8c27f421b96c5837aa37f909ec1f60cfa33add333e1b70b169", size = 426999, upload-time = "2026-04-27T23:42:09.576Z" }
@@ -248,7 +248,7 @@ name = "argon2-cffi"
 version = "25.1.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "argon2-cffi-bindings" },
+    { name = "argon2-cffi-bindings", version = "25.1.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/0e/89/ce5af8a7d472a67cc819d5d998aa8c82c5d860608c4db9f46f1162d7dab9/argon2_cffi-25.1.0.tar.gz", hash = "sha256:694ae5cc8a42f4c4e2bf2ca0e64e51e23a040c6a517a85074683d3959e1346c1", size = 45706, upload-time = "2025-06-03T06:55:32.073Z" }
 wheels = [
@@ -281,7 +281,7 @@ name = "argon2-cffi"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "argon2-cffi-bindings" },
+    { name = "argon2-cffi-bindings", version = "26.1.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0e/89/ce5af8a7d472a67cc819d5d998aa8c82c5d860608c4db9f46f1162d7dab9/argon2_cffi-25.1.0.tar.gz", hash = "sha256:694ae5cc8a42f4c4e2bf2ca0e64e51e23a040c6a517a85074683d3959e1346c1", size = 45706, upload-time = "2025-06-03T06:55:32.073Z" }
 wheels = [
@@ -329,7 +329,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pytorch-seed" },
+    { name = "pytorch-seed", version = "0.2.0", source = { registry = "https://pypi.org/simple" } },
     { name = "scipy" },
     { name = "torch" },
 ]
@@ -423,9 +423,9 @@ dependencies = [
     { name = "click" },
     { name = "mypy-extensions" },
     { name = "packaging" },
-    { name = "pathspec" },
+    { name = "pathspec", version = "1.1.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "platformdirs" },
-    { name = "pytokens" },
+    { name = "pytokens", version = "0.4.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e1/c5/61175d618685d42b005847464b8fb4743a67b1b8fdb75e50e5a96c31a27a/black-26.3.1.tar.gz", hash = "sha256:2c50f5063a9641c7eed7795014ba37b0f5fa227f3d408b968936e24bc0566b07", size = 666155, upload-time = "2026-03-12T03:36:03.593Z" }
 wheels = [
@@ -451,7 +451,7 @@ wheels = [
 
 [package.optional-dependencies]
 css = [
-    { name = "tinycss2" },
+    { name = "tinycss2", version = "1.4.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 
 [[package]]
@@ -475,9 +475,9 @@ dependencies = [
     { name = "click" },
     { name = "mypy-extensions" },
     { name = "packaging" },
-    { name = "pathspec" },
+    { name = "pathspec", version = "1.1.1", source = { registry = "https://pypi.org/simple" } },
     { name = "platformdirs" },
-    { name = "pytokens" },
+    { name = "pytokens", version = "0.4.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/37/5628dd55bf2b34257fc7603f0fe97c40e3aaf24265f416a9c85c95ca1436/black-26.5.1.tar.gz", hash = "sha256:dd321f668053961824bcc1be1cc1df748b2d7e4fa28086b08331e577b0100a73", size = 679439, upload-time = "2026-05-18T16:53:36.107Z" }
 wheels = [
@@ -503,7 +503,7 @@ wheels = [
 
 [package.optional-dependencies]
 css = [
-    { name = "tinycss2" },
+    { name = "tinycss2", version = "1.5.1", source = { registry = "https://pypi.org/simple" } },
 ]
 
 [[package]]
@@ -581,7 +581,7 @@ name = "catkin-pkg"
 version = "1.1.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "docutils" },
+    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "packaging" },
     { name = "pyparsing" },
     { name = "python-dateutil" },
@@ -597,7 +597,7 @@ name = "catkin-pkg"
 version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "docutils" },
+    { name = "docutils", version = "0.23", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "pyparsing" },
     { name = "python-dateutil" },
@@ -1547,8 +1547,8 @@ name = "gpustat"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "blessed" },
-    { name = "nvidia-ml-py" },
+    { name = "blessed", version = "1.49.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "nvidia-ml-py", version = "13.610.43", source = { registry = "https://pypi.org/simple" } },
     { name = "psutil" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/79/c4/46d005aec3bf911cb030467d91e062a5386ff4a03e51874424cacc0f60c1/gpustat-1.1.1.tar.gz", hash = "sha256:c18d3ed5518fc16300c42d694debc70aebb3be55cae91f1db64d63b5fa8af9d8", size = 98052, upload-time = "2023-08-22T19:39:06.062Z" }
@@ -1729,7 +1729,7 @@ version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "hydra-core" },
-    { name = "submitit" },
+    { name = "submitit", version = "1.5.4", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4f/93/8f19eba16318fe79f17ae5a86ed4efc9641c33151f67a0f172fbd15ddd41/hydra-submitit-launcher-1.2.0.tar.gz", hash = "sha256:e14c8eb46d020fac60ba25f82bcc368dc55851d2683dc95c88631ffcf15e4a34", size = 4875, upload-time = "2022-05-17T22:19:47.548Z" }
 wheels = [
@@ -1853,9 +1853,9 @@ name = "ipykernel"
 version = "7.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "appnope", marker = "sys_platform == 'darwin'" },
-    { name = "comm" },
-    { name = "debugpy" },
+    { name = "appnope", marker = "sys_platform == 'darwin'", version = "1.0.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "comm", version = "0.2.3", source = { registry = "https://pypi.org/simple" } },
+    { name = "debugpy", version = "1.8.21", source = { registry = "https://pypi.org/simple" } },
     { name = "ipython" },
     { name = "jupyter-client" },
     { name = "jupyter-core" },
@@ -1865,7 +1865,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pyzmq" },
     { name = "tornado" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3d/c4/e4a38f579de4225a561305666f7541cdabb30075def2aa1ac17bd73c1fb5/ipykernel-7.3.0.tar.gz", hash = "sha256:9acaaaf97d16355166e4085afe9d225bfbdf2b7ef520f9df3be8f2b248275e09", size = 184899, upload-time = "2026-06-10T08:41:25.481Z" }
 wheels = [
@@ -1879,14 +1879,14 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "ipython-pygments-lexers" },
-    { name = "jedi" },
+    { name = "jedi", version = "0.20.0", source = { registry = "https://pypi.org/simple" } },
     { name = "matplotlib-inline" },
-    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'", version = "4.9.0", source = { registry = "https://pypi.org/simple" } },
     { name = "prompt-toolkit" },
     { name = "psutil", marker = "sys_platform != 'cygwin' and sys_platform != 'emscripten'" },
     { name = "pygments" },
-    { name = "stack-data" },
-    { name = "traitlets" },
+    { name = "stack-data", version = "0.6.3", source = { registry = "https://pypi.org/simple" } },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b9/32/99451b1283ec5d92ad77073f12e1c667dc10775384d8f15c2914207149dd/ipython-9.17.1.tar.gz", hash = "sha256:8919be8c27f20a6f4423145028063f6637b42a03ce57665bb12015ee1f073529", size = 4539289, upload-time = "2026-09-01T08:29:32.6Z" }
@@ -1911,10 +1911,10 @@ name = "ipywidgets"
 version = "8.1.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "comm" },
+    { name = "comm", version = "0.2.3", source = { registry = "https://pypi.org/simple" } },
     { name = "ipython" },
     { name = "jupyterlab-widgets" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
     { name = "widgetsnbextension" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c9/7c/6db60eddf38547353b06d57941f5eee22a990640ce30479fd71a810507f2/ipywidgets-8.1.9.tar.gz", hash = "sha256:bcccba38a6ec3253f7a39c943cea5b9ad01999ce071396171adbc51c6a6a8613", size = 117252, upload-time = "2026-08-18T08:54:24.123Z" }
@@ -1948,7 +1948,7 @@ name = "jedi"
 version = "0.20.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "parso" },
+    { name = "parso", version = "0.8.7", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/46/b7/a3635f6a2d7cf5b5dd98064fc1d5fbbafcb25477bcea204a3a92145d158b/jedi-0.20.0.tar.gz", hash = "sha256:c3f4ccbd276696f4b19c54618d4fb18f9fc24b0aef02acf704b23f487daa1011", size = 3119416, upload-time = "2026-05-01T23:38:47.814Z" }
 wheels = [
@@ -1960,7 +1960,7 @@ name = "jedi"
 version = "0.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "parso" },
+    { name = "parso", version = "0.8.7", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/46/b7/a3635f6a2d7cf5b5dd98064fc1d5fbbafcb25477bcea204a3a92145d158b/jedi-0.20.0.tar.gz", hash = "sha256:c3f4ccbd276696f4b19c54618d4fb18f9fc24b0aef02acf704b23f487daa1011", size = 3119416, upload-time = "2026-05-01T23:38:47.814Z" }
 wheels = [
@@ -1984,7 +1984,7 @@ name = "jinxed"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ansicon", marker = "sys_platform == 'win32'" },
+    { name = "ansicon", marker = "sys_platform == 'win32'", version = "1.89.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/39/d7/6e6d474ec5eaeca6a61acc17766bb19563b3a372b4b9d92910078f5fe49f/jinxed-2.1.0.tar.gz", hash = "sha256:7e755b831faa2443d44fb4ce7c0202eb9c3ed39bd5bf1193365888f4f6092b54", size = 61287, upload-time = "2026-07-03T15:46:48.153Z" }
 wheels = [
@@ -2089,24 +2089,11 @@ format-nongpl = [
     { name = "fqdn" },
     { name = "idna" },
     { name = "isoduration" },
-    { name = "jsonpointer" },
-    { name = "rfc3339-validator" },
-    { name = "rfc3986-validator" },
-    { name = "rfc3987-syntax" },
-    { name = "uri-template" },
-    { name = "webcolors" },
-]
-
-[package.optional-dependencies]
-format-nongpl = [
-    { name = "fqdn" },
-    { name = "idna" },
-    { name = "isoduration" },
-    { name = "jsonpointer" },
-    { name = "rfc3339-validator" },
-    { name = "rfc3986-validator" },
-    { name = "rfc3987-syntax" },
-    { name = "uri-template" },
+    { name = "jsonpointer", version = "3.1.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "rfc3339-validator", version = "0.1.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "rfc3986-validator", version = "0.1.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "rfc3987-syntax", version = "1.1.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "uri-template", version = "1.3.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "webcolors" },
 ]
 
@@ -2131,8 +2118,8 @@ dependencies = [
     { name = "ipywidgets" },
     { name = "jupyter-console" },
     { name = "jupyterlab" },
-    { name = "nbconvert" },
-    { name = "notebook" },
+    { name = "nbconvert", version = "7.17.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "notebook", version = "7.6.2", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/f3/af28ea964ab8bc1e472dba2e82627d36d470c51f5cd38c37502eeffaa25e/jupyter-1.1.1.tar.gz", hash = "sha256:d55467bceabdea49d7e3624af7e33d59c37fff53ed3a350e1ac957bed731de7a", size = 5714959, upload-time = "2024-08-30T07:15:48.299Z" }
 wheels = [
@@ -2145,7 +2132,7 @@ version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jupyter-core" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6d/e1/e4ef07e2be228271b59e011a746d97feef69577af1f465b1cff0f1d7c760/jupyter_builder-1.2.2.tar.gz", hash = "sha256:b6cea88f58e44b2c5eba96f28d2e0d16fd453d3ca6dc9c4492ff8a1f2e97f601", size = 981074, upload-time = "2026-08-07T06:47:18.742Z" }
 wheels = [
@@ -2161,7 +2148,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "pyzmq" },
     { name = "tornado" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/2a/906772148a06e48885039e0250c340b770a55bbf37b08d6ee0449df369c3/jupyter_client-8.10.0.tar.gz", hash = "sha256:9f7116294dca55f1785be880057d44544db9b1567718d92cb33c58886afb9497", size = 360653, upload-time = "2026-08-28T12:17:10.854Z" }
@@ -2181,7 +2168,7 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "pygments" },
     { name = "pyzmq" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bd/2d/e2fd31e2fc41c14e2bcb6c976ab732597e907523f6b2420305f9fc7fdbdb/jupyter_console-6.6.3.tar.gz", hash = "sha256:566a4bf31c87adbfadf22cdf846e3069b59a71ed5da71d6ba4d8aaad14a53539", size = 34363, upload-time = "2023-03-06T14:13:31.02Z" }
 wheels = [
@@ -2194,7 +2181,7 @@ version = "5.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "platformdirs" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/02/49/9d1284d0dc65e2c757b74c6687b6d319b02f822ad039e5c512df9194d9dd/jupyter_core-5.9.1.tar.gz", hash = "sha256:4d09aaff303b9566c3ce657f580bd089ff5c91f5f89cf7d8846c3cdf465b5508", size = 89814, upload-time = "2025-10-16T19:19:18.444Z" }
 wheels = [
@@ -2211,9 +2198,9 @@ dependencies = [
     { name = "python-json-logger" },
     { name = "pyyaml" },
     { name = "referencing" },
-    { name = "rfc3339-validator" },
-    { name = "rfc3986-validator" },
-    { name = "traitlets" },
+    { name = "rfc3339-validator", version = "0.1.4", source = { registry = "https://pypi.org/simple" } },
+    { name = "rfc3986-validator", version = "0.1.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/18/f8/475c4241b2b75af0deaae453ed003c6c851766dbc44d332d8baf245dc931/jupyter_events-0.12.1.tar.gz", hash = "sha256:faff25f77218335752f35f23c5fe6e4a392a7bd99a5939ccb9b8fbf594636cf3", size = 62854, upload-time = "2026-04-20T23:17:50.66Z" }
 wheels = [
@@ -2238,23 +2225,23 @@ version = "2.21.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "argon2-cffi" },
+    { name = "argon2-cffi", version = "25.1.0", source = { registry = "https://pypi.org/simple" } },
     { name = "jinja2" },
     { name = "jupyter-client" },
     { name = "jupyter-core" },
     { name = "jupyter-events" },
     { name = "jupyter-server-terminals" },
-    { name = "nbconvert" },
-    { name = "nbformat" },
+    { name = "nbconvert", version = "7.17.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "nbformat", version = "5.11.1", source = { registry = "https://pypi.org/simple" } },
     { name = "overrides" },
     { name = "packaging" },
     { name = "prometheus-client" },
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'", version = "3.0.5", source = { registry = "https://pypi.org/simple" } },
     { name = "pyzmq" },
     { name = "send2trash" },
     { name = "terminado" },
     { name = "tornado" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
     { name = "websocket-client" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cf/e0/63b481d5b21f81fe23173dfc9eb25629fa1bc174fdc4a2c19d09c1ff8124/jupyter_server-2.21.0.tar.gz", hash = "sha256:70d9a1883f57d3576ea17f4ce061ec1a7aad7ef388d00428cfb7f5e4f0022271", size = 760357, upload-time = "2026-08-27T16:06:34.049Z" }
@@ -2267,7 +2254,7 @@ name = "jupyter-server-terminals"
 version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'", version = "3.0.5", source = { registry = "https://pypi.org/simple" } },
     { name = "terminado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f4/a7/bcd0a9b0cbba88986fe944aaaf91bfda603e5a50bda8ed15123f381a3b2f/jupyter_server_terminals-0.5.4.tar.gz", hash = "sha256:bbda128ed41d0be9020349f9f1f2a4ab9952a73ed5f5ac9f1419794761fb87f5", size = 31770, upload-time = "2026-01-14T16:53:20.213Z" }
@@ -2301,10 +2288,10 @@ dependencies = [
     { name = "jupyter-lsp" },
     { name = "jupyter-server" },
     { name = "jupyterlab-server" },
-    { name = "notebook-shim" },
+    { name = "notebook-shim", version = "0.2.4", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "tornado" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/00/c0/45934229995d4c6e38192ca118d93185f60808f64157e3df3c5c28f8c5fd/jupyterlab-4.6.3.tar.gz", hash = "sha256:2e3db6e3a12495ebd188276e985bf5ac502fbde3d1e8628819920210008de498", size = 28319771, upload-time = "2026-08-10T18:50:57.947Z" }
@@ -2328,7 +2315,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "babel" },
     { name = "jinja2" },
-    { name = "json5" },
+    { name = "json5", version = "0.15.0", source = { registry = "https://pypi.org/simple" } },
     { name = "jsonschema" },
     { name = "jupyter-server" },
     { name = "packaging" },
@@ -2464,7 +2451,7 @@ dependencies = [
     { name = "fsspec", extra = ["http"] },
     { name = "lightning-utilities" },
     { name = "packaging" },
-    { name = "pytorch-lightning" },
+    { name = "pytorch-lightning", version = "2.6.5", source = { registry = "https://pypi.org/simple" } },
     { name = "pyyaml" },
     { name = "torch" },
     { name = "torchmetrics" },
@@ -2630,7 +2617,7 @@ name = "matplotlib-inline"
 version = "0.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bd/c0/9f7c9a46090390368a4d7bcb76bb87a4a36c421e4c0792cdb53486ffac7a/matplotlib_inline-0.2.2.tar.gz", hash = "sha256:72f3fe8fce36b70d4a5b612f899090cd0401deddc4ea90e1572b9f4bfb058c79", size = 8150, upload-time = "2026-05-08T17:33:33.49Z" }
 wheels = [
@@ -2714,7 +2701,7 @@ name = "moviepy"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "decorator" },
+    { name = "decorator", version = "4.4.2", source = { registry = "https://pypi.org/simple" } },
     { name = "imageio" },
     { name = "imageio-ffmpeg" },
     { name = "numpy" },
@@ -2793,7 +2780,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cffi" },
     { name = "cython" },
-    { name = "fasteners" },
+    { name = "fasteners", version = "0.20", source = { registry = "https://pypi.org/simple" } },
     { name = "glfw" },
     { name = "imageio" },
     { name = "numpy" },
@@ -2870,8 +2857,8 @@ source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "jupyter-client" },
     { name = "jupyter-core" },
-    { name = "nbformat" },
-    { name = "traitlets" },
+    { name = "nbformat", version = "5.10.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "traitlets", version = "5.15.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/56/91/1c1d5a4b9a9ebba2b4e32b8c852c2975c872aec1fe42ab5e516b2cecd193/nbclient-0.10.4.tar.gz", hash = "sha256:1e54091b16e6da39e297b0ece3e10f6f29f4ac4e8ee515d29f8a7099bd6553c9", size = 62554, upload-time = "2025-12-23T07:45:46.369Z" }
 wheels = [
@@ -2884,19 +2871,19 @@ version = "7.17.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
-    { name = "bleach", extra = ["css"] },
-    { name = "defusedxml" },
+    { name = "bleach", extra = ["css"], version = "6.3.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "defusedxml", version = "0.7.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "jinja2" },
     { name = "jupyter-core" },
     { name = "jupyterlab-pygments" },
     { name = "markupsafe" },
     { name = "mistune" },
-    { name = "nbclient" },
-    { name = "nbformat" },
+    { name = "nbclient", version = "0.10.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "nbformat", version = "5.10.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "packaging" },
     { name = "pandocfilters" },
     { name = "pygments" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.15.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/01/b1/708e53fe2e429c103c6e6e159106bcf0357ac41aa4c28772bd8402339051/nbconvert-7.17.1.tar.gz", hash = "sha256:34d0d0a7e73ce3cbab6c5aae8f4f468797280b01fd8bd2ca746da8569eddd7d2", size = 865311, upload-time = "2026-04-08T00:44:14.914Z" }
 wheels = [
@@ -2908,10 +2895,10 @@ name = "nbformat"
 version = "5.10.4"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "fastjsonschema" },
+    { name = "fastjsonschema", version = "2.21.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "jsonschema" },
     { name = "jupyter-core" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.15.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/6d/fd/91545e604bc3dad7dca9ed03284086039b294c6b3d75c0d2fa45f9e9caf3/nbformat-5.10.4.tar.gz", hash = "sha256:322168b14f937a5d11362988ecac2a4952d3d8e3a2cbeb2319584631226d5b3a", size = 142749, upload-time = "2024-04-04T11:20:37.371Z" }
 wheels = [
@@ -2934,8 +2921,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jupyter-client" },
     { name = "jupyter-core" },
-    { name = "nbformat" },
-    { name = "traitlets" },
+    { name = "nbformat", version = "5.11.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/28/a5/b3bae4b590c0cbcada2c63a34f7580024e834a8ba213e949a2f906705787/nbclient-0.11.0.tar.gz", hash = "sha256:04a134a5b087f2c5887f228aca155db50169b8cd9334dee6942c8e927e56081a", size = 62535, upload-time = "2026-06-05T07:52:41.746Z" }
 wheels = [
@@ -2948,19 +2935,19 @@ version = "7.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
-    { name = "bleach", extra = ["css"] },
-    { name = "defusedxml" },
+    { name = "bleach", extra = ["css"], version = "6.4.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "defusedxml", version = "0.7.1", source = { registry = "https://pypi.org/simple" } },
     { name = "jinja2" },
     { name = "jupyter-core" },
     { name = "jupyterlab-pygments" },
     { name = "markupsafe" },
     { name = "mistune" },
-    { name = "nbclient" },
-    { name = "nbformat" },
+    { name = "nbclient", version = "0.11.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "nbformat", version = "5.11.1", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "pandocfilters" },
     { name = "pygments" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/01/b1/708e53fe2e429c103c6e6e159106bcf0357ac41aa4c28772bd8402339051/nbconvert-7.17.1.tar.gz", hash = "sha256:34d0d0a7e73ce3cbab6c5aae8f4f468797280b01fd8bd2ca746da8569eddd7d2", size = 865311, upload-time = "2026-04-08T00:44:14.914Z" }
 wheels = [
@@ -2972,10 +2959,10 @@ name = "nbformat"
 version = "5.11.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fastjsonschema" },
+    { name = "fastjsonschema", version = "2.22.2", source = { registry = "https://pypi.org/simple" } },
     { name = "jsonschema" },
     { name = "jupyter-core" },
-    { name = "traitlets" },
+    { name = "traitlets", version = "5.16.1", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/31/72/b3446efab8756e7df4b8ec587f8e611cb5a7249e4323db480802f1d3be04/nbformat-5.11.1.tar.gz", hash = "sha256:32d4521c68c6e7d5b29c76defaeed9f42ea733142b9b19f88277ce10390b9c4d", size = 147775, upload-time = "2026-08-17T08:10:51.942Z" }
 wheels = [
@@ -3043,7 +3030,7 @@ dependencies = [
     { name = "jupyter-server" },
     { name = "jupyterlab" },
     { name = "jupyterlab-server" },
-    { name = "notebook-shim" },
+    { name = "notebook-shim", version = "0.2.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "tornado" },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/2a/c2/cf59bd2e6f2c8b976b52477e3e53bf6f97bc714ed046a51821afb428eaee/notebook-7.5.6.tar.gz", hash = "sha256:621174aade80108f0020b0f00738000b215f75fa3cd90771ad7aa0f24536a4e1", size = 14170814, upload-time = "2026-04-30T11:46:26.613Z" }
@@ -3105,7 +3092,7 @@ dependencies = [
     { name = "jupyter-server" },
     { name = "jupyterlab" },
     { name = "jupyterlab-server" },
-    { name = "notebook-shim" },
+    { name = "notebook-shim", version = "0.2.4", source = { registry = "https://pypi.org/simple" } },
     { name = "tornado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/31/d9/5c76de84e96e1cf8aae3fce930875e0615e14f3557bbcdb634aab52da9d3/notebook-7.6.2.tar.gz", hash = "sha256:cc02b5f0bb972160cccfe44ad8a1a202036206ba3439469c514f03aefa9ae807", size = 5500147, upload-time = "2026-08-11T13:21:16.632Z" }
@@ -3532,7 +3519,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", version = "0.7.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3544,7 +3531,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", version = "0.7.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3792,22 +3779,22 @@ dependencies = [
 egoverse = [
     { name = "arm-pytorch-utilities" },
     { name = "av" },
-    { name = "black" },
+    { name = "black", version = "26.3.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "boto3" },
-    { name = "cloudpathlib" },
+    { name = "cloudpathlib", version = "0.24.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "dm-control" },
-    { name = "geomloss" },
+    { name = "geomloss", version = "0.3.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "gpustat" },
     { name = "hydra-core" },
     { name = "hydra-submitit-launcher" },
     { name = "ipython" },
     { name = "lightning" },
     { name = "matplotlib" },
-    { name = "mediapy" },
+    { name = "mediapy", version = "1.2.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "mink" },
     { name = "mujoco" },
     { name = "mujoco-py" },
-    { name = "nvidia-ml-py" },
+    { name = "nvidia-ml-py", version = "13.595.45", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "overrides" },
     { name = "packaging" },
     { name = "pandas" },
@@ -3815,25 +3802,25 @@ egoverse = [
     { name = "pre-commit" },
     { name = "prettytable" },
     { name = "projectaria-tools", extra = ["all"] },
-    { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg", extra = ["binary"], version = "3.3.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "pyarrow" },
     { name = "pyquaternion" },
-    { name = "pytest" },
-    { name = "pytorch-kinematics" },
+    { name = "pytest", version = "9.0.3", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "pytorch-kinematics", version = "0.10.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "pyyaml" },
-    { name = "ray" },
+    { name = "ray", version = "2.55.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "rich" },
     { name = "rospkg" },
     { name = "ruff" },
-    { name = "s5cmd" },
-    { name = "sqlalchemy" },
-    { name = "submitit" },
+    { name = "s5cmd", version = "0.3.3", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "sqlalchemy", version = "2.0.49", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "submitit", version = "1.5.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "tabulate" },
     { name = "termcolor" },
-    { name = "timm" },
+    { name = "timm", version = "1.0.27", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "tslearn" },
     { name = "typing-extensions" },
-    { name = "zarr" },
+    { name = "zarr", version = "3.1.5", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 psi = [
     { name = "accelerate" },
@@ -3993,7 +3980,7 @@ wheels = [
 
 [package.optional-dependencies]
 binary = [
-    { name = "psycopg-binary", marker = "implementation_name != 'pypy'" },
+    { name = "psycopg-binary", marker = "implementation_name != 'pypy'", version = "3.3.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 
 [[package]]
@@ -4061,7 +4048,7 @@ wheels = [
 
 [package.optional-dependencies]
 binary = [
-    { name = "psycopg-binary", marker = "implementation_name != 'pypy'" },
+    { name = "psycopg-binary", marker = "implementation_name != 'pypy'", version = "3.3.5", source = { registry = "https://pypi.org/simple" } },
 ]
 
 [[package]]
@@ -4355,7 +4342,7 @@ version = "9.0.3"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "iniconfig" },
+    { name = "iniconfig", version = "2.3.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "packaging" },
     { name = "pluggy" },
     { name = "pygments" },
@@ -4371,7 +4358,7 @@ version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "iniconfig" },
+    { name = "iniconfig", version = "2.3.0", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "pluggy" },
     { name = "pygments" },
@@ -4472,7 +4459,7 @@ dependencies = [
     { name = "lxml" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pytorch-seed" },
+    { name = "pytorch-seed", version = "0.2.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "pyyaml" },
     { name = "torch" },
 ]
@@ -4537,7 +4524,7 @@ dependencies = [
     { name = "lxml" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pytorch-seed" },
+    { name = "pytorch-seed", version = "0.2.0", source = { registry = "https://pypi.org/simple" } },
     { name = "pyyaml" },
     { name = "torch" },
 ]
@@ -4825,7 +4812,7 @@ name = "rerun-notebook"
 version = "0.22.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anywidget" },
+    { name = "anywidget", version = "0.11.0", source = { registry = "https://pypi.org/simple" } },
     { name = "jupyter-ui-poll" },
 ]
 wheels = [
@@ -4935,7 +4922,7 @@ name = "rospkg"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "catkin-pkg" },
+    { name = "catkin-pkg", version = "1.1.0", source = { registry = "https://pypi.org/simple" } },
     { name = "distro" },
     { name = "pyyaml" },
 ]
@@ -5148,7 +5135,7 @@ name = "scikit-learn"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "joblib" },
+    { name = "joblib", version = "1.6.0", source = { registry = "https://pypi.org/simple" } },
     { name = "narwhals" },
     { name = "numpy" },
     { name = "scipy" },
@@ -5367,7 +5354,7 @@ source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "asttokens" },
     { name = "executing" },
-    { name = "pure-eval" },
+    { name = "pure-eval", version = "0.2.3", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/28/e3/55dcc2cfbc3ca9c29519eb6884dd1415ecb53b0e934862d3559ddcb7e20b/stack_data-0.6.3.tar.gz", hash = "sha256:836a778de4fec4dcd1dcd89ed8abff8a221f58308462e1c4aa2a3cf30148f0b9", size = 44707, upload-time = "2023-09-30T13:58:05.479Z" }
 wheels = [
@@ -5401,7 +5388,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asttokens" },
     { name = "executing" },
-    { name = "pure-eval" },
+    { name = "pure-eval", version = "0.2.3", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/28/e3/55dcc2cfbc3ca9c29519eb6884dd1415ecb53b0e934862d3559ddcb7e20b/stack_data-0.6.3.tar.gz", hash = "sha256:836a778de4fec4dcd1dcd89ed8abff8a221f58308462e1c4aa2a3cf30148f0b9", size = 44707, upload-time = "2023-09-30T13:58:05.479Z" }
 wheels = [
@@ -5513,8 +5500,8 @@ name = "terminado"
 version = "0.18.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess", marker = "os_name != 'nt'" },
-    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'" },
+    { name = "ptyprocess", marker = "os_name != 'nt'", version = "0.7.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "pywinpty", marker = "os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'linux'", version = "3.0.5", source = { registry = "https://pypi.org/simple" } },
     { name = "tornado" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8a/11/965c6fd8e5cc254f1fe142d547387da17a8ebfd75a3455f637c663fb38a0/terminado-0.18.1.tar.gz", hash = "sha256:de09f2c4b85de4765f7714688fff57d3e75bad1f909b589fde880460c753fd2e", size = 32701, upload-time = "2024-03-12T14:34:39.026Z" }
@@ -5837,8 +5824,8 @@ name = "tslearn"
 version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "joblib" },
-    { name = "numba" },
+    { name = "joblib", version = "1.6.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "numba", version = "0.67.0", source = { registry = "https://pypi.org/simple" } },
     { name = "numpy" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -5985,10 +5972,10 @@ name = "virtualenv"
 version = "21.7.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "distlib" },
+    { name = "distlib", version = "0.4.3", source = { registry = "https://pypi.org/simple" } },
     { name = "filelock" },
     { name = "platformdirs" },
-    { name = "python-discovery" },
+    { name = "python-discovery", version = "1.6.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/08/1c/69faa2e6a83484e2a8227bce5cfaa183941c5720f99c48f204931d286b07/virtualenv-21.7.8.tar.gz", hash = "sha256:1dc49c790072a9072cb1803f9bd62aa69cd583077cada32390f75505cdc64c9b", size = 5347580, upload-time = "2026-09-01T13:36:13.894Z" }
 wheels = [
@@ -6225,6 +6212,15 @@ wheels = [
 ]
 
 [[package]]
+name = "xyzservices"
+version = "2025.4.0"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/af/c0f7f97bb320d14c089476f487b81f733238cc5603e0914f2e409f49d589/xyzservices-2025.4.0.tar.gz", hash = "sha256:6fe764713648fac53450fbc61a3c366cb6ae5335a1b2ae0c3796b495de3709d8", size = 1134722, upload-time = "2025-04-25T10:38:09.669565Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/7d/b77455d7c7c51255b2992b429107fab811b2e36ceaf76da1e55a045dc568/xyzservices-2025.4.0-py3-none-any.whl", hash = "sha256:8d4db9a59213ccb4ce1cf70210584f30b10795bff47627cdfb862b39ff6e10c9", size = 90391, upload-time = "2025-04-25T10:38:08.468801Z" },
+]
+
+[[package]]
 name = "yourdfpy"
 version = "0.0.58"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -6244,9 +6240,9 @@ name = "zarr"
 version = "3.1.5"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "donfig" },
+    { name = "donfig", version = "0.8.1.post1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "google-crc32c" },
-    { name = "numcodecs" },
+    { name = "numcodecs", version = "0.16.5", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "numpy" },
     { name = "packaging" },
     { name = "typing-extensions" },
@@ -6261,9 +6257,9 @@ name = "zarr"
 version = "3.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "donfig" },
+    { name = "donfig", version = "0.8.1.post1", source = { registry = "https://pypi.org/simple" } },
     { name = "google-crc32c" },
-    { name = "numcodecs" },
+    { name = "numcodecs", version = "0.16.5", source = { registry = "https://pypi.org/simple" } },
     { name = "numpy" },
     { name = "packaging" },
     { name = "typing-extensions" },

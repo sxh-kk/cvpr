@@ -147,6 +147,12 @@ python VLMExpert/scripts/data/extract_unifolm_dino.py \
 写入完成后才提交 receipt；只有所有 episode 齐全才把 manifest 标为 complete。
 原参数重跑会复用已提交 episode，未完成 episode 重新提取；来源或配置改变时拒绝复用。
 
+本机训练缓存已由8张 A100、8个 shard（每卡 batch64）完成：7244个 episode、
+5,416,386帧，完整有效历史对应5,199,066个训练样本。全量特征有限性、SHA256、
+原生帧／时间戳绑定和历史窗口检查已通过，详见
+[`unifolm_train_dino_final_validation.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/unifolm_train_dino_final_validation.json)。
+已验收的缓存继续复用；后续启动前检查 manifest 和身份，不重新提取。
+
 训练读取设置：
 
 ```python
@@ -180,9 +186,94 @@ VLM 当前帧保持原动作查询的30Hz时刻。缺少真实一秒历史、跨
 使用 [posttrain-dual-source-unifolm.sh](scripts/train/psi0/posttrain-dual-source-unifolm.sh)，
 必须显式提供 EgoDex VLM、Motion checkpoint、UnifoLM 数据路径／ID，以及
 `UNIFOLM_DINO_CACHE=/gaozt-test1/datasets/UnifoLM/dino/256x320`；
-脚本的 `--dry-run` 可先打印命令，不启动训练；`MOTION_USE_EMA=1/0` 指定初始化权重选择。
+脚本的 `--dry-run` 只打印命令，`--check-only` 先检查输入再打印命令，两者均不启动训练；
+`MOTION_USE_EMA=1/0` 指定初始化权重选择。
 数据 wrapper 自动把已完成的原生 DINO 缓存接入 `motion_img_embs`，并将同源、同时间的当前 RGB 交给所选策略处理；
 缺少或未完成的缓存明确报错，下载 ZIP 本身不会自动产生 DINO。
+
+#### 本机固定初始化
+
+[unifolm-local.env.sh](scripts/train/psi0/unifolm-local.env.sh) 固定本次选用的本地 Qwen3-VL
+（目录名含 `ego200k.he30k`）、MotionExpert 第100轮（`epoch=99-step=48700.ckpt`，EMA）、train／val 数据与缓存路径，
+以及已对齐的独立 Python3.11／Torch2.7 环境。该文件只导出配置，不创建环境或启动训练。
+`UNIFOLM_RUN_ROOT` 将训练输出设为仓库外的 `/gaozt-test1/datasets/UnifoLM/.pipeline/training`。
+从仓库根目录检查输入与最终命令：
+
+```bash
+source VLMExpert/scripts/train/psi0/unifolm-local.env.sh
+bash VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh --check-only dual_source_unifolm_local
+```
+
+本地权重验收记录为
+[`posttrain_initialization_weights.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/posttrain_initialization_weights.json)，
+包含路径、大小、mtime、完整 SHA256 及 tokenizer／processor 身份。Qwen 当前实测 SHA256 为
+`db31e5dd953f68febc11330f5a436a37d3bd02b735e206503f2cf000faad616c`，与旧 HF 下载旁路记录不同；
+本次保留用户选定的本地文件，不将该 SHA 声称为远端官方校验通过。
+配置中的 `UNIFOLM_INIT_WEIGHTS_RECORD` 使 `--check-only` 和实际启动先核对权重路径、大小、mtime、
+tokenizer／processor 小文件哈希及 EMA 选择；检查通过不表示环境或 GPU 联调已通过。
+如文件发生变化或需要重新校验，可手动运行以下完整哈希检查，
+无需在每次训练启动时重新扫描约10GB权重：
+
+```bash
+printf '%s  %s\n' \
+  "$EGO_DEX_VLM_SHA256" "$EGO_DEX_VLM_PATH/model.safetensors" \
+  "$MOTION_EXPERT_SHA256" "$MOTION_EXPERT_CHECKPOINT" | sha256sum --check
+```
+
+独立环境位于 `/gaozt-test1/datasets/UnifoLM/.pipeline/runtimes/psi0-py311-torch270-cu126`，
+使用 Python3.11.15、Torch2.7.0/CUDA12.6、Torchvision0.22.0、Transformers4.57.1、
+Accelerate1.7.0 和 FlashAttention2.7.4.post1。NumPy1.26.4、Pillow11.3.0、PyAV16.0.1
+与缓存图像处理环境一致；LeRobot 固定在 `09929d8057b044b53aecaf5c6d7eb71f99e8beb9`，
+`psi` editable 指向当前仓库。旧环境保留。环境重建可在仓库根目录执行：
+
+```bash
+source VLMExpert/scripts/train/psi0/unifolm-local.env.sh
+UV_PROJECT_ENVIRONMENT="${PSI_PYTHON%/bin/python}" uv sync \
+  --project VLMExpert --group psi --locked --python 3.11 --inexact
+uv pip install --python "$PSI_PYTHON" --no-deps \
+  'https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl'
+```
+
+该 FlashAttention wheel 对应 Python3.11、Torch2.7、CUDA12、C++11 ABI；后续同步环境保留
+`--inexact`，避免删除单独安装的 FlashAttention。入口允许直接使用已导出的环境变量，`.env` 为可选补充。
+真实处理器、LeRobot 解码及 collator 验收见
+[`psi0_runtime_validation.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_runtime_validation.json)。
+缓存、固定初始化、环境及完整模型 GPU 联调四项均已完成，正式训练尚未启动。
+
+#### 完整模型 GPU 验收
+
+[完整验收记录](../docs/unifolm_full_model_validation.json) 使用上述本地 Qwen3-VL、Motion 第100轮 EMA、
+真实 UnifoLM train／val 及完整 `1536×6` 双来源 action expert，共约30.13亿参数。
+Motion 输入完整11个 hidden，并将其均值作为 `p_M`；VLM 使用最后层有效 token 及 masked mean `p_V`。
+使用 A100 80GB、FP32 主参数、BF16 autocast 和 AdamW `foreach=False`，每项训练检查均累积2步并完成4次更新：
+
+| GPU × 每卡 batch | 峰值 allocated／reserved（GiB，取各卡最大值） | 结果 |
+| --- | --- | --- |
+| 1 × 1 | 48.55／51.13 | 前后向、五个参数组更新、采样均通过 |
+| 1 × 16 | 51.78／54.61 | 完整 batch 前后向与更新通过 |
+| 2 × 1 | 59.94／62.63 | 连续4次更新后两卡完整模型 SHA256 每次均一致；实际使用 NCCL P2P |
+
+单卡和双卡均从保存文件恢复完整模型、所有 AdamW 状态、scheduler 及 Python／NumPy／CPU／当前 CUDA RNG，
+恢复后的同输入预测逐位一致，再完成1次真实更新；双卡续跑后完整模型 SHA256 仍一致。
+双卡续跑峰值 allocated／reserved 为60.04／63.26 GiB。
+另用 `Psi0Model.from_pretrained` 冷加载保存结果，按相同精度比较预测，最大差异为0，峰值 allocated 8.18 GiB。
+同时修复了 Motion 共享位置编码被 safetensors 去重后无法严格加载，以及 Rich 日志文件链接消耗 Python RNG 的问题。
+本环境的数据／运行时回归100项、最终 checkpoint／模型集成回归91项分别通过，两套检查有重叠。
+
+可复用 [有限步数验收脚本](scripts/validation/validate_unifolm_full_model.py)；该入口只执行4～8次验收更新，
+不调用正式训练循环。以下为双卡检查示例，输出仍放在仓库外：
+
+```bash
+source VLMExpert/scripts/train/psi0/unifolm-local.env.sh
+CUDA_VISIBLE_DEVICES=0,1 NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=0 \
+  "$PSI_PYTHON" -m torch.distributed.run --standalone --nproc_per_node=2 \
+  VLMExpert/scripts/validation/validate_unifolm_full_model.py --mode train \
+  --output-dir "$UNIFOLM_DINO_ROOT/.pipeline/runs/full-model-new-check"
+```
+
+本轮没有启动正式40,000步训练，也没有执行八卡训练或八卡每卡 batch16 验收；上述显存来自限定步数检查，
+不代表正式吞吐。恢复检查覆盖状态恢复和继续更新，未验收中断前后数据游标逐步重放。
+HTTP／机器人历史缓冲的服务接线仍单独验收。
 
 | 参数组 | 初始学习率 | 来源 |
 | --- | --- | --- |

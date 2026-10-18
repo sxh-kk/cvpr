@@ -24,6 +24,8 @@ LOG_CONFIG = {
             "rich_tracebacks": True,
             "show_level": True,
             "show_path": True,
+            # Rich hyperlink IDs consume Python RNG, including after RNG restore.
+            "enable_link_path": False,
             "show_time": True,
         }
     },

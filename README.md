@@ -26,6 +26,14 @@ Motion 历史6帧保持 clean，复用现有 DINO 缓存；两路仍同源、同
 验证／`no_aug`／推理均保持 clean；通用 `shared_rgb` 在线同步增强模式继续保留。此项调整不启动训练或重做缓存。
 Python接口、数据与服务接线边界见 [双来源说明](VLMExpert/README.md#本仓库扩展双来源-action-expert)。
 
+UnifoLM 训练集 DINO 已完成八卡提取及最终完整性检查：7,244个 episode、5,416,386帧，
+可读取5,199,066个完整历史窗口。初始化固定本地 Qwen3-VL 实测权重身份与 Motion 第100轮 EMA，
+保留完整11个 motion hidden 及 mean pooling；独立 Python3.11／Torch2.7 环境已与当前工程对齐。
+真实完整模型已通过单卡 batch1／16、双卡每卡 batch1 的前后向与连续更新、保存恢复及冷加载检查，
+结果见 [完整模型验收记录](docs/unifolm_full_model_validation.json)，
+配置与显存范围见 [UnifoLM 联合训练配方](VLMExpert/README.md#unifolm-联合训练配方)。
+正式 UnifoLM 训练尚未启动；八卡正式训练与吞吐未在本轮验收。
+
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
 v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，
 并在5Hz增量中检查全部中间30Hz点及边。原SMPL-H参数、双手21点、world观测、地面、RGB、分割均保留。

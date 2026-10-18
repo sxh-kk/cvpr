@@ -1916,6 +1916,10 @@ class Psi0Model(nn.Module):
                             for key, value in state_dict.items() if key.startswith("motion_conditioner.")}
             if not motion_state:
                 raise ValueError("A complete dual_source_v1 checkpoint must include MotionExpert weights")
+            from psi.models.checkpoint_aliases import restore_shared_tensor_aliases
+            # Accelerate safetensors removes shared PE names. Restore only
+            # aliases proven by the target module, then retain strict loading.
+            motion_state = restore_shared_tensor_aliases(model.motion_conditioner, motion_state)
             model.motion_conditioner.load_state_dict(motion_state, strict=True)
             model.train(False)
 

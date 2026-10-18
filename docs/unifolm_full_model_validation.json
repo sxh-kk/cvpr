@@ -1,0 +1,613 @@
+{
+  "schema_version": 1,
+  "validated_utc": "2026-10-18T18:02:50.898034+00:00",
+  "passed": true,
+  "formal_training_started": false,
+  "ordered_steps_complete": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "cache": {
+    "episodes": 7244,
+    "native_frames": 5416386,
+    "eligible_histories": 5199066,
+    "all_features_finite": true,
+    "feature_sha_verified": true,
+    "manifest_signature": "52c4b0c9728587bceb866b48693f0cb0937f881151f95ae252235c5885969570",
+    "prior_numerical_audit_reused": [
+      0,
+      1
+    ]
+  },
+  "initialization": {
+    "vlm": {
+      "path": "/gaozt-test1/guanzerong/Psi0/cache/checkpoints/psi0/pre.fast.1by1.2601091803.ckpt.ego200k.he30k",
+      "model_type": "qwen3_vl",
+      "model_sha256": "db31e5dd953f68febc11330f5a436a37d3bd02b735e206503f2cf000faad616c",
+      "model_bytes": 4262742488,
+      "provenance": "User-selected existing local Qwen3-VL. Current payload SHA differs from legacy Hugging Face download metadata (6e63da17...); metadata is not treated as proof of current payload identity. No files overwritten."
+    },
+    "motion": {
+      "path": "/gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch/epoch=99-step=48700.ckpt",
+      "sha256": "e627cddede53588a7adfd5dba2a521f635927e62813798e9cf0502c994951528",
+      "bytes": 6415019251,
+      "mtime_ns": 1792211661700937107,
+      "archive_crc_passed": true,
+      "epoch_index": 99,
+      "completed_epochs": 100,
+      "global_step": 48700,
+      "use_ema": true,
+      "hidden_shape": [
+        11,
+        768
+      ],
+      "pooling": "mean(all11 hidden tokens), not an additional token",
+      "original_visual_profile": "256x480",
+      "unifolm_visual_profile": "256x320",
+      "cross_size_adaptation_explicit": true,
+      "dino_identity_and_normalization_unchanged": true
+    }
+  },
+  "runtime": {
+    "python": "3.11.15 (main, Aug  7 2026, 02:25:55) [Clang 22.1.3 ]",
+    "versions": {
+      "torch": "2.7.0",
+      "torchvision": "0.22.0",
+      "transformers": "4.57.1",
+      "accelerate": "1.7.0",
+      "pydantic": "2.10.6",
+      "numpy": "1.26.4",
+      "pillow": "11.3.0",
+      "av": "16.0.1",
+      "tyro": "0.9.32"
+    },
+    "torch_cuda": "12.6",
+    "flash_attn_version": "2.7.4.post1",
+    "psi_path": "/root/workspace/wbc/guanzerong/cvpr/VLMExpert/src/psi/__init__.py",
+    "lerobot_commit": "09929d8057b044b53aecaf5c6d7eb71f99e8beb9",
+    "actual_local_processor": true,
+    "actual_lerobot_decoder": true,
+    "actual_production_collator": true
+  },
+  "model": {
+    "head": {
+      "architecture_id": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
+      "architecture_signature": [
+        1146306883,
+        1,
+        80,
+        30,
+        1536,
+        6,
+        24,
+        2048,
+        45,
+        256,
+        1,
+        1,
+        4602678819172646912,
+        0,
+        11,
+        768
+      ],
+      "blocks": 6,
+      "branch_widths": [
+        [
+          1536,
+          1536,
+          1536
+        ],
+        [
+          1536,
+          1536,
+          1536
+        ],
+        [
+          1536,
+          1536,
+          1536
+        ],
+        [
+          1536,
+          1536,
+          1536
+        ],
+        [
+          1536,
+          1536,
+          1536
+        ],
+        [
+          1536,
+          1536,
+          1536
+        ]
+      ],
+      "class": "DualSourceActionTransformer",
+      "ffn_widths": [
+        6144,
+        6144,
+        6144,
+        6144,
+        6144,
+        6144
+      ],
+      "heads_per_self_vlm_motion_branch": [
+        [
+          24,
+          24,
+          24
+        ],
+        [
+          24,
+          24,
+          24
+        ],
+        [
+          24,
+          24,
+          24
+        ],
+        [
+          24,
+          24,
+          24
+        ],
+        [
+          24,
+          24,
+          24
+        ],
+        [
+          24,
+          24,
+          24
+        ]
+      ],
+      "hidden_dim": 1536,
+      "modulation_widths": [
+        18432,
+        18432,
+        18432,
+        18432,
+        18432,
+        18432
+      ]
+    },
+    "parameters": {
+      "components": {
+        "action_header": {
+          "elements": 481577632,
+          "elements_by_dtype": {
+            "torch.float32": 481577632
+          },
+          "frozen_elements": 0,
+          "frozen_tensors": 0,
+          "named_parameter_tensors": 257,
+          "trainable_elements": 481577632,
+          "trainable_tensors": 257
+        },
+        "lang_backbone": {
+          "elements": 1724376064,
+          "elements_by_dtype": {
+            "torch.float32": 1724376064
+          },
+          "frozen_elements": 0,
+          "frozen_tensors": 0,
+          "named_parameter_tensors": 310,
+          "trainable_elements": 1724376064,
+          "trainable_tensors": 310
+        },
+        "mm_projector": {
+          "elements": 100714496,
+          "elements_by_dtype": {
+            "torch.float32": 100714496
+          },
+          "frozen_elements": 0,
+          "frozen_tensors": 0,
+          "named_parameter_tensors": 24,
+          "trainable_elements": 100714496,
+          "trainable_tensors": 24
+        },
+        "motion_expert": {
+          "elements": 399806597,
+          "elements_by_dtype": {
+            "torch.float32": 399806597
+          },
+          "frozen_elements": 217589,
+          "frozen_tensors": 6,
+          "named_parameter_tensors": 1059,
+          "trainable_elements": 399589008,
+          "trainable_tensors": 1053
+        },
+        "vision_tower": {
+          "elements": 306242560,
+          "elements_by_dtype": {
+            "torch.float32": 306242560
+          },
+          "frozen_elements": 0,
+          "frozen_tensors": 0,
+          "named_parameter_tensors": 291,
+          "trainable_elements": 306242560,
+          "trainable_tensors": 291
+        }
+      },
+      "elements": 3012717349,
+      "named_parameter_metadata_sha256": "1d9b8a7f6b7effd36f4325524d26cd5b01dddfe50fae0d1de5781983ee569024",
+      "named_parameter_tensors": 1941,
+      "trainable_fp32_master_check": "passed"
+    },
+    "qwen_attention": {
+      "Qwen3VLTextAttention": {
+        "backend": "flash_attention_2",
+        "modules": 28
+      },
+      "Qwen3VLVisionAttention": {
+        "backend": "flash_attention_2",
+        "modules": 24
+      }
+    }
+  },
+  "gpu_cases": {
+    "single_v2": {
+      "records": [
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/single_v2/train_rank0.json",
+          "sha256": "3760b77d714a258547a258dac548cd37d01682cd014981fea70abab34704a953"
+        }
+      ],
+      "gpu_count": 1,
+      "batch_size_per_rank": 1,
+      "gradient_accumulation": 2,
+      "optimizer_updates": 4,
+      "rank_memory_bytes": [
+        {
+          "allocated_bytes": 35305233920,
+          "peak_allocated_bytes": 52127496192,
+          "peak_reserved_bytes": 54901342208,
+          "reserved_bytes": 54901342208
+        }
+      ],
+      "losses_per_rank": [
+        [
+          43.691375732421875,
+          39.211997985839844,
+          45.52324676513672,
+          35.12693786621094
+        ]
+      ],
+      "trainable_components_updated": [
+        "action_header",
+        "lang_backbone",
+        "mm_projector",
+        "motion_expert",
+        "vision_tower"
+      ],
+      "feature_shapes": {
+        "motion_tokens": [
+          1,
+          11,
+          768
+        ],
+        "p_m": [
+          1,
+          768
+        ],
+        "p_v": [
+          1,
+          2048
+        ],
+        "vlm_tokens": [
+          1,
+          1,
+          111,
+          2048
+        ]
+      }
+    },
+    "batch16": {
+      "records": [
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/batch16/train_rank0.json",
+          "sha256": "a796db9bc6d29c1650220c2210e9378bc42b79bd828ca35cc20fa1cf977ba23f"
+        }
+      ],
+      "gpu_count": 1,
+      "batch_size_per_rank": 16,
+      "gradient_accumulation": 2,
+      "optimizer_updates": 4,
+      "rank_memory_bytes": [
+        {
+          "allocated_bytes": 35922964992,
+          "peak_allocated_bytes": 55597612544,
+          "peak_reserved_bytes": 58638467072,
+          "reserved_bytes": 58638467072
+        }
+      ],
+      "losses_per_rank": [
+        [
+          44.203365325927734,
+          40.98228454589844,
+          54.98436737060547,
+          38.23981475830078
+        ]
+      ],
+      "trainable_components_updated": [
+        "action_header",
+        "lang_backbone",
+        "mm_projector",
+        "motion_expert",
+        "vision_tower"
+      ],
+      "feature_shapes": {
+        "motion_tokens": [
+          16,
+          11,
+          768
+        ],
+        "p_m": [
+          16,
+          768
+        ],
+        "p_v": [
+          16,
+          2048
+        ],
+        "vlm_tokens": [
+          16,
+          1,
+          111,
+          2048
+        ]
+      }
+    },
+    "ddp2_v2": {
+      "records": [
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/ddp2_v2/train_rank0.json",
+          "sha256": "7fb77dac155b1f95f5652f36f02c3a242a218d88ebc145f9f7e2d09cec64eed1"
+        },
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/ddp2_v2/train_rank1.json",
+          "sha256": "f206fb543aff84536de391e51a195b985de08f4dfb8e7f3130ab323d15a23874"
+        }
+      ],
+      "gpu_count": 2,
+      "batch_size_per_rank": 1,
+      "gradient_accumulation": 2,
+      "optimizer_updates": 4,
+      "rank_memory_bytes": [
+        {
+          "allocated_bytes": 47495655936,
+          "peak_allocated_bytes": 64359340032,
+          "peak_reserved_bytes": 67249373184,
+          "reserved_bytes": 67249373184
+        },
+        {
+          "allocated_bytes": 47494285824,
+          "peak_allocated_bytes": 64355045888,
+          "peak_reserved_bytes": 67236790272,
+          "reserved_bytes": 67236790272
+        }
+      ],
+      "losses_per_rank": [
+        [
+          49.815277099609375,
+          38.589576721191406,
+          43.505950927734375,
+          40.636253356933594
+        ],
+        [
+          40.12667465209961,
+          41.20859146118164,
+          49.22050094604492,
+          35.887611389160156
+        ]
+      ],
+      "trainable_components_updated": [
+        "action_header",
+        "lang_backbone",
+        "mm_projector",
+        "motion_expert",
+        "vision_tower"
+      ],
+      "feature_shapes": {
+        "motion_tokens": [
+          1,
+          11,
+          768
+        ],
+        "p_m": [
+          1,
+          768
+        ],
+        "p_v": [
+          1,
+          2048
+        ],
+        "vlm_tokens": [
+          1,
+          1,
+          111,
+          2048
+        ]
+      },
+      "all_rank_complete_model_state_sha256_equal_at_each_update": true,
+      "complete_model_state_sha256_each_update": [
+        "9f53ed654103c834080a8ba0618f3a4856f40efbfd924f59a4400a32b7ecabfc",
+        "7d0a8b258432058ded37f510708c793ded0e672e07ae68102304a60bf963d0e7",
+        "3cf8cd537e229b2dadc8ef2560513f2681e2ff113596c7ea6aa095ce50d6d31f",
+        "465a27464b1fa2db48581ebeb61b98ef38fb91b3324be57b6e66d679440a5b61"
+      ]
+    },
+    "single_resume_v2": {
+      "records": [
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/single_resume_v2/resume_rank0.json",
+          "sha256": "45cb1b735333771c29e1e098f92ca1e7bbda94ac231bdb6f16ce4484c22aae7d"
+        }
+      ],
+      "gpu_count": 1,
+      "batch_size_per_rank": 1,
+      "gradient_accumulation": 2,
+      "optimizer_updates": 1,
+      "rank_memory_bytes": [
+        {
+          "allocated_bytes": 35326629376,
+          "peak_allocated_bytes": 52217233920,
+          "peak_reserved_bytes": 55564042240,
+          "reserved_bytes": 55564042240
+        }
+      ],
+      "restored_model_all_adamw_slots_scheduler_python_numpy_cpu_active_cuda_rng_exact": true,
+      "pre_update_prediction_max_difference": 0.0,
+      "rng_restore": [
+        {
+          "actual_hash": "a2a67516dab7e6285c9da67bf55927ecf3d1021f68f387d24bb4aaea524987b6",
+          "expected_checkpoint_hash": "a2a67516dab7e6285c9da67bf55927ecf3d1021f68f387d24bb4aaea524987b6",
+          "legacy_reference_rng_drift": true,
+          "reference_sidecar_hash": "446b7ac8ce667034118579ee855a43262391dc36ac6e55bfe349d0815a4354a4",
+          "source": "random_states_0.pkl"
+        }
+      ]
+    },
+    "ddp2_resume_v2": {
+      "records": [
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/ddp2_resume_v2/resume_rank0.json",
+          "sha256": "3a776438127c3cc2cad6713ba3b233348dfa1c3010d0a370f98f7490d133a4b1"
+        },
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/ddp2_resume_v2/resume_rank1.json",
+          "sha256": "ce4908f3c7993e4255e9765aefad066c732fcb079dfc3e76d1cd4c3243c9e4ac"
+        }
+      ],
+      "gpu_count": 2,
+      "batch_size_per_rank": 1,
+      "gradient_accumulation": 2,
+      "optimizer_updates": 1,
+      "rank_memory_bytes": [
+        {
+          "allocated_bytes": 47539770368,
+          "peak_allocated_bytes": 64466317824,
+          "peak_reserved_bytes": 67924656128,
+          "reserved_bytes": 67924656128
+        },
+        {
+          "allocated_bytes": 47537577472,
+          "peak_allocated_bytes": 64452751360,
+          "peak_reserved_bytes": 67880615936,
+          "reserved_bytes": 67880615936
+        }
+      ],
+      "all_rank_complete_model_state_sha256_equal_at_each_update": true,
+      "complete_model_state_sha256_each_update": [
+        "c64abe39b0af5cb00edb32e795dbf20aeeb95acc4b36ecb8a1515c7b0dcd630c"
+      ],
+      "restored_model_all_adamw_slots_scheduler_python_numpy_cpu_active_cuda_rng_exact": true,
+      "pre_update_prediction_max_difference": 0.0,
+      "rng_restore": [
+        {
+          "actual_hash": "a2a67516dab7e6285c9da67bf55927ecf3d1021f68f387d24bb4aaea524987b6",
+          "expected_checkpoint_hash": "a2a67516dab7e6285c9da67bf55927ecf3d1021f68f387d24bb4aaea524987b6",
+          "legacy_reference_rng_drift": true,
+          "reference_sidecar_hash": "446b7ac8ce667034118579ee855a43262391dc36ac6e55bfe349d0815a4354a4",
+          "source": "random_states_0.pkl"
+        },
+        {
+          "actual_hash": "e153ac42109d28e34bb6116190ed89c0d97bf93e75784ba6576fca4d34b45427",
+          "expected_checkpoint_hash": "e153ac42109d28e34bb6116190ed89c0d97bf93e75784ba6576fca4d34b45427",
+          "legacy_reference_rng_drift": false,
+          "reference_sidecar_hash": "e153ac42109d28e34bb6116190ed89c0d97bf93e75784ba6576fca4d34b45427",
+          "source": "random_states_1.pkl"
+        }
+      ]
+    },
+    "single_inference_v2": {
+      "records": [
+        {
+          "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-20261018T172954Z/single_inference_v2/inference_rank0.json",
+          "sha256": "0e952be644ee6f620540b613d4c22aa19144c951a72ddf232314c153a16cb378"
+        }
+      ],
+      "gpu_count": 1,
+      "batch_size_per_rank": 1,
+      "gradient_accumulation": null,
+      "optimizer_updates": 0,
+      "rank_memory_bytes": [
+        {
+          "allocated_bytes": 7814743552,
+          "peak_allocated_bytes": 8787416576,
+          "peak_reserved_bytes": 9059696640,
+          "reserved_bytes": 9059696640
+        }
+      ],
+      "prediction_max_difference": 0.0,
+      "same_precision_reference": "BF16 VLM, FP32 Action/Motion masters under BF16 autocast"
+    }
+  },
+  "ddp_transport": {
+    "observed": [
+      "P2P/CUMEM/read"
+    ],
+    "ib_disabled": true,
+    "p2p_disabled": false,
+    "shared_memory_disabled": false
+  },
+  "cpu_validation": {
+    "runtime_and_data_regression": {
+      "passed": 100,
+      "record": {
+        "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_current_environment_tests.log",
+        "sha256": "41efedb873242675622c5795ec5d8159ba0c639b490475a92d21a22c530335bd"
+      }
+    },
+    "final_checkpoint_and_integration_regression": {
+      "passed": 91,
+      "record": {
+        "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_final_regression_tests.log",
+        "sha256": "09d41f800d63745766a78712eb7d5b7451a12061d9b41c1a356d04c2ee52996e"
+      }
+    }
+  },
+  "evidence": {
+    "cache_final": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/unifolm_train_dino_final_validation.json",
+      "sha256": "59ff910bbfbab88c0f3921eb0e7789d7604a7fc23412e358b16b2f8d8d5b8c41"
+    },
+    "initialization": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/posttrain_initialization_weights.json",
+      "sha256": "ab30336d7de6b717bb44c4ee525849921132c65896ffe6ea6826742de6848704"
+    },
+    "runtime": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_runtime_validation.json",
+      "sha256": "3f49c1b8aa7cfe398f741f492d75977e509966929256d2f48d4dea934a8078a7"
+    },
+    "lock_sync_check": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_environment_final_check.log",
+      "sha256": "551603c5fc62c74a594e5342fafca1e207814cbfcdf87bb4995b27eb3e3ca24f"
+    },
+    "formal_recipe_config": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/formal_recipe_config.json",
+      "sha256": "ad45a17ce704b928663221acb3ab340e997151631b68c543773bf0b10fc7c309"
+    },
+    "preflight_drift_rejection": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_initialization_preflight_validation.json",
+      "sha256": "60ce37d5ec84462df1620b86ab9b81cb1bdecf41d2ba98ff130e6a33c3ebccbb"
+    }
+  },
+  "repairs": [
+    "Restore only target-proven shared Motion PE aliases before strict cold loading; missing independent weights still fail.",
+    "Disable Rich file hyperlink IDs that consumed Python RNG after checkpoint save/load; compare restored RNG against the serialized checkpoint snapshot.",
+    "Repair uv.lock duplicate table, ambiguous dependency sources and missing xyzservices without upgrading the original432 packages.",
+    "Use optional dotenv, explicit outside-repository outputs, fixed initialization preflight, and AdamW foreach=False matching GPU acceptance."
+  ],
+  "limits": [
+    "Only bounded acceptance updates were run; no formal40000-step UnifoLM training or8-GPU training was started.",
+    "Measured GPU cases are1xB1,1xB16,and2xB1 with accumulation2; no production throughput claim or8-GPU/per-rankB16 qualification.",
+    "Resume verifies saved model/optimizer/scheduler/RNG and continued updates, not uninterrupted data-cursor replay.",
+    "Existing local Qwen payload is pinned by measured SHA; its legacy HF sidecar differs and is not asserted as remote provenance verification."
+  ]
+}

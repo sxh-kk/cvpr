@@ -381,6 +381,12 @@ ActionExpert从头初始化；每卡batch16、8卡、累积2步，全局batch256
 八卡确定性模式检查与新增防护的实际trainer路径分别验收，范围和局限见
 [重启验收记录](../docs/unifolm_assert_repair_validation.json)。短测不能证明全程不会再异常。
 
+修订后optimizer布局已实际保存，并通过两卡B16、累积2步的冷启动恢复与继续更新：
+模型／AdamW／scheduler及各卡RNG校验值精确恢复，五组参数继续更新且跨卡全模型校验一致。
+该项复用同16个真实窗口，覆盖恢复路径；不代表数据游标重放或吞吐验收。
+同进程保存、扰动再热加载虽恢复状态一致，后续反传曾OOM；不将热加载列为已验收用法。
+正式恢复使用退出后重新启动的冷恢复路径，不缩小batch。
+
 实际进程、唯一timestamp、启动命令、配置、输出目录与日志路径记录在
 [`current_unifolm_training.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json)。
 启动器为每次任务固定全部rank的同一timestamp，输出位于仓库外

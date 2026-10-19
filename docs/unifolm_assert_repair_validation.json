@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_utc": "2026-10-19T05:39:45.979527+00:00",
+  "checked_utc": "2026-10-19T05:55:32.616168+00:00",
   "original_run": {
     "timestamp": "261019022505",
     "state": "failed",
@@ -200,7 +200,7 @@
     "limitations": "Original step735 weights and image augmentation RNG were not saved; these candidate inputs do not reconstruct that failure state."
   },
   "restart": {
-    "state": "pending_final_gate_and_preflight",
+    "state": "ready_to_launch",
     "authorized": true,
     "resume": null,
     "global_batch": 256,
@@ -220,11 +220,45 @@
   "limitations": [
     "Original native CUDA assertion is not independently reproduced or proven eliminated.",
     "Eight updates and a standalone Motion stress test do not establish whole-run stability or hyperparameter optimality.",
-    "The revised optimizer excludes unused final-norm weight elements; do not directly resume the older validation optimizer."
+    "The revised optimizer excludes unused final-norm weight elements; do not directly resume the older validation optimizer.",
+    "Same-process save/load exact-state hashes passed but subsequent backward ran out of GPU memory; cold restart of that checkpoint replayed the identical batch and updated successfully without changing batch or production code. Hot reloading is not accepted."
   ],
   "current_optimizer_save_restore_gate": {
-    "state": "pending",
-    "scope": "2GPU same-process full model save/load followed by a real training update; current optimizer layout"
+    "state": "complete_cold_restore_and_update_passed",
+    "warm_restore": {
+      "model_optimizer_scheduler_and_all_rank_rng_exact_restore": true,
+      "continued_update_passed": false,
+      "continued_update_error": "rank0 CUDA OOM during backward",
+      "cause_proven": false,
+      "checkpoint": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/current-layout-warm-restore-2gpu-b16-20261019/runs/posttrain/bounded_full_model_acceptance.us.flow1000.consta.lr1.0e-04.b64.gpus2.bounded/checkpoints/ckpt_4",
+      "checkpoint_bytes": 35846713022,
+      "evidence_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/current-layout-warm-restore-2gpu-b16-20261019",
+      "scope": "same-process save -> intentional mutation -> load; whole warm test failed at continuation"
+    },
+    "cold_continuation": {
+      "state": "passed",
+      "evidence_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/current-layout-cold-continue-2gpu-b16-20261019",
+      "scope": "default Accelerator cold load of current optimizer layout; repeated actual OOM diagnostic batch; no dataset position replay or distinct batch claim",
+      "passed": true,
+      "gpu_count": 2,
+      "per_gpu_batch": 16,
+      "accumulation": 2,
+      "nominal_global_batch": 64,
+      "unique_input_windows": 16,
+      "optimizer_updates": 1,
+      "model_optimizer_scheduler_and_all_rank_rng_exact": true,
+      "all_five_parameter_groups_updated": true,
+      "all_rank_full_model_sha_equal": true,
+      "full_model_sha256": "3b62d8a75f5dbb1e37e772fcd96848480a3b0a36900b4727256324884ea56f87",
+      "map_location_override": null,
+      "explicit_gc_or_empty_cache": false,
+      "peak_allocated_gib": 63.492098808288574,
+      "peak_reserved_gib": 66.517578125,
+      "rank_reports": [
+        "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/current-layout-cold-continue-2gpu-b16-20261019/cold_continue_rank0.json",
+        "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/current-layout-cold-continue-2gpu-b16-20261019/cold_continue_rank1.json"
+      ]
+    }
   },
   "final_cpu_regression_suite": {
     "passed": 72,

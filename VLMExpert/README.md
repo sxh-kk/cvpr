@@ -457,6 +457,48 @@ NaN／Inf保护、实际 AdamW 保存恢复和真实 Tyro 配方解析均走CPU�
 吞吐需隔离预热、验证和保存的耗时，记录稳态秒／更新及 peak allocated／reserved，
 不能从CPU等价或短时利用率推算实际加速比。
 
+#### Loss 每100步持续绘图
+
+`scripts/analysis/monitor_training_loss.py` 是独立的 CPU 观察进程：默认每10秒只读控制台日志末尾，
+每跨过100次优化器更新，才提取本地 W&B 的完整精度记录并刷新图表。
+W&B `_step=0` 对应第1次更新；分组为1–100、101–200，按同一步最后一条 `train/loss` 去重。
+只有连续齐全100步才作为完整组，未齐或尚未写盘时等待重试；尾段在图中用虚线单独标注。
+当前 `train/loss` 沿用原训练口径，为最后一个累积 microbatch 的八卡均值。
+
+绘图与提取分别使用独立解释器／包目录，不修改训练环境，不导入训练模型，不占 GPU，
+不登录或同步 W&B。绑定 timestamp、run目录、训练PID及进程启动标识，遇到换run或训练结束自行退出，
+最后更新可读取到的数据；文件锁阻止同一输出目录出现重复监控。
+监控出错只记录并重试，不向训练进程发送信号。
+
+当前任务固定输出目录为
+`/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261019053758`：
+
+- `loss_100step.png`／`.svg`：完整趋势与近期放大；在同一路径原子替换。
+- `loss_100step.csv`、`loss_per_update.csv`、`loss_summary.json`：均值及原始记录。
+- `loss_plot_metadata.json`：已实际完成渲染的最后完整步数；提取成功但绘图失败不会跳过该组。
+- `monitor_status.json`、`monitor_events.jsonl`、`monitor.log`：PID、心跳、下次刷新步数和错误。
+
+在准备 worktree 中启动（默认 detached；已运行时复用，不增加第二个监控）：
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr-speedup
+python3 VLMExpert/scripts/analysis/monitor_training_loss.py \
+  --state /gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json \
+  --output-dir /gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261019053758 \
+  --extract-python /gaozt-test1/datasets/UnifoLM/.pipeline/runtimes/psi0-py311-torch270-cu126/bin/python \
+  --plot-python "$(command -v python3)" \
+  --plot-library-dir /root/.cache/cvpr-loss-plot-libs
+```
+
+`--mode status` 配合相同 `--state`／`--output-dir` 查看监控存活、最新渲染步数和下一刷新点。
+图表文件在后台更新；聊天里已经显示的图片是生成时的快照，重新打开文件可查看新版本。
+观察进程可独立退出；训练启动方式、学习率、batch及checkpoint保存均不受其控制。
+
+2026-10-19 08:08 UTC已为当前任务启动独立观察进程，实际自动刷新到完整第1400步，
+下一刷新点为1500；实时心跳／错误和后续进度以输出目录的 `monitor_status.json` 为准。
+15项CPU回归通过，覆盖真实W&B记录的去重／截断／缺步、窗口边界、日志未齐时重试、
+重复启动锁及训练退出同时最终绘图失败时仍能退出；真实本地记录的提取与PNG／SVG生成也已通过。
+
 ```bash
 cd VLMExpert
 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \

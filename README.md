@@ -53,6 +53,9 @@ W&B使用离线本地记录；此前短时验收不代表长期收敛或正式�
 CPU 等价性、分布式更新和恢复验证范围及默认只检查入口见
 [提速准备](VLMExpert/README.md#unifolm-提速准备未切换当前训练)。真实 GPU 精度、显存和吞吐仍待单独验收。
 
+训练 loss 可由独立 CPU 观察进程按每100次优化器更新聚合并持续刷新 PNG／SVG／CSV，
+入口与状态文件见 [Loss 持续绘图](VLMExpert/README.md#loss-每100步持续绘图)；不改动训练进程或日志写入。
+
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
 v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，
 并在5Hz增量中检查全部中间30Hz点及边。原SMPL-H参数、双手21点、world观测、地面、RGB、分割均保留。

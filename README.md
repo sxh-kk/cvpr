@@ -30,9 +30,12 @@ UnifoLM 训练集 DINO 已完成八卡提取及最终完整性检查：7,244个 
 可读取5,199,066个完整历史窗口。初始化固定本地 Qwen3-VL 实测权重身份与 Motion 第100轮 EMA，
 保留完整11个 motion hidden 及 mean pooling；独立 Python3.11／Torch2.7 环境已与当前工程对齐。
 真实完整模型已通过单卡 batch1／16、双卡每卡 batch1 的前后向与连续更新、保存恢复及冷加载检查，
-结果见 [完整模型验收记录](docs/unifolm_full_model_validation.json)，
+结果见 [完整模型验收记录](docs/unifolm_full_model_validation.json)。
+新增 [八卡每卡 batch16 验收](docs/unifolm_8gpu_batch16_validation.json) 连续8次更新通过，
+累积2步、有效batch256，每步八卡完整模型哈希一致；峰值allocated／reserved为63.15／65.95 GiB。
 配置与显存范围见 [UnifoLM 联合训练配方](VLMExpert/README.md#unifolm-联合训练配方)。
-正式 UnifoLM 训练尚未启动；八卡正式训练与吞吐未在本轮验收。
+Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM的运动先验训练方式；
+新head和VLM继续使用Ψ₀分组LR。正式UnifoLM训练尚未启动，本轮未作长期收敛与正式吞吐验收。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
 v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，

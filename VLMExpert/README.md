@@ -245,13 +245,21 @@ uv pip install --python "$PSI_PYTHON" --no-deps \
 [完整验收记录](../docs/unifolm_full_model_validation.json) 使用上述本地 Qwen3-VL、Motion 第100轮 EMA、
 真实 UnifoLM train／val 及完整 `1536×6` 双来源 action expert，共约30.13亿参数。
 Motion 输入完整11个 hidden，并将其均值作为 `p_M`；VLM 使用最后层有效 token 及 masked mean `p_V`。
-使用 A100 80GB、FP32 主参数、BF16 autocast 和 AdamW `foreach=False`，每项训练检查均累积2步并完成4次更新：
+使用 A100 80GB、FP32 主参数、BF16 autocast 和 AdamW `foreach=False`，均累积2步；
+单卡／双卡完成4次更新，新增八卡检查完成8次更新：
 
 | GPU × 每卡 batch | 峰值 allocated／reserved（GiB，取各卡最大值） | 结果 |
 | --- | --- | --- |
 | 1 × 1 | 48.55／51.13 | 前后向、五个参数组更新、采样均通过 |
 | 1 × 16 | 51.78／54.61 | 完整 batch 前后向与更新通过 |
 | 2 × 1 | 59.94／62.63 | 连续4次更新后两卡完整模型 SHA256 每次均一致；实际使用 NCCL P2P |
+| 8 × 16 | 63.15／65.95 | 8次更新后八卡完整模型 SHA256 每次均一致；五组参数均更新，实际使用 NCCL P2P |
+
+2026-10-19 的 [八卡 batch16 验收记录](../docs/unifolm_8gpu_batch16_validation.json) 覆盖2048个不同训练窗口，
+常规有效全局 batch为 `8×16×2=256`。八份报告全部通过，损失、clip前梯度和更新后参数均有限，
+VLM／Motion 完整tokens及两个pooling分支均收到非零梯度；冻结参数与clean DINO输入保持不变。
+PyTorch峰值 allocated／reserved 为63.15／65.95 GiB；另以1秒间隔采样 NVML，驱动占用最高67.07 GiB。
+八卡采样与checkpoint保存通过，进程正常退出并释放全部GPU占用；本次没有重复八卡冷恢复。
 
 单卡和双卡均从保存文件恢复完整模型、所有 AdamW 状态、scheduler 及 Python／NumPy／CPU／当前 CUDA RNG，
 恢复后的同输入预测逐位一致，再完成1次真实更新；双卡续跑后完整模型 SHA256 仍一致。
@@ -261,18 +269,20 @@ Motion 输入完整11个 hidden，并将其均值作为 `p_M`；VLM 使用最后
 本环境的数据／运行时回归100项、最终 checkpoint／模型集成回归91项分别通过，两套检查有重叠。
 
 可复用 [有限步数验收脚本](scripts/validation/validate_unifolm_full_model.py)；该入口只执行4～8次验收更新，
-不调用正式训练循环。以下为双卡检查示例，输出仍放在仓库外：
+不调用正式训练循环。以下为八卡每卡batch16检查示例，输出仍放在仓库外：
 
 ```bash
 source VLMExpert/scripts/train/psi0/unifolm-local.env.sh
-CUDA_VISIBLE_DEVICES=0,1 NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=0 \
-  "$PSI_PYTHON" -m torch.distributed.run --standalone --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=0 \
+  "$PSI_PYTHON" -m torch.distributed.run --standalone --nproc_per_node=8 \
   VLMExpert/scripts/validation/validate_unifolm_full_model.py --mode train \
+  --batch-size 16 --accumulation 2 --updates 8 \
   --output-dir "$UNIFOLM_DINO_ROOT/.pipeline/runs/full-model-new-check"
 ```
 
-本轮没有启动正式40,000步训练，也没有执行八卡训练或八卡每卡 batch16 验收；上述显存来自限定步数检查，
-不代表正式吞吐。恢复检查覆盖状态恢复和继续更新，未验收中断前后数据游标逐步重放。
+本轮没有启动正式40,000步训练；上述显存来自限定步数检查，不代表正式吞吐。
+GPU验收使用真实数据、collator和Accelerator，但在主进程解码（workers0），未验收正式多worker吞吐。
+此前单／双卡恢复检查覆盖状态恢复和继续更新，未验收中断前后数据游标逐步重放。
 HTTP／机器人历史缓冲的服务接线仍单独验收。
 
 | 参数组 | 初始学习率 | 来源 |
@@ -295,6 +305,42 @@ Motion 仅冻结当前 hidden 接口不使用的运动输出头、被完整遮�
 注意力、图像投影、时间编码、路由器、共享／路由专家均可训练。MoE 并非每批命中全部专家，
 该模式 DDP 使用 `find_unused_parameters=True, static_graph=False`。
 新 head 从头初始化，不能沿用冻结阶段或原 joint head 的 optimizer 状态。
+
+#### 学习率与有效 batch 的选择
+
+2026-10-19 按当前方案，新 action head 与 VLM 的分组学习率保持 Ψ₀ 一致，重点比较引入全身运动先验的方法。
+建议 MotionExpert 的峰值 LR 保持 `1e-5`，batch 保持 **8卡 × 每卡16 × 累积2步 = 常规有效全局 batch256**。
+这是一组有论文依据、且通过八卡运行检查的初值，尚未做收敛最优性比较。
+正式脚本需显式设置 `NPROC_PER_NODE=8`；只设置 `CUDA_VISIBLE_DEVICES` 不会改变该脚本默认的单进程数。
+
+| 相关工作及机器人后训练阶段 | 有效全局 batch | 公开学习率 | 运动先验的实际训练方式 |
+| --- | --- | --- | --- |
+| [WholeBodyWAM：Scalable Motion Priors，Table A3](https://arxiv.org/html/2609.18197v2#A0.SS3.SSS5) | 8×4＝32 | Stage II统一报告 `1e-5`，未单列Motion组倍率；约5%warmup、20k步cosine | Motion Expert从Stage I初始化并全程可训；联合video、motion、action三项损失，是最直接参考 |
+| [λ₀ 原论文](https://arxiv.org/html/2610.00438v1)及[当前官方posttrain recipe](https://github.com/LambdaHumanoid/openlambda/blob/a1257e4aca0c64febdec4b89704a1aba8187f156/lambda0/lambda0/recipes/posttrain.json) | 8×4×1＝32条观测 | 高层生成模型 `5e-5`；50k步 | SONIC运动编码器冻结、不在高层优化器中；该LR不是可训练MotionExpert的微调LR |
+| [WB-WAM后训练配置](https://github.com/WB-WaM/WB-WAM-Official/blob/6a9bf12d6c36d42ec66ee2aa7235ea2058175c40/training/configs/wb_task/_base/posttrain.yaml)及[八进程示例](https://github.com/WB-WaM/WB-WAM-Official/blob/6a9bf12d6c36d42ec66ee2aa7235ea2058175c40/training/README.md) | 示例推算8×16×1＝128 | Video／Action／proprio统一 `1e-4`；50epochs | 运动监督融入Video／Action模型，没有单列Motion Expert；其统一LR不是Motion专属LR |
+
+这里的WholeBodyWAM指Bowei Zhang等的 `2609.18197v2`，与另一篇WBC-grounded同名工作
+`2609.16644`及WB-WAM `2609.34199`均不同。WholeBodyWAM作者代码仍Coming Soon，表中数值来自论文，
+不能声称已核验其optimizer分组实现。λ₀数值来自当前发布recipe，其Stage I/II协议与原论文有修订；
+每观测4份flow噪声不等于4条独立观测。WB-WAM的global128根据公开八进程命令和本地batch语义计算，
+并非论文明确报告的实验global batch。
+
+因此，Motion `1e-5` 有最接近的WholeBodyWAM后训练数量级支持；它相当于我们新头峰值LR的十分之一，
+作为已预训练运动主干的适配起点较合理。当前本工程仅由action flow loss反传，
+WholeBodyWAM另保留motion prediction loss，不能据其结果保证我们的运动表示不会遗忘。
+若后续观察到验证误差或运动表示退化，可在固定batch256、数据顺序和样本预算下，
+将Motion `5e-6`作为更保守对照；本轮没有执行这项收敛实验。
+其他方法的global32／128对应不同模型、输入与示范预算，不能据此把Motion LR按32→256直接乘8。
+batch256继续匹配同数据的Ψ₀配方，保留1000步warmup和cosine，VLM与新头LR保持上表设定。
+
+正式日程保持1000次优化器更新 warmup、40,000次更新 cosine。当前5199066个有效历史窗口下，
+batch256对应约20,309次更新／遍，40k约为1.97遍窗口抽样；相邻30Hz窗口和动作chunk重叠，
+该数字不表示独立场景数量。Ψ₀同为40k更新；按本机对应的完整train pack原生5,416,386行算约1.89遍，
+本工程历史筛选后约1.97遍，两者均接近2遍。Accelerate在epoch尾可能刷新不足2个microbatch的累积，末次有效batch会较小。
+`PosttrainTrainer` 给 scheduler 的步数乘world size，与 Accelerate1.7每次同步更新内部推进world size次相抵；
+实际 warmup仍是1000次优化器更新。短时显存和参数一致性检查用于验收运行正确性，不能证明上述超参数最优。
+正式入口同时修复了history wrapper被误判为sharded数据、无法统计样本数的问题，
+以及epoch日志重复乘world size的问题；9项针对性CPU回归和真实4418行val历史wrapper长度检查通过。
 
 数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
 双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。

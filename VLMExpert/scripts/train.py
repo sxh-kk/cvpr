@@ -248,7 +248,7 @@ def train(config: LaunchConfig):
     overwatch.info(f"Max training Epochs = {trainer.max_training_epochs}", ctx_level=1)
     overwatch.info(f"Total optimization steps = {trainer.max_training_steps}", ctx_level=2)
     overwatch.info(f"Num steps Per Epoch = {trainer.num_steps_per_epoch}", ctx_level=2)
-    overwatch.info(f"Effective training epochs = {trainer.max_training_steps/trainer.num_steps_per_epoch*trainer.world_size:.2f}", ctx_level=2)
+    overwatch.info(f"Effective training epochs = {trainer.max_training_steps/trainer.num_steps_per_epoch:.2f}", ctx_level=2)
     overwatch.info(f"Global train batch size (w. parallel, distributed & accumulation) = {trainer.global_train_batch_size}", ctx_level=1)
     overwatch.info(f"Device train batch size = {trainer.device_train_batch_size}", ctx_level=2)
     overwatch.info(f"Gradient Accumulation steps = {trainer.gradient_accumulation_steps}", ctx_level=2)

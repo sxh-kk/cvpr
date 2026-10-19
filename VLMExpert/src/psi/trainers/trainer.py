@@ -41,6 +41,19 @@ def should_save_training_checkpoint(
         or completed_step == max_training_steps
     )
 
+
+def _trainer_dataset_length(dataset) -> int:
+    """Use shard frame counts only for members that expose shard lengths.
+
+    Other wrappers expose ``datasets`` as episode iteration views, including
+    the filtered DINO-history wrapper. Their map-style length remains authoritative.
+    """
+    members = getattr(getattr(dataset, "raw_dataset", None), "datasets", None)
+    if members is not None and all(hasattr(member, "shard_lengths") for member in members):
+        return sum(sum(member.shard_lengths) for member in members)
+    return dataset.dataset_length if hasattr(dataset, "dataset_length") else len(dataset)
+
+
 def worker_init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     random.seed(worker_seed)
@@ -245,13 +258,7 @@ class Trainer(ABC):
         if hasattr(self, "_len_train_dataset") and self._len_train_dataset: # type: ignore
             return self._len_train_dataset # type: ignore
         
-        # HACK for ShardedLeRobotMixtureDataset
-        if (hasattr(self.train_dataset, "raw_dataset") and 
-            hasattr(self.train_dataset.raw_dataset, "datasets")
-        ):
-            return sum(sum(ds.shard_lengths) for ds in self.train_dataset.raw_dataset.datasets)
-
-        return self.train_dataset.dataset_length if hasattr(self.train_dataset, "dataset_length") else len(self.train_dataset)  # type: ignore
+        return _trainer_dataset_length(self.train_dataset)
 
     @len_train_dataset.setter
     def len_train_dataset(self, length: int):
@@ -262,12 +269,7 @@ class Trainer(ABC):
         """Returns the length of the validation dataset."""
         if hasattr(self, "_len_val_dataset") and self._len_val_dataset: # type: ignore
             return self._len_val_dataset # type: ignore
-        # HACK for ShardedLeRobotMixtureDataset
-        if (hasattr(self.val_dataset, "raw_dataset") and 
-            hasattr(self.val_dataset.raw_dataset, "datasets")
-        ):
-            return sum(sum(ds.shard_lengths) for ds in self.val_dataset.raw_dataset.datasets)
-        return self.val_dataset.dataset_length if hasattr(self.val_dataset, "dataset_length") else len(self.val_dataset)  # type: ignore
+        return _trainer_dataset_length(self.val_dataset)
     
     @len_val_dataset.setter
     def len_val_dataset(self, length: int):

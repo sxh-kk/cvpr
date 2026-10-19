@@ -473,7 +473,7 @@ W&B `_step=0` 对应第1次更新；分组为1–100、101–200，按同一步�
 当前任务固定输出目录为
 `/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261019053758`：
 
-- `loss_100step.png`／`.svg`：完整趋势与近期放大；在同一路径原子替换。
+- `loss_100step.png`／`.svg`：全程概览、最近1000步逐步波动和最近500步完整均值放大；原始loss为浅灰细线，100步均值为细绿线，未满100步尾段为橙色虚线。均值放大图独立缩放纵轴，只绘制完整分组；没有额外平滑或插值。图片在同一路径原子替换，每100步刷新策略不变。
 - `loss_100step.csv`、`loss_per_update.csv`、`loss_summary.json`：均值及原始记录。
 - `loss_plot_metadata.json`：已实际完成渲染的最后完整步数；提取成功但绘图失败不会跳过该组。
 - `monitor_status.json`、`monitor_events.jsonl`、`monitor.log`：PID、心跳、下次刷新步数和错误。

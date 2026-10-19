@@ -242,6 +242,24 @@ def plot(args: argparse.Namespace, run: dict[str, Any]) -> int:
         print(json.dumps({"status": "waiting", "latest_complete_update": last_complete,
                           "minimum_complete_update": args.minimum_complete_update}, ensure_ascii=False))
         return WAIT_FOR_DATA
+    latest = report["latest_flushed_update"]
+    with (args.output_dir / "loss_per_update.csv").open(newline="", encoding="utf-8") as handle:
+        raw = {int(row["completed_update"]): float(row["logged_train_loss"])
+               for row in csv.DictReader(handle) if int(row["completed_update"]) <= latest}
+    # Extraction publishes CSV before the summary. Only use its bound prefix,
+    # and check means in case a newer scan replaced duplicate earlier records.
+    expected_steps = set(range(1, latest + 1)) - set(report["missing_updates"])
+    if set(raw) != expected_steps or len(raw) != report["distinct_loss_records"]:
+        raise ValueError("Per-update CSV does not match the summary snapshot; extract it again")
+    if any(not math.isfinite(value) for value in raw.values()):
+        raise ValueError("Per-update CSV contains non-finite loss")
+    for row in report["bins"]:
+        values = [raw[step] for step in range(row["start_update"], row["end_update"] + 1)
+                  if step in raw]
+        if len(values) != row["count"] or not math.isclose(
+            statistics.fmean(values), row["mean_loss"], rel_tol=1e-12, abs_tol=1e-12
+        ):
+            raise ValueError("Per-update losses differ from summary means; extract it again")
     # Do not even import matplotlib until the requested full window is ready.
     import matplotlib
     matplotlib.use("Agg")
@@ -257,24 +275,31 @@ def plot(args: argparse.Namespace, run: dict[str, Any]) -> int:
                          "axes.labelcolor": "#334155", "text.color": "#0f172a",
                          "xtick.color": "#475569", "ytick.color": "#475569", "svg.fonttype": "none"})
     window = args.window
-    recent_start = 6 * window + 1
+    recent_start = max(1, latest - 10 * window + 1)
+    detail_start = max(1, last_complete - 5 * window + 1)
     partial = [row for row in report["bins"]
                if not row["complete"] and row.get("continuous", False)
                and row["end_update"] == report["latest_flushed_update"]
                and row["start_update"] > last_complete]
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.1), gridspec_kw={"width_ratios": [1.08, 1]})
+    fig = plt.figure(figsize=(14, 8.4))
+    grid = fig.add_gridspec(2, 2, width_ratios=[1, 1.5], height_ratios=[1.05, 1])
+    axes = [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1]), fig.add_subplot(grid[1, :])]
     fig.patch.set_facecolor("white")
-    fig.suptitle(f"UnifoLM 后训练：每{window}步记录的平均 Loss", x=0.075, ha="left", y=0.975,
-                 fontsize=19, fontweight="bold")
-    fig.text(0.075, 0.895,
+    fig.suptitle("UnifoLM 后训练 · Loss 趋势与波动", x=0.075, ha="left", y=0.975,
+                 fontsize=18, fontweight="bold")
+    fig.text(0.075, 0.925,
              f"连续、不重叠分组：1–{window}、{window+1}–{2*window}…  |  已记录 {report['latest_flushed_update']:,} 步  |  {len(complete)} 个完整分组",
              fontsize=10.5, color="#64748b")
     color = "#0f766e"
     for index, ax in enumerate(axes):
-        rows = complete if index == 0 else [row for row in complete if row["start_update"] >= recent_start]
-        recent_available = bool(rows)
-        if not rows:
-            rows = complete
+        start = (1, recent_start, detail_start)[index]
+        rows = [row for row in complete if row["end_update"] >= start]
+        if index < 2:
+            raw_x = list(range(start, latest + 1))
+            # Missing updates remain gaps, rather than fabricated interpolation.
+            ax.plot(raw_x, [raw.get(step, math.nan) for step in raw_x],
+                    color="#94a3b8", alpha=0.65, linewidth=0.45, zorder=1,
+                    label="逐步 Loss")
         # Retain NaN gaps for missing/incomplete interior windows, rather than
         # visually connecting nonadjacent completed groups as if data existed.
         x, y = [], []
@@ -286,45 +311,57 @@ def plot(args: argparse.Namespace, run: dict[str, Any]) -> int:
             x.append(row["end_update"])
             y.append(row["mean_loss"])
             previous_end = row["end_update"]
-        ax.plot(x, y, color=color, linewidth=2.6, marker="o", markersize=5.3,
-                markeredgecolor="white", markeredgewidth=0.8, label=f"完整{window}步均值")
-        if partial:
+        ax.plot(x, y, color=color, linewidth=1.0, marker="o", markersize=3.0,
+                markeredgecolor="white", markeredgewidth=0.45, zorder=3,
+                label=f"完整{window}步均值")
+        if partial and index < 2:
             tail = partial[-1]
-            adjacent = rows[-1]["end_update"] + 1 == tail["start_update"]
+            adjacent = bool(rows) and rows[-1]["end_update"] + 1 == tail["start_update"]
             tail_x = [rows[-1]["end_update"], tail["end_update"]] if adjacent else [tail["end_update"]]
             tail_y = [rows[-1]["mean_loss"], tail["mean_loss"]] if adjacent else [tail["mean_loss"]]
-            ax.plot(tail_x, tail_y, linestyle="--", color="#d97706", linewidth=1.6,
-                    marker="o", markersize=4.7, label=f"尾段均值（{tail['count']}/{window}步）")
-        title = "完整趋势" if index == 0 else (
-            f"近期趋势放大（第{recent_start}步起）" if recent_available else "近期趋势放大"
-        )
-        ax.set_title(title, loc="left", fontsize=12.5, pad=13, fontweight="bold")
-        ax.set_xlabel("已完成的优化器更新步数", labelpad=9)
-        ax.set_ylabel("平均训练 Loss", labelpad=8)
-        ax.grid(axis="y", color="#e2e8f0", linewidth=0.8)
+            ax.plot(tail_x, tail_y, linestyle="--", color="#d97706", linewidth=0.8,
+                    marker="o", markersize=2.7, zorder=3,
+                    label=f"尾段均值（{tail['count']}/{window}步）")
+        title = ("全程概览",
+                 f"最近 {10 * window} 步 · 逐步波动（{recent_start}–{latest}）",
+                 f"最近 {5 * window} 步 · 均值细节（{detail_start}–{last_complete}，纵轴放大）")[index]
+        ax.set_title(title, loc="left", fontsize=11.5, pad=11, fontweight="bold")
+        ax.set_xlabel("已完成的优化器更新步数", labelpad=6, fontsize=10)
+        ax.set_ylabel("训练 Loss" if index < 2 else f"{window}步平均 Loss", labelpad=8, fontsize=10)
+        ax.grid(axis="y", color="#e2e8f0", linewidth=0.55)
         ax.set_axisbelow(True)
         ax.spines["left"].set_color("#cbd5e1")
         ax.spines["bottom"].set_color("#cbd5e1")
-        ax.tick_params(axis="both", length=0, pad=7)
+        ax.tick_params(axis="both", length=0, pad=6, labelsize=9)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
-        ax.margins(x=0.09, y=0.16)
+        ax.margins(x=0.035, y=0.18)
         if index == 0:
             ax.set_ylim(bottom=0)
             ax.annotate(f"{y[0]:.2f}", (x[0], y[0]), xytext=(7, 7), textcoords="offset points",
                         color=color, fontsize=10)
-        else:
+        elif index == 2:
+            # Only complete means set the zoom range: step noise and an early
+            # partial mean must not hide fluctuations between complete groups.
+            means = [row["mean_loss"] for row in rows]
+            spread = max(means) - min(means)
+            pad = max(spread * 0.28, max(abs(value) for value in means) * 0.012, 1e-3)
+            ax.set_ylim(min(means) - pad, max(means) + pad)
+            ax.set_xticks([row["end_update"] for row in rows])
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
             for row in rows[-5:]:
                 ax.annotate(f"{row['mean_loss']:.3f}", (row["end_update"], row["mean_loss"]),
-                            xytext=(0, 10), textcoords="offset points", color=color, fontsize=9, ha="center")
-            ax.legend(loc="upper right", frameon=False, fontsize=9)
+                            xytext=(0, 9), textcoords="offset points", color=color, fontsize=9, ha="center")
+        if index == 1:
+            ax.legend(loc="upper right", frameon=True, facecolor="white", edgecolor="none",
+                      framealpha=0.9, fontsize=8.5)
     last = complete[-1]
-    fig.text(0.075, 0.045,
+    fig.text(0.075, 0.052,
              f"最近完整分组：第{last['start_update']}–{last['end_update']}步，平均 Loss = {last['mean_loss']:.4f}",
              fontsize=11, color=color, fontweight="bold")
-    fig.text(0.075, 0.007,
+    fig.text(0.075, 0.018,
              "来源：本地 W&B 完整精度记录；每步 Loss 沿用当前训练记录口径（最后一个累积 microbatch 的全卡均值）。",
              fontsize=8.8, color="#64748b")
-    fig.subplots_adjust(left=0.075, right=0.98, bottom=0.22, top=0.78, wspace=0.25)
+    fig.subplots_adjust(left=0.075, right=0.98, bottom=0.15, top=0.85, wspace=0.22, hspace=0.53)
     temporary_paths = []
     try:
         for extension in ("png", "svg"):
@@ -337,6 +374,9 @@ def plot(args: argparse.Namespace, run: dict[str, Any]) -> int:
         atomic_json(args.output_dir / PLOT_METADATA_NAME, {
             "schema_version": 1,
             **run,
+            "plot_style": "thin_raw_and_mean_with_recent_zoom_v2",
+            "recent_start_update": recent_start,
+            "detail_start_update": detail_start,
             "window_size": window,
             "latest_complete_update": last_complete,
             "latest_flushed_update": report["latest_flushed_update"],

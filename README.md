@@ -35,7 +35,11 @@ UnifoLM 训练集 DINO 已完成八卡提取及最终完整性检查：7,244个 
 累积2步、有效batch256，每步八卡完整模型哈希一致；峰值allocated／reserved为63.15／65.95 GiB。
 配置与显存范围见 [UnifoLM 联合训练配方](VLMExpert/README.md#unifolm-联合训练配方)。
 Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM的运动先验训练方式；
-新head和VLM继续使用Ψ₀分组LR。正式UnifoLM训练尚未启动，本轮未作长期收敛与正式吞吐验收。
+新head和VLM继续使用Ψ₀分组LR。2026-10-19已按用户授权启动八卡正式UnifoLM后训练：
+每卡16、累积2步、全局256、40k更新（约1.97遍窗口）、1000步warmup及cosine。
+当前进程、实际配置和日志见 [运行状态](/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json)。
+首次20-batch验证和初始连续更新检查通过，保存于 [启动检查记录](docs/unifolm_training_start.json)。
+W&B使用离线本地记录；此前短时验收不代表长期收敛或正式吞吐验收。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
 v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，

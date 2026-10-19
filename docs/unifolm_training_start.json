@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "recorded_utc": "2026-10-19T02:33:13.891661+00:00",
+  "state_at_recording": "running",
+  "formal_training_started": true,
+  "current_status_path": "/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json",
+  "source_revision_at_launch": "69658d1ad64ef4148b1cfffc4d64868f3bf2bfb1",
+  "launcher_pid": 1010264,
+  "run_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019022505",
+  "training_log": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z/train.log",
+  "configuration": {
+    "gpu_count": 8,
+    "per_gpu_batch": 16,
+    "gradient_accumulation_steps": 2,
+    "effective_global_batch": 256,
+    "train_workers_per_rank": 8,
+    "max_optimizer_updates": 40000,
+    "warmup_optimizer_updates": 1000,
+    "scheduler": "cosine",
+    "peak_learning_rates": {
+      "action_header": 0.0001,
+      "lang_backbone": 1e-06,
+      "vision_tower": 1e-05,
+      "mm_projector": 0.0001,
+      "motion_expert": 1e-05
+    },
+    "vlm_trainable": true,
+    "motion_trainable": true,
+    "motion_initialization": "epoch99=completed100epochs, EMA",
+    "action_head": "from scratch,1536x6blocksx24heads",
+    "vlm_layer": "last",
+    "motion_tokens": "all11 + mean pool",
+    "rgb_policy": "vlm_color_clean_motion",
+    "precision": "FP32 masters / BF16 autocast",
+    "wandb_mode": "offline",
+    "checkpoint_interval": 2000,
+    "validation_interval": 5000,
+    "first_update_validation_batches": 20,
+    "latest_checkpoints_kept": 5,
+    "preserved_checkpoint_cadence": 10000
+  },
+  "initial_health": {
+    "checked_utc": "2026-10-19T02:33:13.891661+00:00",
+    "completed_optimizer_updates_observed_in_console": 40,
+    "last_flushed_wandb_step": 22,
+    "flushed_training_history_rows": 23,
+    "initial_20_batch_validation_completed": true,
+    "all_logged_training_and_validation_numeric_metrics_finite": true,
+    "five_gradient_groups_nonzero_and_finite": true,
+    "all_five_learning_rates_match_1000_update_warmup": true,
+    "actual_eight_rank_processes_alive": [
+      {
+        "pid": 1010279,
+        "rank": 0,
+        "local_rank": 0
+      },
+      {
+        "pid": 1010280,
+        "rank": 1,
+        "local_rank": 1
+      },
+      {
+        "pid": 1010281,
+        "rank": 2,
+        "local_rank": 2
+      },
+      {
+        "pid": 1010282,
+        "rank": 3,
+        "local_rank": 3
+      },
+      {
+        "pid": 1010283,
+        "rank": 4,
+        "local_rank": 4
+      },
+      {
+        "pid": 1010284,
+        "rank": 5,
+        "local_rank": 5
+      },
+      {
+        "pid": 1010285,
+        "rank": 6,
+        "local_rank": 6
+      },
+      {
+        "pid": 1010286,
+        "rank": 7,
+        "local_rank": 7
+      }
+    ],
+    "gpus_at_check": [
+      {
+        "index": 0,
+        "memory_used_mib": 69217,
+        "memory_total_mib": 81920,
+        "utilization_percent": 89
+      },
+      {
+        "index": 1,
+        "memory_used_mib": 69149,
+        "memory_total_mib": 81920,
+        "utilization_percent": 70
+      },
+      {
+        "index": 2,
+        "memory_used_mib": 69099,
+        "memory_total_mib": 81920,
+        "utilization_percent": 100
+      },
+      {
+        "index": 3,
+        "memory_used_mib": 69025,
+        "memory_total_mib": 81920,
+        "utilization_percent": 100
+      },
+      {
+        "index": 4,
+        "memory_used_mib": 69093,
+        "memory_total_mib": 81920,
+        "utilization_percent": 99
+      },
+      {
+        "index": 5,
+        "memory_used_mib": 69183,
+        "memory_total_mib": 81920,
+        "utilization_percent": 100
+      },
+      {
+        "index": 6,
+        "memory_used_mib": 69067,
+        "memory_total_mib": 81920,
+        "utilization_percent": 91
+      },
+      {
+        "index": 7,
+        "memory_used_mib": 69131,
+        "memory_total_mib": 81920,
+        "utilization_percent": 87
+      }
+    ],
+    "last_training_metrics": {
+      "train/grad_norm_vision_tower": 0.16629892587661743,
+      "_step": 22,
+      "train/grad_norm_lang_backbone": 0.39772164821624756,
+      "train/grad_norm_vlm": 0.44728222242208127,
+      "train/epoch": 0,
+      "train/lr_lang_backbone": 2.2999999999999998e-08,
+      "train/lr_mm_projector": 2.3e-06,
+      "train/grad_norm_act": 62.58935546875,
+      "train/grad_norm_motion_expert": 2.052874803543091,
+      "train/loss": 42.18646240234375,
+      "train/lr_act": 2.3e-06,
+      "train/lr_vision_tower": 2.3000000000000002e-07,
+      "train/grad_norm_mm_projector": 0.11926250159740448,
+      "train/vlm_feat_norm": 4542.58984375,
+      "train/lr_action_header": 2.3e-06,
+      "train/lr_motion_expert": 2.3000000000000002e-07
+    },
+    "initial_validation_metrics": {
+      "eval/unifolm_sonic/action.hand_joints": 1.0865625143051147,
+      "eval/unifolm_sonic/action.latent_sonic": 0.5633519887924194,
+      "eval/unifolm_sonic/action.neck": 0,
+      "eval/loss": 44.51106643676758
+    },
+    "no_fatal_traceback_oom_or_nccl_warning": true,
+    "config_and_worker_arguments_verified": true,
+    "scope": "Startup and early numerical checks only; formal training continues in detached process group."
+  },
+  "evidence": {
+    "launch_script": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z/launch.sh",
+      "sha256": "7a00303faf5d541495a31c2e00be33f21e32bb51b7cc54a10f7109b2b77a5392"
+    },
+    "effective_command": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z/effective_command.json",
+      "sha256": "964d7369f3f254c400af6409b3cdd7ddbab53b63cf51ced1e485c0690cee8811"
+    },
+    "effective_config": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z/effective_config.json",
+      "sha256": "13146a9cd7b1e0970b7b3a83708b84dc2726f2223a56847758605aff70abd601"
+    },
+    "actual_run_config": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019022505/run_config.json",
+      "sha256": "002ab55eac2b05705bfeeb080ae5099038dd38c3606c8defc5312df2ce84133f"
+    },
+    "initial_metrics_snapshot": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z/initial_metrics_snapshot.json",
+      "sha256": "7363c791a3298151bbcbd15aa83ae94cff62ae02a84f336686feeda8218d63ab"
+    },
+    "initial_health": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z/initial_health.json",
+      "sha256": "f76ebd3174f5cbbc2e96a7c30c77836da9261284da9ae05d78bf8e69649d2aa4"
+    }
+  },
+  "limits": [
+    "This is a launch/early-health snapshot, not a training-completion or convergence claim.",
+    "No formal-job optimizer checkpoint exists yet until the configured2000th update; prior finite-step save/restore acceptance is separate.",
+    "The W&B data and all model/data/run artifacts remain outside Git; online W&B authentication is not configured."
+  ]
+}

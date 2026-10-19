@@ -238,7 +238,8 @@ uv pip install --python "$PSI_PYTHON" --no-deps \
 `--inexact`，避免删除单独安装的 FlashAttention。入口允许直接使用已导出的环境变量，`.env` 为可选补充。
 真实处理器、LeRobot 解码及 collator 验收见
 [`psi0_runtime_validation.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/psi0_runtime_validation.json)。
-缓存、固定初始化、环境及完整模型 GPU 联调四项均已完成，正式训练尚未启动。
+缓存、固定初始化、环境及完整模型 GPU 联调四项均已完成。
+2026-10-19已按用户授权启动八卡正式后训练，运行状态见下文。
 
 #### 完整模型 GPU 验收
 
@@ -280,7 +281,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 NCCL_S
   --output-dir "$UNIFOLM_DINO_ROOT/.pipeline/runs/full-model-new-check"
 ```
 
-本轮没有启动正式40,000步训练；上述显存来自限定步数检查，不代表正式吞吐。
+上述显存来自独立的限定步数检查，不代表正式吞吐；历史验收JSON中的未启动标记是该报告生成时的状态。
 GPU验收使用真实数据、collator和Accelerator，但在主进程解码（workers0），未验收正式多worker吞吐。
 此前单／双卡恢复检查覆盖状态恢复和继续更新，未验收中断前后数据游标逐步重放。
 HTTP／机器人历史缓冲的服务接线仍单独验收。
@@ -341,6 +342,23 @@ batch256对应约20,309次更新／遍，40k约为1.97遍窗口抽样；相邻30
 实际 warmup仍是1000次优化器更新。短时显存和参数一致性检查用于验收运行正确性，不能证明上述超参数最优。
 正式入口同时修复了history wrapper被误判为sharded数据、无法统计样本数的问题，
 以及epoch日志重复乘world size的问题；9项针对性CPU回归和真实4418行val历史wrapper长度检查通过。
+
+#### 当前正式训练任务
+
+2026-10-19按用户授权，从已固定的本地Qwen3-VL和Motion第100轮EMA开始联合训练，
+ActionExpert从头初始化；每卡batch16、8卡、累积2步，全局batch256，40k次更新、1000步warmup、cosine。
+五组峰值LR沿用上表，BF16 autocast、FP32主参数、AdamW `foreach=False`，每卡8个训练worker。
+当前任务不恢复之前的有限步数验收checkpoint。
+
+实际进程、唯一timestamp、启动命令、配置、输出目录与日志路径记录在
+[`current_unifolm_training.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json)。
+启动器已将所有rank的timestamp固定为 `261019022505`，输出位于仓库外
+`/gaozt-test1/datasets/UnifoLM/.pipeline/training`，以独立进程组运行。
+当前没有W&B在线凭据，使用 `WANDB_MODE=offline` 在实际run目录保存本地指标、图像及W&B数据。
+每2000步保存checkpoint，保留最新5份及每10k的里程碑；每5000步验证。
+既有循环还会在首次更新后执行一次20-batch验证，完成后继续训练；全局step按优化器更新计数。
+首次验证和初始连续更新的损失、各组梯度与warmup学习率检查已通过，见
+[启动检查快照](../docs/unifolm_training_start.json)。该快照记录检查时进度，实际任务继续在后台运行。
 
 数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
 双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。

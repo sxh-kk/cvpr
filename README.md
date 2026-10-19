@@ -43,6 +43,8 @@ Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM
 重启修复包括安全的spawn数据worker、生产一致的确定性验收、全卡更新前数值保护和早期保存；
 保留原VLM prefix tokens，按原Ψ₀策略冻结未参与该loss的末端norm。
 新验收和实际重启状态见 [重启记录](docs/unifolm_assert_repair_validation.json)，实时PID／日志以外部状态文件为准。
+修订任务已于2026-10-19 05:56 UTC重启，首轮验证和第100步完整保存通过，保存后继续更新通过；
+新optimizer布局的两卡B16冷恢复与继续更新也已验收，原生断言仍未独立复现，不能视作长跑问题已消除。
 W&B使用离线本地记录；此前短时验收不代表长期收敛或正式吞吐验收。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。

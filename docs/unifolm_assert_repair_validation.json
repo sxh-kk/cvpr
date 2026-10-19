@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_utc": "2026-10-19T05:55:32.616168+00:00",
+  "checked_utc": "2026-10-19T06:14:07.409676+00:00",
   "original_run": {
     "timestamp": "261019022505",
     "state": "failed",
@@ -200,7 +200,7 @@
     "limitations": "Original step735 weights and image augmentation RNG were not saved; these candidate inputs do not reconstruct that failure state."
   },
   "restart": {
-    "state": "ready_to_launch",
+    "state": "running",
     "authorized": true,
     "resume": null,
     "global_batch": 256,
@@ -215,6 +215,71 @@
       "vision_tower": 1e-05,
       "mm_projector": 0.0001,
       "motion_expert": 1e-05
+    },
+    "timestamp": "261019053758",
+    "started_utc": "2026-10-19T05:56:15.407500+00:00",
+    "source_revision": "8e31af32b4bef0d9e0d5501f7f6bea5d16c72366",
+    "pid": 4021693,
+    "supervisor_pid": 4021692,
+    "launch_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-restart-20261019T053758Z",
+    "run_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019053758",
+    "log": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-restart-20261019T053758Z/train.log",
+    "current_state_path": "/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json",
+    "original_initialization_reused": true,
+    "old_failed_updates_recovered": false,
+    "startup_health_record": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-restart-20261019T053758Z/initial_health.json",
+    "startup_health_checked_utc": "2026-10-19T06:03:48.480438+00:00",
+    "initial_twenty_batch_validation_completed": true,
+    "all_eight_rank_processes_with_expected_runtime": true,
+    "actual_p2p_transport_paths": [
+      "P2P/CUMEM/read"
+    ],
+    "all_logged_training_validation_metrics_finite": true,
+    "five_gradient_groups_nonzero_and_finite": true,
+    "five_learning_rates_match_schedule": true,
+    "initial_validation_loss": 44.51106643676758,
+    "initial_health_and_first_checkpoint_passed": true,
+    "health": {
+      "checked_utc": "2026-10-19T06:14:07.409676+00:00",
+      "completed_optimizer_updates_observed_in_console": 118,
+      "last_flushed_wandb_step": 114,
+      "last_flushed_train_loss": 17.17926788330078,
+      "flushed_training_history_rows": 115,
+      "all_numeric_train_eval_metrics_finite": true,
+      "five_gradients_nonzero_and_finite": true,
+      "five_learning_rates_match_schedule": true,
+      "actual_eight_rank_processes_alive": true,
+      "gpu_memory_used_mib": [
+        69363,
+        69329,
+        69251,
+        69247,
+        69251,
+        69357,
+        69233,
+        69315
+      ],
+      "gpu_memory_used_gib_min": 67.6103515625,
+      "gpu_memory_used_gib_max": 67.7373046875,
+      "fatal_log_markers": {
+        "Traceback (most recent call last)": 0,
+        "device-side assert": 0,
+        "_assert_async_cuda_kernel": 0,
+        "CUDA out of memory": 0,
+        "NCCL WARN": 0,
+        "[Unused]": 0
+      },
+      "actual_p2p_transport_paths": [
+        "P2P/CUMEM/read"
+      ],
+      "checkpoint_100_bytes": 35998097412,
+      "checkpoint_100_structural_check_passed": true,
+      "checkpoint_100_all_eight_rank_rng_files_valid": true,
+      "saved_unused_final_norm_equal_to_original_initialization": true,
+      "continued_updates_observed_after_save": 16,
+      "scope": "Early running health and completed first save only, not full-run stability or proof of resolving the original native assertion.",
+      "independent_startup_review": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-restart-20261019T053758Z/independent_startup_review.json",
+      "checkpoint_100_validation": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-restart-20261019T053758Z/checkpoint_100_validation.json"
     }
   },
   "limitations": [

@@ -127,6 +127,10 @@ class Psi0ModelConfig(ModelConfig):
     # vlm_run_dir: str | None = None
     vlm_ckpt_step: str | None = None
     tune_vlm: bool = False
+    # Dual-source action loss consumes the complete outer Qwen hidden states,
+    # not vocabulary logits. Keep that token path and project only one unused
+    # logit position when explicitly enabled; checkpoint tensors stay unchanged.
+    vlm_skip_unused_logits: bool = False
 
 
     tune_mm_llm: bool = False                   # [TrainingArguments] Train LLM or not
@@ -160,6 +164,8 @@ class Psi0ModelConfig(ModelConfig):
 
     @model_validator(mode="after")
     def _validate_action_architecture(self) -> "Psi0ModelConfig":
+        if self.vlm_skip_unused_logits and self.action_architecture != "dual_source_v1":
+            raise ValueError("vlm_skip_unused_logits requires action_architecture=dual_source_v1")
         if self.action_architecture != "dual_source_v1":
             return self
         incompatible = [

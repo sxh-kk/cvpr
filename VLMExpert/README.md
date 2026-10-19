@@ -408,6 +408,55 @@ scheduler及全部8个rank RNG文件检查通过，冻结的VLM末端norm与初�
 数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
 双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。
 
+#### UnifoLM 提速准备（未切换当前训练）
+
+准备代码位于独立 worktree `/root/workspace/wbc/guanzerong/cvpr-speedup`，
+分支 `codex/unifolm-speedup-prep`；当前训练仍使用原目录和原启动参数。
+state token 仍放在 action 序列首位，与30个 action tokens 一起参与注意力，最终输出时移除。
+完整 VLM 最后一层 tokens、mask、masked mean `p_V`、完整11个 Motion tokens 与 mean `p_M` 均保持。
+不更改模型参数／buffer 布局、五组LR、8×16×2有效batch256、40k更新或损失。
+
+| 显式开关 | 默认 | 准备实现 |
+| --- | --- | --- |
+| `model.vlm_skip_unused_logits` | `False` | 仅 `dual_source_v1`，外层 Qwen 加 `logits_to_keep=1`；完整 hidden tokens 长度不变，仍取原来的 pre-finalnorm 层，不绕过外层模型 |
+| `train.keep_train_batch_on_cpu` | `False` | 保留 Accelerate 的 rank sharding／RNG；train loader 不自动搬GPU，先保存CPU诊断快照，再由原 `training_step` 搬GPU；val路径不变 |
+| `train.sync_metrics_on_update_only` | `False` | 非更新 microbatch 省略日志用 gather／scalar读取，同步更新时合并读取梯度norm；clip运算、每micro loss gate、unscale后梯度gate均保留 |
+| `UNIFOLM_OPTIMIZER_FOREACH=True` | `False` | 单独选择 AdamW 执行方式；恢复后重新应用到全部组，不重建 moments、LR 或 scheduler；与 fused 冲突时拒绝 |
+
+日志 loss 仍为最后一个 microbatch 的跨卡均值，未改为整个累积窗口的均值。
+非更新 microbatch 不再重复记录图像；更新时的图像／指标记录保留。
+训练快照仍保留 CPU batch 及各类 RNG，NaN／Inf 全卡拦截与诊断落盘继续执行。
+`foreach=True` 可能增加 optimizer-step 峰值显存，因此未纳入默认提速组合。
+入口不修改 `CUDA_LAUNCH_BLOCKING`；关闭同步调试需另做 GPU 对照验收。
+
+在准备 worktree 中检查真实本地输入与命令，以下操作不加载模型、不启动 worker：
+
+```bash
+cd /root/workspace/wbc/guanzerong/cvpr-speedup
+source VLMExpert/scripts/train/psi0/unifolm-local.env.sh
+bash VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm-speedup.sh --check-only
+# 仅打印命令（不检查本地文件）：将 --check-only 换成 --dry-run。
+```
+
+不传模式也默认 `--check-only`；只有明确传 `--run` 才启动未来任务，本次未调用。
+wrapper 打开上述三个 bool 开关，默认八卡、batch16、累积2，并在父进程生成一次共同 timestamp。
+原配方默认不启用这三个开关。未来冷启动恢复可显式设置
+`UNIFOLM_RESUME_CHECKPOINT=/绝对路径/checkpoints/ckpt_N`；检查和启动时要求目录存在，
+避免路径错误静默从头训练。恢复时模型结构不变，但不承诺精确恢复 DataLoader 游标。
+显式恢复时同时开启原工程 `skip_resumed_steps`，按已完成更新数跳过 microbatches；
+这不等于恢复 worker 的随机增强状态或保证后续样本／增强逐位重放。
+不得将此准备入口当作原运行任务的 supervisor 或实时状态记录更新器。
+
+验证范围见 [提速准备验证记录](../docs/unifolm_speedup_preparation_validation.json)：
+最终合并CPU回归171项通过（85.39秒），真实本地输入的 `--check-only` 也已通过。
+真实 tiny 图文 Qwen、实际 Accelerator 累积更新、两rank CPU/Gloo 分片／连续更新、
+NaN／Inf保护、实际 AdamW 保存恢复和真实 Tyro 配方解析均走CPU。
+这些验证不占用当前八卡，也不构成真实 BF16／FlashAttention2／CUDA 接口和性能验收。
+后续需在空闲 GPU 上，以相同batch／输入和RNG逐项对照 tokens、pooling、loss、梯度、
+各组更新与冷恢复，并检查连续多步跨卡参数一致性；先固定 `foreach=False`，再单独比较开启时的显存。
+吞吐需隔离预热、验证和保存的耗时，记录稳态秒／更新及 peak allocated／reserved，
+不能从CPU等价或短时利用率推算实际加速比。
+
 ```bash
 cd VLMExpert
 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \

@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "checked_utc": "2026-10-19 07:49:26 UTC",
+  "state": "cpu_validated_gpu_acceptance_pending",
+  "branch": "codex/unifolm-speedup-prep",
+  "base_revision": "f7c76b2ef725b70408fd2bd1c0c2e2311648c540",
+  "preparation_worktree": "/root/workspace/wbc/guanzerong/cvpr-speedup",
+  "changes": {
+    "vlm_skip_unused_logits": {
+      "default": false,
+      "architecture": "dual_source_v1 only",
+      "outer_qwen_call": "logits_to_keep=1",
+      "hidden_tokens": "complete original pre-finalnorm tokens"
+    },
+    "keep_train_batch_on_cpu": {
+      "default": false,
+      "train": "Accelerator rank sharding/RNG retained; device_placement=False; CPU snapshot before original move_to_device",
+      "validation": "unchanged"
+    },
+    "sync_metrics_on_update_only": {
+      "default": false,
+      "non_update": "skip logging-only gather/scalar extraction",
+      "update": "original last-microbatch loss; same clipping with batched norm logging"
+    },
+    "optimizer_foreach": {
+      "recipe_default": false,
+      "explicit_resume_override": true,
+      "adam_moments_step_lr_scheduler_preserved": true,
+      "fused_true_conflict_rejected_before_mutation": true
+    },
+    "recipe": {
+      "wrapper_default": "--check-only",
+      "workers_launched_in_this_task": false,
+      "explicit_future_run_option": "--run",
+      "common_timestamp_from_parent": true,
+      "resume": "explicit existing absolute ckpt_N; original skip_resumed_steps enabled"
+    }
+  },
+  "invariants": {
+    "state_token": "first action-stream token, participates with all action tokens; discarded only at output",
+    "vlm": "complete last-layer tokens, original attention mask and masked mean p_V",
+    "motion": "complete 11 hidden tokens and mean p_M",
+    "parameter_and_buffer_names_shapes": "unchanged",
+    "production_defaults": {
+      "gpus": 8,
+      "per_gpu_microbatch": 16,
+      "accumulation": 2,
+      "effective_global_batch": 256,
+      "max_optimizer_updates": 40000,
+      "warmup": 1000,
+      "scheduler": "cosine",
+      "learning_rates": {
+        "action_header": 0.0001,
+        "lang_backbone": 0.000001,
+        "vision_tower": 0.00001,
+        "mm_projector": 0.0001,
+        "motion_expert": 0.00001
+      }
+    },
+    "numerical_gates": "every microbatch loss gate; actual gradients after unscale before original per-group clip; all-rank rejection and complete CPU batch/RNG dumps",
+    "cuda_launch_blocking": "unchanged; wrapper does not set it",
+    "motion_dino_augmentation": "unchanged",
+    "no_changes_to_running_checkout": true
+  },
+  "cpu_validation": {
+    "interpreter": "/gaozt-test1/datasets/UnifoLM/.pipeline/runtimes/psi0-py311-torch270-cu126/bin/python",
+    "environment": {
+      "CUDA_VISIBLE_DEVICES": "",
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONPATH": "VLMExpert/src:.:VLMExpert (absolute preparation-worktree paths used)"
+    },
+    "pytest": {
+      "passed": 171,
+      "failed": 0,
+      "seconds": 85.39,
+      "warnings": 2,
+      "warning_scope": "expected pin_memory without accelerator in CPU worker tests",
+      "files": [
+        "VLMExpert/tests/test_vlm_skip_unused_logits.py",
+        "VLMExpert/tests/test_qwen3vl_action_context.py",
+        "VLMExpert/tests/test_vlm_features.py",
+        "VLMExpert/tests/test_dual_source_action.py",
+        "VLMExpert/tests/test_dual_source_joint_training.py",
+        "VLMExpert/tests/test_dual_source_data.py",
+        "VLMExpert/tests/test_posttrain_speedup.py",
+        "VLMExpert/tests/test_optimizer_foreach_resume.py",
+        "VLMExpert/tests/test_unifolm_speedup_recipe.py",
+        "VLMExpert/tests/test_checkpoint_cadence.py",
+        "VLMExpert/tests/test_checkpoint_rng.py",
+        "VLMExpert/tests/test_posttrain_loader_workers.py",
+        "VLMExpert/tests/test_training_safety.py",
+        "VLMExpert/tests/test_native_crash_snapshot.py"
+      ]
+    },
+    "actual_tiny_qwen": {
+      "multimodal": true,
+      "dtype": "FP32",
+      "combinations": 8,
+      "axes": [
+        "tied/untied word embeddings",
+        "gradient checkpointing on/off",
+        "left/right mixed padding"
+      ],
+      "adamw_updates_per_combination": 3,
+      "hidden_tokens_pools_actions_losses_gradients_optimizer": "bitwise identical",
+      "lm_head_projection": "sequence length 12 -> 1 while complete hidden length stays 12",
+      "strict_state_dict_interchange": true
+    },
+    "actual_accelerator_gloo": {
+      "ranks": 2,
+      "model": "tiny five-parameter-group probe, not full model",
+      "per_rank_microbatch": 2,
+      "accumulation": 2,
+      "updates": 4,
+      "rank_shards_disjoint_and_complete": true,
+      "sampling_order_rng_model_optimizer_scheduler_metrics": "bitwise identical to flags disabled",
+      "cross_rank_full_probe_model_hash_equal_every_update": true,
+      "logging_loss_gathers_over_four_updates": {
+        "baseline": 8,
+        "optimized": 4
+      },
+      "safety_loss_gates": 8,
+      "safety_gradient_gates": 4,
+      "rank_local_nan_loss_inf_gradient": "all ranks reject update and finish CPU batch/RNG diagnostic dumps"
+    },
+    "actual_adamw_resume": {
+      "tests": 22,
+      "parameter_groups": 5,
+      "saved_updates": 3,
+      "continued_updates": 4,
+      "restored_slots_steps_lr_scheduler_rng": "exact",
+      "foreach_continuation_tolerance": {
+        "dtype": "FP64",
+        "rtol": 1e-12,
+        "atol": 1e-14
+      },
+      "cpu_fixture_only": "Accelerate1.7 CPU RNG save omits torch_cuda_manual_seed read by loader; only new CPU fixture patched with []; production RNG files untouched",
+      "fsdp_deepspeed_scope": "test verifies override not called, not actual FSDP/DeepSpeed execution"
+    },
+    "recipes": {
+      "real_tyro_parse": true,
+      "baseline_configuration_equality_except_three_flags": true,
+      "default_no_train_exec_test": true,
+      "real_local_metadata_check_passed": true,
+      "full_weight_payloads_rehashed": false,
+      "shell_syntax_and_git_diff_check": true
+    },
+    "review": "independent model/runtime and optimizer/recipe reviews; no blocking findings"
+  },
+  "isolation": {
+    "original_checkout": "/root/workspace/wbc/guanzerong/cvpr",
+    "original_branch": "main",
+    "original_head": "f7c76b2ef725b70408fd2bd1c0c2e2311648c540",
+    "original_worktree_clean": true,
+    "training_timestamp": "261019053758",
+    "torchrun_pid": 4021693,
+    "supervisor_pid": 4021692,
+    "rank_pids": [
+      4021710,
+      4021711,
+      4021712,
+      4021713,
+      4021714,
+      4021715,
+      4021716,
+      4021717
+    ],
+    "all_processes_alive_at_passive_check": true,
+    "observed_console_updates_at_least": 1168,
+    "training_process_config_environment_or_checkpoint_mutations": false,
+    "gpu_jobs_or_profiler_started": false,
+    "merged_into_running_branch": false
+  },
+  "gpu_acceptance": {
+    "executed": false,
+    "reason": "All eight GPUs are in the authorized active run; user requires no interference.",
+    "required": [
+      "real full Qwen/Motion/Action BF16+FlashAttention2 same-input/RNG tokens, pooling, loss and gradient comparison",
+      "actual CPU-snapshot -> GPU transfer and all-rank failure diagnostics",
+      "eight GPU batch16 accumulation2 continuous parameter consistency and five-group updates",
+      "cold checkpoint resume and continuation without resetting AdamW or scheduler",
+      "steady-state update time and peak allocated/reserved after warmup, excluding validation/save overhead",
+      "evaluate foreach=True memory and numerical tolerance separately; compare CUDA_LAUNCH_BLOCKING separately"
+    ],
+    "performance_claim": null
+  },
+  "limitations": [
+    "CPU equivalence does not establish CUDA/BF16/FlashAttention2 equivalence, memory headroom or speedup.",
+    "No exact DataLoader/worker augmentation replay guarantee on cold resume; skip_resumed_steps skips by the original microbatch-count logic.",
+    "No GPU throughput result or production activation is claimed.",
+    "The original native CUDA assertion is not independently reproduced or proven eliminated."
+  ]
+}

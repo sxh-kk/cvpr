@@ -37,6 +37,12 @@ class WandbConfig(BaseModel):
 class TrainConfig(BaseModel):
     num_workers: int = 8
     dataloader_start_method: Literal["spawn", "forkserver"] | None = None
+    # Keep the rank-sharded training batch on CPU until training_step captures
+    # diagnostics; validation retains Accelerator's normal device placement.
+    keep_train_batch_on_cpu: bool = False
+    # Non-update microbatches still run numerical gates but skip logging-only
+    # collectives/scalar reads. Update metrics retain the last-microbatch loss.
+    sync_metrics_on_update_only: bool = False
     overfit_single_batch: bool = False
     name: str = "human3d"  # "vqvae"
     run_tag: str | None = None  # if set, replaces the shorten(dataset_name) segment of the run folder name

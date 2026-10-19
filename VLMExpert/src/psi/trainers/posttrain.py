@@ -596,7 +596,14 @@ class PosttrainTrainer(Trainer):
 
         if not (isinstance(self.data_cfg, MixedDataConfig) and self.data_cfg.sampler is not None):
             # dont prepare dataloader for mixed dataset as custom sampler is used
-            self.train_dataloader = accelerator.prepare(self.train_dataloader)
+            if getattr(self.train_cfg, "keep_train_batch_on_cpu", False):
+                # Preserve Accelerator's sharding and sampler/RNG policy. Only
+                # defer device transfer until after the CPU diagnostic snapshot.
+                self.train_dataloader = accelerator.prepare_data_loader(
+                    self.train_dataloader, device_placement=False
+                )
+            else:
+                self.train_dataloader = accelerator.prepare(self.train_dataloader)
 
         if self.train_cfg.data_parallel == "deepspeed":
             # Gradient Checkpoint Setup
@@ -680,6 +687,8 @@ class PosttrainTrainer(Trainer):
             return {} if norm is None else {"global": float(norm)}
 
         norms: dict[str, float] = {}
+        pending_norms = {}
+        batch_metrics = getattr(self.train_cfg, "sync_metrics_on_update_only", False)
         clip = torch.nn.utils.clip_grad_norm_ if already_unscaled else self.accelerator.clip_grad_norm_
         for group in self.optimizer.param_groups:
             params = group["params"]
@@ -689,7 +698,18 @@ class PosttrainTrainer(Trainer):
                 else self.get_total_grad_norm(params)
             )
             if norm is not None:
-                norms[group.get("group_name", "params")] = float(norm)
+                name = group.get("group_name", "params")
+                if batch_metrics:
+                    pending_norms[name] = norm
+                else:
+                    norms[name] = float(norm)
+        if pending_norms:
+            # Clipping itself is unchanged. Read its five logging scalars in
+            # one transfer, preserving Python-float precision for max_norm=None.
+            packed = torch.stack([torch.as_tensor(value, device=self.device,
+                                  dtype=value.dtype if isinstance(value, torch.Tensor) else torch.float64).detach()
+                                  for value in pending_norms.values()])
+            norms.update(zip(pending_norms, packed.cpu().tolist()))
         return norms
 
     def forward_autocast(self):
@@ -794,6 +814,12 @@ class PosttrainTrainer(Trainer):
                 safety.stage = "zero_grad"
             self.optimizer.zero_grad()
 
+        if (getattr(self.train_cfg, "sync_metrics_on_update_only", False)
+                and not self.accelerator.sync_gradients):
+            # The runner consumes metrics only on completed optimizer updates.
+            # Loss/gradient gates and the pre-forward batch/RNG snapshot above
+            # remain active; do not change the last-microbatch loss semantics.
+            return False, {}
         if safety is not None:
             safety.stage = "metrics"
         # Log batch["raw_image"] to wandb every 100 steps

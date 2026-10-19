@@ -1684,6 +1684,9 @@ class Psi0Model(nn.Module):
         if architecture not in ("psi0_joint", "dual_source_v1"):
             raise ValueError(f"Unsupported action architecture: {architecture}")
         self.uses_dual_source = architecture == "dual_source_v1"
+        self.vlm_skip_unused_logits = getattr(model_cfg, "vlm_skip_unused_logits", False)
+        if self.vlm_skip_unused_logits and not self.uses_dual_source:
+            raise ValueError("vlm_skip_unused_logits requires action_architecture=dual_source_v1")
         self.tune_vlm = any(getattr(model_cfg, name, False) for name in
                             ("tune_vlm", "tune_mm_llm", "tune_mm_vision", "tune_mm_mlp"))
         self.tune_motion = getattr(model_cfg, "tune_motion", True)
@@ -1980,6 +1983,12 @@ class Psi0Model(nn.Module):
         frozen = getattr(self, "uses_dual_source", False) and not self.tune_vlm
         if frozen:
             self.vlm_model.eval()
+        vlm_kwargs = {"use_cache": False} if getattr(self, "uses_dual_source", False) else {}
+        if getattr(self, "vlm_skip_unused_logits", False):
+            # Keep the OUTER generation model's complete pre-finalnorm hidden
+            # states. Only its unused vocabulary projection is narrowed; using
+            # the inner model's hidden_states[-1] would change Psi0's tokens.
+            vlm_kwargs["logits_to_keep"] = 1
         with (torch.inference_mode(False) if frozen else nullcontext()), \
                 (torch.no_grad() if frozen else nullcontext()):
             all_hidden_states = self.vlm_model(
@@ -1989,7 +1998,7 @@ class Psi0Model(nn.Module):
                 image_grid_thw=image_grid_thw,
                 output_hidden_states=True,
                 return_dict=True,
-                **({"use_cache": False} if getattr(self, "uses_dual_source", False) else {}),
+                **vlm_kwargs,
             ).hidden_states
             views = self._select_vlm_views(all_hidden_states)
             return VLMFeatures(

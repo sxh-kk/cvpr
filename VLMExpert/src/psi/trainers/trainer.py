@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from psi.config.config import LaunchConfig, TrainConfig, LoggingConfig
     from psi.config.config import  DataConfig
 from accelerate import Accelerator
+from accelerate.optimizer import AcceleratedOptimizer
 from transformers.trainer_utils import PredictionOutput
 from transformers.optimization import get_scheduler
 from torch.optim import Optimizer
@@ -27,6 +28,29 @@ import shutil
 
 from psi.utils import initialize_overwatch
 overwatch = initialize_overwatch(__name__)
+
+
+def apply_optimizer_foreach_override(optimizer, requested: bool | None) -> bool:
+    """Honor an explicit AdamW execution choice after loading its param groups.
+
+    Optimizer checkpoints include ``foreach`` and override the constructor's
+    setting on load. Updating this execution flag must not rebuild parameters,
+    Adam moments, step counters, learning rates or the scheduler.
+    """
+    if requested is None:
+        return False
+    if type(requested) is not bool:
+        raise TypeError("optimizer_foreach must be bool or None")
+    actual = optimizer.optimizer if isinstance(optimizer, AcceleratedOptimizer) else optimizer
+    if not isinstance(actual, torch.optim.AdamW):
+        raise TypeError("optimizer_foreach resume override supports torch.optim.AdamW only")
+    if requested and (actual.defaults.get("fused", False)
+                      or any(group.get("fused", False) for group in actual.param_groups)):
+        raise ValueError("Cannot enable foreach on a checkpoint configured with fused AdamW")
+    actual.defaults["foreach"] = requested
+    for group in actual.param_groups:
+        group["foreach"] = requested
+    return True
 
 
 def should_save_training_checkpoint(
@@ -509,6 +533,13 @@ class Trainer(ABC):
             assert load_path is not None
             overwatch.info(f"Resuming from checkpoint {load_path}")
             self.accelerator.load_state(load_path)
+            # load_state restores saved optimizer options as well as moments.
+            # Respect an explicit DDP AdamW execution override without touching
+            # the restored numerical state or the scheduler.
+            requested_foreach = getattr(self.cfg.train, "optimizer_foreach", None)
+            if (requested_foreach is not None
+                    and getattr(self.cfg.train, "data_parallel", "ddp") == "ddp"):
+                apply_optimizer_foreach_override(self.optimizer, requested_foreach)
             # ckpt_N is written immediately after completing optimizer update N.
             # The next loop iteration must therefore use zero-based global_step N;
             # adding one here silently skipped an optimizer update.

@@ -47,6 +47,12 @@ Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM
 新optimizer布局的两卡B16冷恢复与继续更新也已验收，原生断言仍未独立复现，不能视作长跑问题已消除。
 W&B使用离线本地记录；此前短时验收不代表长期收敛或正式吞吐验收。
 
+另在 `codex/unifolm-speedup-prep` 分支准备可选提速代码；当前运行目录与八卡进程不切换。
+保持 action 流首位的 state token、完整 VLM／11个 Motion tokens 及两路 pooling，
+只缩减未使用 logits、调整诊断 batch 的搬运位置并减少非更新 microbatch 指标同步。
+CPU 等价性、分布式更新和恢复验证范围及默认只检查入口见
+[提速准备](VLMExpert/README.md#unifolm-提速准备未切换当前训练)。真实 GPU 精度、显存和吞吐仍待单独验收。
+
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
 v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，
 并在5Hz增量中检查全部中间30Hz点及边。原SMPL-H参数、双手21点、world观测、地面、RGB、分割均保留。

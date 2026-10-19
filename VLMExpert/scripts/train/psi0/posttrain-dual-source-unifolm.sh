@@ -32,6 +32,23 @@ case "${MOTION_USE_EMA:-1}" in
     0|false) motion_ema_arg=--model.no-motion-use-ema ;;
     *) echo "MOTION_USE_EMA must be 0/1 or false/true" >&2; exit 2 ;;
 esac
+case "${UNIFOLM_SPEEDUP_PROFILE:-0}" in
+    0) speedup_args=() ;;
+    1) speedup_args=(--model.vlm-skip-unused-logits
+                     --train.keep-train-batch-on-cpu
+                     --train.sync-metrics-on-update-only) ;;
+    *) echo "UNIFOLM_SPEEDUP_PROFILE must be 0 or 1" >&2; exit 2 ;;
+esac
+case "${UNIFOLM_OPTIMIZER_FOREACH:-False}" in
+    True|False) ;;
+    *) echo "UNIFOLM_OPTIMIZER_FOREACH must be True or False" >&2; exit 2 ;;
+esac
+if [[ -n "${UNIFOLM_RESUME_CHECKPOINT:-}" ]] && (( ! dry_run )); then
+    [[ "$UNIFOLM_RESUME_CHECKPOINT" = /* && -d "$UNIFOLM_RESUME_CHECKPOINT" &&
+       "${UNIFOLM_RESUME_CHECKPOINT##*/}" =~ ^ckpt_[0-9]+$ ]] || {
+        echo "UNIFOLM_RESUME_CHECKPOINT must be an existing absolute ckpt_<step> directory" >&2; exit 2;
+    }
+fi
 
 if (( ! dry_run )); then
     [[ -d "$EGO_DEX_VLM_PATH" ]] || { echo "Missing VLM directory: $EGO_DEX_VLM_PATH" >&2; exit 1; }
@@ -92,7 +109,7 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
     "--train.output_dir=${UNIFOLM_RUN_ROOT:-$UNIFOLM_DINO_ROOT/.pipeline/training}"
     --train.data_parallel=ddp --train.mixed_precision=bf16
     --train.training-safety-checks
-    --train.optimizer-foreach=False
+    "--train.optimizer-foreach=${UNIFOLM_OPTIMIZER_FOREACH:-False}"
     "--train.num_workers=${NUM_WORKERS:-8}" --train.dataloader-start-method=spawn
     "--train.train_batch_size=${BATCH_SIZE:-16}"
     "--train.gradient_accumulation_steps=${GRAD_ACCUM_STEPS:-2}"
@@ -139,6 +156,15 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
     --model.no-use-film --model.no-use-dit --model.no-combined-temb
     --model.vlm-layer-indices=None --model.pooled-text-encoder=None
     --model.state-drop-prob=0.5 --model.state-null-token --model.no-rtc)
+
+command+=("${speedup_args[@]}")
+if [[ -n "${UNIFOLM_RESUME_CHECKPOINT:-}" ]]; then
+    command+=("--train.resume-from-checkpoint=$UNIFOLM_RESUME_CHECKPOINT"
+              --train.skip-resumed-steps)
+fi
+if [[ -n "${UNIFOLM_RUN_TIMESTAMP:-}" ]]; then
+    command+=("--timestamp=$UNIFOLM_RUN_TIMESTAMP")
+fi
 
 printf 'Command:'
 printf ' %q' "${command[@]}"

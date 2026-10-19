@@ -91,12 +91,16 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
     --seed=292285 "--exp=$experiment" --train.name=posttrain
     "--train.output_dir=${UNIFOLM_RUN_ROOT:-$UNIFOLM_DINO_ROOT/.pipeline/training}"
     --train.data_parallel=ddp --train.mixed_precision=bf16
+    --train.training-safety-checks
     --train.optimizer-foreach=False
-    "--train.num_workers=${NUM_WORKERS:-8}" "--train.train_batch_size=${BATCH_SIZE:-16}"
+    "--train.num_workers=${NUM_WORKERS:-8}" --train.dataloader-start-method=spawn
+    "--train.train_batch_size=${BATCH_SIZE:-16}"
     "--train.gradient_accumulation_steps=${GRAD_ACCUM_STEPS:-2}"
     --train.learning_rate=1e-4 "--train.max_training_steps=${MAX_STEPS:-40000}"
     --train.warmup_ratio=None --train.warmup_steps=1000
-    --train.max_checkpoints_to_keep=5 --train.checkpointing_steps=2000
+    --train.early-checkpoint-steps 100 500 1000
+    --train.max_checkpoints_to_keep=3 --train.checkpointing_steps=2000
+    --train.preserve-checkpoint-every=None
     --train.validation_steps=5000 --train.val_num_batches=20 --train.max_grad_norm=1.0
     --train.lr_scheduler_type=cosine --train.lr_scheduler_kwargs.weight_decay=1e-6
     --train.lr_scheduler_kwargs.betas 0.95 0.999

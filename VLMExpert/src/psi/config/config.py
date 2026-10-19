@@ -4,7 +4,7 @@ from typing_extensions import Self, Annotated
 from pydantic import BaseModel, Field, model_validator
 import os
 import tyro
-from typing import Union, Any, TYPE_CHECKING
+from typing import Union, Any, TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from psi.data.dataset import TransformableDataset
@@ -36,6 +36,7 @@ class WandbConfig(BaseModel):
 
 class TrainConfig(BaseModel):
     num_workers: int = 8
+    dataloader_start_method: Literal["spawn", "forkserver"] | None = None
     overfit_single_batch: bool = False
     name: str = "human3d"  # "vqvae"
     run_tag: str | None = None  # if set, replaces the shorten(dataset_name) segment of the run folder name
@@ -50,6 +51,7 @@ class TrainConfig(BaseModel):
     gradient_accumulation_steps: int = 1
     mixed_precision: str = "bf16"  # "no" for fp32, "fp16", "bf16"
     max_grad_norm: float | None = None  # 1.0
+    training_safety_checks: bool = False
     optimizer_foreach: bool | None = None
 
     train_batch_size: int = 16
@@ -58,6 +60,7 @@ class TrainConfig(BaseModel):
     val_num_batches: int = 20
 
     checkpointing_steps: int = 5000
+    early_checkpoint_steps: tuple[int, ...] = ()
     max_checkpoints_to_keep: int | None = None
     # Checkpoints on this step cadence are exempt from max_checkpoints_to_keep.
     # Set to None to enforce a strict rolling window (useful for large models).
@@ -95,6 +98,18 @@ class TrainConfig(BaseModel):
     num_train_epochs: int | None = None
     warmup_steps: int | None = 0  # if > 0, overrides warmup_ratio
     warmup_ratio: float | None = 0.05  # used if warmup_steps is not set or 0
+
+    @model_validator(mode="after")
+    def check_early_checkpoint_steps(self) -> Self:
+        if any(step <= 0 for step in self.early_checkpoint_steps):
+            raise ValueError("early_checkpoint_steps must contain positive optimizer update counts")
+        return self
+
+    @model_validator(mode="after")
+    def check_training_safety(self) -> Self:
+        if self.training_safety_checks and self.data_parallel != "ddp":
+            raise ValueError("training_safety_checks currently supports DDP only")
+        return self
 
     @model_validator(mode="after")
     def check_warmup(self) -> Self:

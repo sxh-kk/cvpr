@@ -198,5 +198,14 @@
     "This is a launch/early-health snapshot, not a training-completion or convergence claim.",
     "No formal-job optimizer checkpoint exists yet until the configured2000th update; prior finite-step save/restore acceptance is separate.",
     "The W&B data and all model/data/run artifacts remain outside Git; online W&B authentication is not configured."
-  ]
+  ],
+  "final_state": "failed",
+  "subsequent_failure": {
+    "completed_optimizer_updates_observed": 735,
+    "utc": "2026-10-19T03:14:55Z",
+    "rank": 5,
+    "error": "CUDA device-side assertion / NCCL watchdog SIGABRT",
+    "formal_checkpoint_available": false,
+    "followup_record": "docs/unifolm_assert_repair_validation.json"
+  }
 }

@@ -317,6 +317,7 @@ def train(config: LaunchConfig):
                     completed_step,
                     config.train.checkpointing_steps,
                     trainer.max_training_steps,
+                    config.train.early_checkpoint_steps,
                 ):
                     accelerator.wait_for_everyone() # ensures fsdp checkpointing without deadlock
                     save_path = trainer.save_checkpoint(completed_step)

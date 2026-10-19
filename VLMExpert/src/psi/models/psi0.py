@@ -1781,9 +1781,9 @@ class Psi0Model(nn.Module):
     def _configure_dual_vlm_trainability(self, model_cfg):
         """Apply the same component selection as the UnifoLM trainers.
 
-        The final hidden state includes Qwen's final norm, so it is trained.
-        An untied vocabulary head is unused by the action loss; a tied input
-        embedding must remain trainable with the language backbone.
+        Trainers additionally freeze output layers absent from their selected
+        token path. An untied vocabulary head is unused by the action loss;
+        a tied input embedding remains trainable with the language backbone.
         """
         components = set()
         for flag, component in (("tune_mm_llm", "lang_backbone"),

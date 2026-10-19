@@ -317,7 +317,7 @@ def test_real_trainer_optimizer_covers_each_trainable_parameter_once_with_source
         learning_rate=1e-4, lr_scheduler_kwargs={"weight_decay": 0.0}, optimizer_foreach=False,
     ))
     assert trainer.apply_vlm_trainability() == {"lang_backbone", "vision_tower", "mm_projector"}
-    assert model.vlm_model.model.language_model.norm.weight.requires_grad
+    assert not model.vlm_model.model.language_model.norm.weight.requires_grad
     assert not model.vlm_model.lm_head.weight.requires_grad
     assert not model.motion_conditioner.model.output_process.weight.requires_grad
     trainer.create_optimizers()
@@ -326,11 +326,12 @@ def test_real_trainer_optimizer_covers_each_trainable_parameter_once_with_source
     trainable_ids = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
     assert set(grouped_ids) == trainable_ids
     assert set(grouped_ids.values()) == {1}
+    assert id(model.vlm_model.model.language_model.norm.weight) not in grouped_ids
     assert optimizer.param_groups[0]["group_name"] == "action_header"
     groups = {group["group_name"]: group for group in optimizer.param_groups}
     expected = {
         "action_header": (model.action_header.action_proj_out.linear.weight, 1e-4),
-        "lang_backbone": (model.vlm_model.model.language_model.norm.weight, 1e-6),
+        "lang_backbone": (model.vlm_model.get_input_embeddings().weight, 1e-6),
         "vision_tower": (model.vlm_model.model.visual.patch_embed.weight, 1e-5),
         "mm_projector": (model.vlm_model.model.visual.merger.weight, 1e-4),
         "motion_expert": (model.motion_conditioner.model.backbone.weight, 1e-5),

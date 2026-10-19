@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "checked_utc": "2026-10-19T05:39:45.979527+00:00",
+  "original_run": {
+    "timestamp": "261019022505",
+    "state": "failed",
+    "observed_completed_optimizer_updates": 735,
+    "failure_utc": "2026-10-19T03:14:55Z",
+    "first_failure_rank": 5,
+    "error": "TensorCompare.cu::_assert_async_cuda_kernel, followed by NCCL watchdog SIGABRT",
+    "checkpoint_available": false,
+    "launch_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-joint-8gpu-20261019T022505Z",
+    "logged_metrics_finite_before_failure": true,
+    "root_cause_independently_reproduced": false
+  },
+  "fixes": {
+    "spawn_workers": {
+      "train_and_validation": true,
+      "train_workers_per_rank": 8,
+      "zero_workers_supported": true
+    },
+    "validation_seed": "psi.utils.seed_everything including production deterministic flags",
+    "unused_final_norm": {
+      "original_prefix_tokens_and_p_v_unchanged": true,
+      "trainers": [
+        "posttrain",
+        "finetune",
+        "sonic"
+      ],
+      "frozen_weight_elements": 2048,
+      "new_trainable_parameter_count": 3012497712,
+      "old_validation_optimizer_layout_not_resumed": true
+    },
+    "numeric_safety": {
+      "ddp_only": true,
+      "all_rank_loss_gate_before_backward": true,
+      "all_actual_gradients_checked_after_unscale_before_clip": true,
+      "rank_cpu_batch_rng_dumps": true,
+      "gloo_dump_completion": true,
+      "healthy_steps_default_disk_writes": false
+    },
+    "native_failure_debug": {
+      "cuda_launch_blocking_for_restart": 1,
+      "python_faulthandler": true,
+      "cpp_stacktraces": true,
+      "rolling_cpu_snapshot_zero_based_steps": [
+        700,
+        760
+      ],
+      "one_latest_file_per_rank": true
+    },
+    "checkpoint_cadence": {
+      "early_updates": [
+        100,
+        500,
+        1000
+      ],
+      "regular_interval": 2000,
+      "final_update_saved": true,
+      "strict_latest": 3,
+      "milestone_exemption": null,
+      "estimated_four_checkpoint_peak_gib": 135
+    },
+    "process_lifecycle": {
+      "own_descendant_cleanup_only": true,
+      "success_failure_orphan_cleanup_tests_passed": true,
+      "record": "/gaozt-test1/datasets/UnifoLM/.pipeline/diagnostics/supervisor-validation-20261019/validation.json"
+    }
+  },
+  "cpu_regressions": [
+    {
+      "scope": "real trainer checkpoint cadence/retention and Tyro recipe",
+      "passed": 8
+    },
+    {
+      "scope": "production DataLoader construction and real spawn worker batches",
+      "passed": 3
+    },
+    {
+      "scope": "bounded snapshot rotation, malformed range and real native-abort survival",
+      "passed": 6
+    },
+    {
+      "scope": "numeric failure gates, two-rank Gloo, slow writer, actual Accelerator accumulation equivalence and prepare ordering",
+      "passed": 19
+    },
+    {
+      "scope": "real tiny Qwen output/norm dependency plus joint-source and validator regressions",
+      "passed": 44,
+      "overlaps_other_validation_runs": true
+    }
+  ],
+  "eight_gpu_deterministic_gate": {
+    "passed": true,
+    "gpu_count": 8,
+    "per_gpu_batch": 16,
+    "accumulation": 2,
+    "global_batch": 256,
+    "optimizer_updates": 8,
+    "distinct_train_windows": 2048,
+    "reproducibility": {
+      "cublas_workspace_config": ":4096:8",
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": false,
+      "deterministic_algorithms": true,
+      "deterministic_algorithms_warn_only": true,
+      "pythonhashseed": "292285",
+      "seed_helper": "psi.utils.seed_everything"
+    },
+    "cuda_launch_blocking": "1",
+    "all_eight_ranks_full_model_sha_equal_every_update": true,
+    "all_losses_and_gradient_norms_finite": true,
+    "all_five_parameter_groups_updated": true,
+    "peak_allocated_gib": 63.27334499359131,
+    "peak_reserved_gib": 66.169921875,
+    "checkpoint": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-8gpu-b16-deterministic-20261019T045740Z/train/runs/posttrain/bounded_full_model_acceptance.us.flow1000.consta.lr1.0e-04.b256.gpus8.bounded/checkpoints/ckpt_8",
+    "evidence_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/full-model-8gpu-b16-deterministic-20261019T045740Z",
+    "limits": [
+      "This bounded run uses forward_and_loss directly and does not cover the subsequently added production safety guard/spawn loaders.",
+      "This run preceded removal of the unused final-norm parameter from optimizer groups; its optimizer checkpoint must not be resumed into the revised layout.",
+      "Eight updates are not a reproduction of the old failure at update735 or a throughput acceptance."
+    ]
+  },
+  "production_safety_gpu_gate_before_unused_norm_fix": {
+    "summary": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/training-safety-2gpu-b16-20261019-r2/summary.json",
+    "passed": true,
+    "gpu_count": 2,
+    "per_gpu_batch": 16,
+    "accumulation": 2,
+    "updates": 4,
+    "actual_trainer_step": true,
+    "real_train_wrapper_spawn_workers": 2,
+    "controlled_rank1_grad_inf_rejected": true,
+    "controlled_rank0_loss_nan_rejected": true,
+    "all_rank_complete_cpu_dumps": true,
+    "failed_updates_did_not_mutate_parameters": true
+  },
+  "production_safety_gpu_gate_final_norm_policy": {
+    "state": "passed",
+    "passed": true,
+    "summary": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/training-safety-2gpu-b16-20261019-r3/summary.json",
+    "gpu_count": 2,
+    "per_gpu_batch": 16,
+    "accumulation": 2,
+    "global_batch": 64,
+    "actual_trainer_updates": 4,
+    "real_train_wrapper_spawn_workers_per_rank": 2,
+    "all_rank_full_model_sha_equal_every_update": true,
+    "all_five_parameter_groups_updated": true,
+    "four_feature_gradient_paths_nonzero": true,
+    "unused_final_norm": {
+      "always_grad_none": true,
+      "elements": 2048,
+      "initial_sha256": "3149d4c06a24d0943f3d264e570f31b6f9180af919f141552c74474ab63c3cd6",
+      "optimizer_excluded": true,
+      "parameter_tensors": 1,
+      "requires_grad": false,
+      "unchanged": true
+    },
+    "unused_critical_log_count": 0,
+    "rank1_inf_gradient_rank0_nan_loss_rejected_by_all_ranks": true,
+    "all_rank_cpu_batch_rng_dump_verified": true,
+    "failed_updates_leave_parameters_unchanged": true,
+    "peak_allocated_gib": 63.48645067214966,
+    "peak_reserved_gib": 66.484375,
+    "save_restore_covered_here": false
+  },
+  "motion_only_index_stress": {
+    "passed": true,
+    "gpu_count": 1,
+    "per_gpu_batch": 16,
+    "updates": 1000,
+    "optimizer_lr": 1e-05,
+    "deterministic_algorithms": true,
+    "warn_only": true,
+    "cuda_launch_blocking": 0,
+    "distinct_routing_patterns": 1000,
+    "all_losses_gradients_parameters_finite": true,
+    "peak_allocated_gib": 6.578728199005127,
+    "old_failure_not_reproduced": true,
+    "summary": "/gaozt-test1/datasets/UnifoLM/.pipeline/diagnostics/motion-index-stress-20261019/run/summary.json",
+    "scope": "Standalone Motion probe loss, not the joint action objective; original checkpoint/cache unchanged"
+  },
+  "failure_batch_candidates": {
+    "actual_sampler_replay_confirmed": true,
+    "rank": 5,
+    "local_microbatches": [
+      1468,
+      1469,
+      1470,
+      1471,
+      1472,
+      1473
+    ],
+    "candidate_windows": 96,
+    "all_raw_and_normalized_numeric_values_finite": true,
+    "all_text_token_layout_checks_passed": true,
+    "all_history_native_edges_match_30hz": true,
+    "record": "/gaozt-test1/datasets/UnifoLM/.pipeline/diagnostics/failure-batch-candidates-rank5-20261019.json",
+    "limitations": "Original step735 weights and image augmentation RNG were not saved; these candidate inputs do not reconstruct that failure state."
+  },
+  "restart": {
+    "state": "pending_final_gate_and_preflight",
+    "authorized": true,
+    "resume": null,
+    "global_batch": 256,
+    "gpu_count": 8,
+    "per_gpu_batch": 16,
+    "accumulation": 2,
+    "max_optimizer_updates": 40000,
+    "warmup_updates": 1000,
+    "peak_learning_rates": {
+      "action_header": 0.0001,
+      "lang_backbone": 1e-06,
+      "vision_tower": 1e-05,
+      "mm_projector": 0.0001,
+      "motion_expert": 1e-05
+    }
+  },
+  "limitations": [
+    "Original native CUDA assertion is not independently reproduced or proven eliminated.",
+    "Eight updates and a standalone Motion stress test do not establish whole-run stability or hyperparameter optimality.",
+    "The revised optimizer excludes unused final-norm weight elements; do not directly resume the older validation optimizer."
+  ],
+  "current_optimizer_save_restore_gate": {
+    "state": "pending",
+    "scope": "2GPU same-process full model save/load followed by a real training update; current optimizer layout"
+  },
+  "final_cpu_regression_suite": {
+    "passed": 72,
+    "failed": 0,
+    "command": "CUDA_VISIBLE_DEVICES= PYTHONPATH=VLMExpert/src:. OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -q VLMExpert/tests/test_checkpoint_cadence.py VLMExpert/tests/test_posttrain_loader_workers.py VLMExpert/tests/test_training_safety.py VLMExpert/tests/test_native_crash_snapshot.py VLMExpert/tests/test_qwen3vl_action_context.py VLMExpert/tests/test_dual_source_joint_training.py VLMExpert/tests/test_unifolm_full_validation.py",
+    "seconds": 44.8,
+    "warnings": "Two expected pin_memory-without-accelerator CPU warnings"
+  }
+}

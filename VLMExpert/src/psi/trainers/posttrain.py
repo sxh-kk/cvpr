@@ -39,6 +39,7 @@ overwatch = initialize_overwatch(__name__)
 
 # from .base import Trainer
 from .trainer import Trainer, worker_init_fn
+from .training_safety import TrainingSafetyGuard
 
 from psi.utils import flatten, shorten, move_to_device, rmse, seed_everything
 from psi.models.psi0 import Psi0Model
@@ -218,12 +219,14 @@ class PosttrainTrainer(Trainer):
             overwatch.info("VLM parameters are frozen (tune_vlm=False, no tune_mm_* set)")
         else:
             overwatch.info(f"VLM trainable components: {sorted(trainable_components)}")
-            # Preserve legacy joint freezing; dual consumes the normalized final hidden state.
-            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1"
-                    and hasattr(self.model.vlm_model.model, "language_model") and hasattr(self.model.vlm_model.model.language_model, "norm")):
+            # Qwen3VLForConditionalGeneration.hidden_states records decoder
+            # outputs before the final norm. Both action heads consume these
+            # existing Psi0 tokens, so the final norm is outside the action loss.
+            if (hasattr(self.model.vlm_model.model, "language_model")
+                    and hasattr(self.model.vlm_model.model.language_model, "norm")):
                 for p in self.model.vlm_model.model.language_model.norm.parameters():
                     p.requires_grad = False
-                overwatch.info("VLM final norm layer frozen (legacy joint policy)")
+                overwatch.info("VLM final norm frozen (unused by action-context tokens)")
             # We never read the logits, so an UNTIED lm_head receives no gradient
             # and DDP errors on the reduction that never comes.
             lm_head = self.model.vlm_model.lm_head
@@ -518,24 +521,32 @@ class PosttrainTrainer(Trainer):
             cfg_num_workers = self.train_cfg.num_workers
         num_workers = cfg_num_workers if cfg_num_workers is not None else 4
 
+        def worker_options(count):
+            options = {"num_workers": count, "persistent_workers": count > 0}
+            # Forking after CUDA/NCCL initialization is unsafe. The joint
+            # UnifoLM recipe explicitly uses spawn for train and validation.
+            start_method = self.train_cfg.dataloader_start_method
+            if count > 0 and start_method is not None:
+                options["multiprocessing_context"] = start_method
+            return options
+
         if batch_sampler is not None:
             self.train_dataloader = DataLoader(
                 train_dataset,
                 batch_sampler=batch_sampler,
                 collate_fn=collator,
-                num_workers=num_workers,
                 worker_init_fn=worker_init_fn,
-                persistent_workers=True
+                **worker_options(num_workers),
             )
             self.train_sampler = batch_sampler # !!important
         else:
             train_dataloader_kwargs = {
-                "num_workers": num_workers,
-                "persistent_workers": True,
+                **worker_options(num_workers),
                 "pin_memory": True,
-                "prefetch_factor": getattr(self.data_cfg, "prefetch_factor", None) or 4,
                 "drop_last": drop_last or False
             }
+            if num_workers > 0:
+                train_dataloader_kwargs["prefetch_factor"] = getattr(self.data_cfg, "prefetch_factor", None) or 4
             if not is_psix_mixture_dataset_enabled:
                 train_dataloader_kwargs["generator"] = g
                 train_dataloader_kwargs["worker_init_fn"] = worker_init_fn
@@ -551,10 +562,9 @@ class PosttrainTrainer(Trainer):
             )
 
         val_dataloader_kwargs = {
-            "num_workers": 4,
+            **worker_options(4),
             "drop_last": False,
             # "pin_memory": True,
-            "persistent_workers": True,
             "shuffle": True,
         }  # 1 small enough to fit im Mem. 2. no need distributed sampler
         self.val_dataloader = torch.utils.data.DataLoader(
@@ -603,6 +613,10 @@ class PosttrainTrainer(Trainer):
         if val_dataloader is not None: # not using if self.val_dataloader to avoid DataLoader.__len__() being called on iterable dataset
             self.val_dataloader = accelerator.prepare(self.val_dataloader)
 
+        self.accelerator = accelerator
+        # Coordinate diagnostic writers before starting spawn workers: first
+        # frame decode can take a different amount of time on each rank.
+        self._get_training_safety()
         if self.cfg.train.overfit_single_batch:
             overwatch.warning("Overfitting a single batch: reusing first batch every step. set cfg.data.image_aug = False for true memorization.")
             first_batch = next(iter(self.train_dataloader))
@@ -615,7 +629,6 @@ class PosttrainTrainer(Trainer):
             self.train_dataloader = SingleBatchLoader()
             self.val_dataloader = SingleBatchLoader()
             
-        self.accelerator = accelerator
         return self.train_dataloader # type: ignore
 
     # Optimizer groups that make up the VLM backbone; `other` and `action_header`
@@ -648,7 +661,7 @@ class PosttrainTrainer(Trainer):
             metrics["grad_norm_vlm"] = math.sqrt(sum(v * v for v in vlm))
         return metrics
 
-    def clip_grad_norms(self) -> dict[str, float]:
+    def clip_grad_norms(self, *, already_unscaled: bool = False) -> dict[str, float]:
         """Clip each optimizer group on its own budget; return pre-clip norms.
 
         Only for ddp: fsdp needs the sharded all-reduce inside model.clip_grad_norm_,
@@ -667,10 +680,11 @@ class PosttrainTrainer(Trainer):
             return {} if norm is None else {"global": float(norm)}
 
         norms: dict[str, float] = {}
+        clip = torch.nn.utils.clip_grad_norm_ if already_unscaled else self.accelerator.clip_grad_norm_
         for group in self.optimizer.param_groups:
             params = group["params"]
             norm = (
-                self.accelerator.clip_grad_norm_(params, max_norm)
+                clip(params, max_norm)
                 if max_norm is not None
                 else self.get_total_grad_norm(params)
             )
@@ -696,10 +710,36 @@ class PosttrainTrainer(Trainer):
             return contextlib.nullcontext()
         return torch.autocast("cuda", dtype=dtype)
 
+    def _get_training_safety(self):
+        if not getattr(self.train_cfg, "training_safety_checks", False):
+            return None
+        safety = getattr(self, "_training_safety", None)
+        if safety is None:
+            safety = self._training_safety = TrainingSafetyGuard(
+                os.path.join(self.project_dir, "diagnostics"), device=self.device,
+                rank=self.accelerator.process_index, world_size=self.accelerator.num_processes,
+                accumulation_steps=self.train_cfg.gradient_accumulation_steps,
+            )
+        return safety
+
     def training_step(
         self,
         batch: dict[str, Union[torch.Tensor, Any]],
     ) -> tuple[bool, dict[str, Any]]:
+        safety = self._get_training_safety()
+        try:
+            if safety is not None:
+                safety.capture(batch, global_step=self.global_step, local_step=self.local_step)
+            return self._training_step(batch, safety=safety)
+        except Exception as error:
+            if safety is not None:
+                try:
+                    safety.dump(f"{type(error).__name__}: {error}")
+                except Exception as dump_error:
+                    overwatch.error(f"Failed to write cached CPU training diagnostic: {dump_error}")
+            raise
+
+    def _training_step(self, batch, *, safety=None) -> tuple[bool, dict[str, Any]]:
 
         if self.train_cfg.data_parallel == "deepspeed":
             gac = contextlib.nullcontext()
@@ -707,13 +747,25 @@ class PosttrainTrainer(Trainer):
             # otherwise gradient accumulation is managed by deepspeed
             gac = self.accelerator.accumulate(self.model)
         with gac:
+            if safety is not None:
+                safety.stage = "forward"
             with self.forward_autocast():
                 batch = move_to_device(batch, self.device) # type: ignore
                 losses = self.forward_and_loss(self.model, batch)
 
+            if safety is not None:
+                safety.check_loss(losses["loss"])
+                safety.stage = "backward"
             self.accelerator.backward(losses["loss"])
             if self.accelerator.sync_gradients:
-                self._grad_norms = self.clip_grad_norms()
+                if safety is not None:
+                    safety.stage = "unscale"
+                    self.accelerator.unscale_gradients(self.optimizer)
+                    safety.check_gradients(self.model.parameters())
+                    safety.stage = "clip"
+                    self._grad_norms = self.clip_grad_norms(already_unscaled=True)
+                else:
+                    self._grad_norms = self.clip_grad_norms()
                 # `grad_norm_act` keeps its name's meaning: the action header's own
                 # norm, no longer contaminated by the backbone. Fall back to
                 # whatever single norm exists (global / frozen-VLM runs).
@@ -732,10 +784,18 @@ class PosttrainTrainer(Trainer):
                                 continue  # A routed expert may legitimately be inactive on this rank/batch.
                             overwatch.critical(f"[Unused] {name} did not receive a gradient.")
 
+            if safety is not None:
+                safety.stage = "optimizer"
             self.optimizer.step()
+            if safety is not None:
+                safety.stage = "scheduler"
             self.lr_scheduler.step()
+            if safety is not None:
+                safety.stage = "zero_grad"
             self.optimizer.zero_grad()
 
+        if safety is not None:
+            safety.stage = "metrics"
         # Log batch["raw_image"] to wandb every 100 steps
         if (
             hasattr(self, "global_step")

@@ -30,14 +30,17 @@ overwatch = initialize_overwatch(__name__)
 
 
 def should_save_training_checkpoint(
-    completed_step: int, checkpointing_steps: int, max_training_steps: int
+    completed_step: int, checkpointing_steps: int, max_training_steps: int,
+    extra_steps: tuple[int, ...] = (),
 ) -> bool:
-    """Save on the normal cadence and always at the end of training."""
+    """Save once on an early update, the normal cadence, or the final update."""
 
-    if completed_step <= 0 or checkpointing_steps <= 0 or max_training_steps <= 0:
+    if (completed_step <= 0 or checkpointing_steps <= 0 or max_training_steps <= 0
+            or any(step <= 0 for step in extra_steps)):
         raise ValueError("checkpoint step values must be positive")
     return (
-        completed_step % checkpointing_steps == 0
+        completed_step in extra_steps
+        or completed_step % checkpointing_steps == 0
         or completed_step == max_training_steps
     )
 

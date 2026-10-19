@@ -38,7 +38,11 @@ Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM
 新head和VLM继续使用Ψ₀分组LR。2026-10-19已按用户授权启动八卡正式UnifoLM后训练：
 每卡16、累积2步、全局256、40k更新（约1.97遍窗口）、1000步warmup及cosine。
 当前进程、实际配置和日志见 [运行状态](/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json)。
-首次20-batch验证和初始连续更新检查通过，保存于 [启动检查记录](docs/unifolm_training_start.json)。
+首次20-batch验证和初始连续更新曾通过，见 [历史启动检查记录](docs/unifolm_training_start.json)；
+该任务随后在735次更新后由rank5原生CUDA断言退出，尚未生成正式checkpoint。
+重启修复包括安全的spawn数据worker、生产一致的确定性验收、全卡更新前数值保护和早期保存；
+保留原VLM prefix tokens，按原Ψ₀策略冻结未参与该loss的末端norm。
+新验收和实际重启状态见 [重启记录](docs/unifolm_assert_repair_validation.json)，实时PID／日志以外部状态文件为准。
 W&B使用离线本地记录；此前短时验收不代表长期收敛或正式吞吐验收。
 
 当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。

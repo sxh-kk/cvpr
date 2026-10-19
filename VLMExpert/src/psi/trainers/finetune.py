@@ -388,12 +388,14 @@ class FinetuneTrainer(Trainer):
             overwatch.info("VLM parameters are frozen (tune_vlm=False, no tune_mm_* set)")
         else:
             overwatch.info(f"VLM trainable components: {sorted(trainable_components)}")
-            # Preserve legacy joint freezing; dual consumes the normalized final hidden state.
-            if (getattr(self.model_cfg, "action_architecture", "psi0_joint") != "dual_source_v1"
-                    and hasattr(self.model.vlm_model.model, 'language_model') and hasattr(self.model.vlm_model.model.language_model, 'norm')):
+            # Qwen3VLForConditionalGeneration.hidden_states records decoder
+            # outputs before the final norm. Both action heads consume these
+            # existing Psi0 tokens, so the final norm is outside the action loss.
+            if (hasattr(self.model.vlm_model.model, "language_model")
+                    and hasattr(self.model.vlm_model.model.language_model, "norm")):
                 for p in self.model.vlm_model.model.language_model.norm.parameters():
                     p.requires_grad = False
-                overwatch.info("VLM final norm layer frozen (legacy joint policy)")
+                overwatch.info("VLM final norm frozen (unused by action-context tokens)")
             # We never read the logits, so an UNTIED lm_head receives no gradient
             # and DDP errors on the reduction that never comes.
             lm_head = self.model.vlm_model.lm_head

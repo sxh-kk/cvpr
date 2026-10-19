@@ -301,7 +301,8 @@ HTTP／机器人历史缓冲的服务接线仍单独验收。
 通过 ImageProcess 对 VLM 当前帧采样 Ψ₀ 颜色增强；Motion 历史六帧保持 clean，随机裁切关闭。
 每个训练样本重新采样颜色，验证／`no_aug`／推理关闭随机增强。
 只使用 action flow loss 联合反传，没有额外增加 Motion 重建损失。
-VLM 最后 norm 参与所选最后 hidden 的计算，保持可训；独立词表输出头不读 logits，保持冻结。
+沿用 Ψ₀ 的 VLM prefix tokens；本地 Qwen3-VL 的末端 norm 不参与这些 tokens 的 action loss，保持冻结。
+未绑定的词表输出头不读 logits，保持冻结；与输入 embedding 绑定的权重仍随语言主干训练。
 Motion 仅冻结当前 hidden 接口不使用的运动输出头、被完整遮蔽的轨迹输入投影和未来图像 mask token；
 注意力、图像投影、时间编码、路由器、共享／路由专家均可训练。MoE 并非每批命中全部专家，
 该模式 DDP 使用 `find_unused_parameters=True, static_graph=False`。
@@ -343,22 +344,53 @@ batch256对应约20,309次更新／遍，40k约为1.97遍窗口抽样；相邻30
 正式入口同时修复了history wrapper被误判为sharded数据、无法统计样本数的问题，
 以及epoch日志重复乘world size的问题；9项针对性CPU回归和真实4418行val历史wrapper长度检查通过。
 
-#### 当前正式训练任务
+#### 正式训练、失败定位与重启
 
 2026-10-19按用户授权，从已固定的本地Qwen3-VL和Motion第100轮EMA开始联合训练，
 ActionExpert从头初始化；每卡batch16、8卡、累积2步，全局batch256，40k次更新、1000步warmup、cosine。
 五组峰值LR沿用上表，BF16 autocast、FP32主参数、AdamW `foreach=False`，每卡8个训练worker。
 当前任务不恢复之前的有限步数验收checkpoint。
 
+首次任务 `261019022505` 在完成735次更新后于2026-10-19 03:14 UTC由rank5触发
+`TensorCompare.cu::_assert_async_cuda_kernel`，随后NCCL watchdog退出；当时尚未到首次2000步保存点，
+没有可恢复的正式checkpoint。此前已落盘loss／梯度有限，不代表失败microbatch已通过检查。
+原日志与初始健康快照保留追溯，不能将该启动快照视为持续运行证明。
+
+本次修复让正式配方的train／val DataLoader显式使用`spawn`，避免在CUDA/NCCL初始化后fork；
+`num_workers=0`时不传进程专用选项。此运行约束见
+[PyTorch DDP文档](https://docs.pytorch.org/docs/2.7/generated/torch.nn.parallel.DistributedDataParallel.html)。
+验收入口复用生产`seed_everything`，记录实际确定性标志；此前短测仅设置RNG种子，漏掉了确定性CUDA索引路径。
+
+保持原Ψ₀的`Qwen3VLForConditionalGeneration.hidden_states[-1]`作为完整prefix tokens，仍对有效tokens做masked mean得到`p_V`。
+本地Transformers4.57.1的该输出位于最终decoder之后、末端norm之前；不将tokens另换成post-norm输出。
+因此三种trainer按原Ψ₀策略冻结不参与action loss的末端norm及未绑定的logits head，
+其余指定VLM组件继续训练；MotionExpert和新ActionExpert继续训练，DINO冻结。
+真实小型Qwen回归确认冻结前后tokens／`p_V`逐位相同，完整模型可训练参数为3,012,497,712。
+旧验收checkpoint的optimizer包含额外2048个无梯度norm参数，不直接恢复到修订后的optimizer布局。
+
+正式配方显式开启`training_safety_checks`：每microbatch在backward前全卡判定loss有限，
+同步更新时先unscale、再检查全部实际梯度、最后按原分组预算clip并更新。
+数值异常全卡拒绝更新，保存当前累积窗的CPU batch及Python／NumPy／CPU／当前CUDA RNG，
+通过独立Gloo组等待各卡诊断写完。健康步只保留有界内存快照。
+原生watchdog直接SIGABRT无法由Python异常处理保证捕获；定位窗口可显式设置
+`PSI0_DIAGNOSTIC_BATCH_RANGE=700:760`，按zero-based optimizer step在forward前原子覆盖每卡一份
+`diagnostics/latest_batch_rank_XXX.pt`，区间外停止健康步写盘。
+
+原rank5附近96个候选样本经真实sampler重放，原始与归一化数值、历史时间边和文本tokens检查通过。
+真实Motion／B16／1000步索引压力测试也通过，但缺少原735步权重，不能据此认定已复现原故障。
+八卡确定性模式检查与新增防护的实际trainer路径分别验收，范围和局限见
+[重启验收记录](../docs/unifolm_assert_repair_validation.json)。短测不能证明全程不会再异常。
+
 实际进程、唯一timestamp、启动命令、配置、输出目录与日志路径记录在
 [`current_unifolm_training.json`](/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json)。
-启动器已将所有rank的timestamp固定为 `261019022505`，输出位于仓库外
-`/gaozt-test1/datasets/UnifoLM/.pipeline/training`，以独立进程组运行。
+启动器为每次任务固定全部rank的同一timestamp，输出位于仓库外
+`/gaozt-test1/datasets/UnifoLM/.pipeline/training`，以独立进程组运行；具体任务以实时状态文件为准。
 当前没有W&B在线凭据，使用 `WANDB_MODE=offline` 在实际run目录保存本地指标、图像及W&B数据。
-每2000步保存checkpoint，保留最新5份及每10k的里程碑；每5000步验证。
+第100／500／1000步增加早期checkpoint，此后每2000步及最终更新保存，严格保留最近3份；每5000步验证。
+不再豁免10k里程碑，按完整Adam状态估算写入时4份checkpoint峰值约135GiB，另计历史验收产物。
 既有循环还会在首次更新后执行一次20-batch验证，完成后继续训练；全局step按优化器更新计数。
-首次验证和初始连续更新的损失、各组梯度与warmup学习率检查已通过，见
-[启动检查快照](../docs/unifolm_training_start.json)。该快照记录检查时进度，实际任务继续在后台运行。
+首次任务的启动信息见[历史启动快照](../docs/unifolm_training_start.json)，
+重启后的进度、同步执行调试设置与检查结果另记于重启验收记录及实时状态文件。
 
 数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
 双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。

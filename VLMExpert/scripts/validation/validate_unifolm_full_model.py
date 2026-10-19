@@ -158,13 +158,23 @@ def checkpoint_rng_hash(checkpoint, process_index, local_device_index):
 
 
 def seed_all(seed):
-    import numpy as np
+    # Use the production setup, including deterministic CUDA indexing kernels.
+    # Seeding RNGs alone would exercise a different path from scripts/train.py.
+    from psi.utils import seed_everything
+
+    seed_everything(seed)
+
+
+def reproducibility_settings():
     import torch
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    return {"seed_helper": "psi.utils.seed_everything",
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "deterministic_algorithms_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cublas_workspace_config": os.getenv("CUBLAS_WORKSPACE_CONFIG"),
+            "pythonhashseed": os.getenv("PYTHONHASHSEED")}
 
 
 def config(args):
@@ -488,7 +498,13 @@ def deterministic_sampling(seed):
 
     python_state, numpy_state = random.getstate(), np.random.get_state()
     with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-        seed_all(seed)
+        # run() already applies production settings. Sampling temporarily seeds
+        # only the generators restored here: do not change global kernel flags,
+        # environment variables or another rank's visible CUDA generators.
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.random.default_generator.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
         try:
             yield
         finally:
@@ -552,6 +568,7 @@ def run(args, report):
     cfg = config(args)
     report.update(mode=args.mode, binding=check_binding(args, cfg), torch=torch.__version__,
                   numpy=np.__version__, pillow=PIL.__version__, device=torch.cuda.get_device_name(device),
+                  reproducibility=reproducibility_settings(),
                   precision="FP32 master parameters / BF16 autocast", optimizer_foreach=False,
                   scope="bounded acceptance updates only; no formal training", inference_steps=3,
                   deployment_api={"method": "Psi0Model.predict_action", "return_vlm_features": True,
@@ -595,8 +612,10 @@ def run(args, report):
     prepared_loader = trainer.prepare(accelerator)
     raw = accelerator.unwrap_model(trainer.model)
     report["actual_model_contract"] = model_contract(raw, require_fp32=True)
-    if any(not p.requires_grad for p in raw.vlm_model.model.language_model.norm.parameters()):
-        raise AssertionError("The consumed final Qwen normalization must remain trainable")
+    # The outer Qwen generation model records pre-finalnorm decoder tokens.
+    # Preserve that Psi0 input and exclude the unused norm from optimization.
+    if any(p.requires_grad for p in raw.vlm_model.model.language_model.norm.parameters()):
+        raise AssertionError("The final Qwen normalization is unused by action-context tokens and must remain frozen")
     tied_head = raw.vlm_model.lm_head.weight is raw.vlm_model.get_input_embeddings().weight
     if not tied_head and raw.vlm_model.lm_head.weight.requires_grad:
         raise AssertionError("An unused untied vocabulary head must remain frozen")

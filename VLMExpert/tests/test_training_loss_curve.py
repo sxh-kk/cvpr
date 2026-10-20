@@ -6,11 +6,14 @@ no training imports, existing run artifacts, models, GPUs, or renderer are used.
 from __future__ import annotations
 
 import importlib.util
+import csv
+import hashlib
 import json
 import math
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -191,3 +194,209 @@ def test_cli_wrong_run_stops_before_optional_imports(tmp_path):
     assert result.returncode == 1
     assert "timestamp changed" in result.stderr
     assert not output.exists()
+
+
+def _history_run(curve, tmp_path, through=100):
+    prefix_path = tmp_path / "prefix.csv"
+    prefix_path.write_text(curve.csv_text(
+        ["completed_update", "logged_train_loss"],
+        [{"completed_update": step, "logged_train_loss": float(step)}
+         for step in range(1, through + 1)],
+    ))
+    prefix = {
+        "path": str(prefix_path), "sha256": hashlib.sha256(prefix_path.read_bytes()).hexdigest(),
+        "through_update": through, "source_run_timestamp": "original",
+        "source_run_directory": str(tmp_path / "original-run"),
+    }
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "timestamp": "resumed", "run_directory": str(tmp_path / "resumed-run"),
+        "loss_history_prefix": prefix,
+    }))
+    return state, curve.load_run(state, "resumed")
+
+
+def _install_wandb_source(run, source):
+    destination = Path(run["run_directory"]) / "wandb/offline-run-fixture/run.wandb"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(source.read_bytes())
+    return destination
+
+
+def test_resume_extract_joins_frozen_history_and_real_protobuf(curve, tmp_path, make_wandb_source):
+    _, run = _history_run(curve, tmp_path)
+    # The previous run's records after the resume checkpoint must never be read.
+    old_source = Path(run["loss_history_prefix"]["source_run_directory"]) / "wandb/offline-run-old/run.wandb"
+    old_source.parent.mkdir(parents=True)
+    old_source.write_bytes(b"previous abandoned run is not a loss source")
+    source = _install_wandb_source(run, make_wandb_source([
+        *[{"_step": step - 1, "train/loss": float(step)} for step in range(101, 206)],
+        {"_step": 100, "train/loss": 101.5},
+    ]))
+    prefix_path = Path(run["loss_history_prefix"]["path"])
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in (source, prefix_path, old_source)}
+    output = tmp_path / "output"
+    assert curve.extract(SimpleNamespace(output_dir=output, window=100), run) == 0
+    report = json.loads((output / "loss_summary.json").read_text())
+    assert report["loss_history_prefix"] == run["loss_history_prefix"]
+    assert report["source"] == str(source)
+    assert report["latest_flushed_update"] == 205
+    assert report["latest_complete_update"] == 200
+    assert report["missing_updates"] == []
+    assert report["distinct_loss_records"] == 205
+    assert report["duplicates_replaced_by_last"] == 1
+    assert [row["count"] for row in report["bins"]] == [100, 100, 5]
+    assert report["bins"][0]["mean_loss"] == 50.5
+    assert report["bins"][1]["mean_loss"] == pytest.approx(150.505)
+    with (output / "loss_per_update.csv").open() as handle:
+        raw = list(csv.DictReader(handle))
+    assert [int(row["completed_update"]) for row in raw] == list(range(1, 206))
+    assert float(raw[100]["logged_train_loss"]) == 101.5
+    assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before}
+
+
+def test_resume_extract_keeps_a_missing_new_update_visible(curve, tmp_path, make_wandb_source):
+    _, run = _history_run(curve, tmp_path)
+    _install_wandb_source(run, make_wandb_source([
+        {"_step": step - 1, "train/loss": 1.0} for step in range(102, 201)
+    ]))
+    output = tmp_path / "output"
+    assert curve.extract(SimpleNamespace(output_dir=output, window=100), run) == 0
+    report = json.loads((output / "loss_summary.json").read_text())
+    assert report["missing_updates"] == [101]
+    assert report["latest_complete_update"] == 100
+    assert report["bins"][1]["complete"] is False
+
+
+@pytest.mark.parametrize("overlap_step", [0, 99])
+def test_resume_refuses_new_run_overlap_without_changing_outputs(
+    curve, tmp_path, make_wandb_source, overlap_step,
+):
+    _, run = _history_run(curve, tmp_path)
+    _install_wandb_source(run, make_wandb_source([
+        {"_step": overlap_step, "train/loss": 999.0},
+        {"_step": 100, "train/loss": 1.0},
+    ]))
+    output = tmp_path / "output"
+    output.mkdir()
+    summary = output / "loss_summary.json"
+    summary.write_text(json.dumps(run))
+    raw = output / "loss_per_update.csv"
+    raw.write_bytes(b"preserve")
+    before = {path: path.read_bytes() for path in (summary, raw)}
+    with pytest.raises(ValueError, match="at or before.*boundary"):
+        curve.extract(SimpleNamespace(output_dir=output, window=100), run)
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_resume_prefix_hash_is_checked_before_reading_wandb(curve, tmp_path):
+    _, run = _history_run(curve, tmp_path)
+    Path(run["loss_history_prefix"]["path"]).write_text("changed")
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="SHA256"):
+        curve.extract(SimpleNamespace(output_dir=output, window=100), run)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("rows", [
+    [(1, 1.0), (3, 3.0)],  # Missing interior row.
+    [(1, 1.0), (1, 2.0), (3, 3.0)],  # Duplicates are not resumable history.
+    [(2, 2.0), (1, 1.0), (3, 3.0)],
+    [(1, 1.0), (2, 2.0)],  # Short endpoint.
+    [(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0)],  # Abandoned post-checkpoint loss.
+    [(1, math.nan), (2, 2.0), (3, 3.0)],
+    [(1, math.inf), (2, 2.0), (3, 3.0)],
+])
+def test_frozen_history_requires_finite_continuous_exact_prefix(curve, tmp_path, rows):
+    _, run = _history_run(curve, tmp_path, through=3)
+    prefix = run["loss_history_prefix"]
+    path = Path(prefix["path"])
+    path.write_text(curve.csv_text(["completed_update", "logged_train_loss"], [
+        {"completed_update": step, "logged_train_loss": value} for step, value in rows
+    ]))
+    prefix["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="continuous|non-finite"):
+        curve.read_history_prefix(prefix)
+
+
+@pytest.mark.parametrize("content", [
+    "update,loss\n1,1\n",
+    "completed_update,logged_train_loss,extra\n1,1,x\n",
+    "completed_update,logged_train_loss\n1,1,x\n",
+    "completed_update,logged_train_loss\n1\n",
+    "completed_update,logged_train_loss\n1.0,1\n",
+])
+def test_frozen_history_rejects_wrong_columns_and_malformed_rows(curve, tmp_path, content):
+    _, run = _history_run(curve, tmp_path, through=1)
+    prefix = run["loss_history_prefix"]
+    path = Path(prefix["path"])
+    path.write_text(content)
+    prefix["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="columns|invalid"):
+        curve.read_history_prefix(prefix)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("path", "relative.csv"), ("source_run_directory", "relative-run"),
+    ("sha256", "g" * 64), ("sha256", "0" * 63),
+    ("through_update", True), ("through_update", 0), ("source_run_timestamp", ""),
+])
+def test_load_run_rejects_invalid_prefix_metadata(curve, tmp_path, field, value):
+    state, _ = _history_run(curve, tmp_path)
+    document = json.loads(state.read_text())
+    document["loss_history_prefix"][field] = value
+    state.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="prefix"):
+        curve.load_run(state, "resumed")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("path", "/different/prefix.csv"), ("sha256", "a" * 64),
+    ("through_update", 200), ("source_run_timestamp", "another-source"),
+    ("source_run_directory", "/different/source"),
+])
+def test_existing_outputs_cannot_be_rebound_to_different_history(curve, tmp_path, field, value):
+    _, run = _history_run(curve, tmp_path)
+    report = json.loads(json.dumps(run))
+    curve.check_binding(report, run)
+    report["loss_history_prefix"][field] = value
+    with pytest.raises(ValueError, match="history prefix"):
+        curve.check_binding(report, run)
+    with pytest.raises(ValueError, match="history prefix"):
+        curve.check_binding({key: value for key, value in run.items() if key != "loss_history_prefix"}, run)
+    with pytest.raises(ValueError, match="history prefix"):
+        curve.check_binding(run, {key: value for key, value in run.items() if key != "loss_history_prefix"})
+
+
+def test_plot_rejects_different_history_before_optional_imports(curve, tmp_path):
+    state, run = _history_run(curve, tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    report = json.loads(json.dumps(run))
+    report["loss_history_prefix"]["sha256"] = "0" * 64
+    (output / "loss_summary.json").write_text(json.dumps(report))
+    image = output / "loss_100step.png"
+    image.write_bytes(b"preserve")
+    result = subprocess.run([
+        sys.executable, "-S", str(SCRIPT), "--mode", "plot", "--state", str(state),
+        "--output-dir", str(output), "--run-timestamp", "resumed",
+    ], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 1
+    assert "history prefix" in result.stderr
+    assert image.read_bytes() == b"preserve"
+
+
+def test_extract_without_history_preserves_original_step_mapping(curve, tmp_path, make_wandb_source):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"timestamp": "fresh", "run_directory": str(tmp_path / "fresh-run")}))
+    run = curve.load_run(state, "fresh")
+    assert "loss_history_prefix" not in run
+    _install_wandb_source(run, make_wandb_source([
+        {"_step": step - 1, "train/loss": 2.0} for step in range(1, 101)
+    ]))
+    output = tmp_path / "output"
+    assert curve.extract(SimpleNamespace(output_dir=output, window=100), run) == 0
+    report = json.loads((output / "loss_summary.json").read_text())
+    assert "loss_history_prefix" not in report
+    assert report["latest_complete_update"] == report["distinct_loss_records"] == 100

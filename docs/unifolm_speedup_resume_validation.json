@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "state": "gpu_accepted_formal_resume_prepared",
+  "updated_utc": "2026-10-20T02:50:26.067355+00:00",
+  "user_authorization": "Preserve checkpoint14000; enable only first three speedups, test before eight-GPU resume; foreach remainsFalse.",
+  "resume_checkpoint": "/gaozt-test1/datasets/UnifoLM/.pipeline/recovery_snapshots/unifolm-261019053758-speedup-20261020T021809Z/ckpt_14000",
+  "previous_run": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019053758",
+  "new_run": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu_speedup.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261020022152",
+  "resume_update": 14000,
+  "previous_run_last_update": 14195,
+  "updates_to_recompute": 195,
+  "checkpoint_validation": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/checkpoint_14000_validation.json",
+  "optimizer_scheduler_rng_zip_crc_passed": true,
+  "model_header_structurally_valid": true,
+  "source_file_sha256": {
+    "VLMExpert/src/psi/models/psi0.py": "20c138e057da0de500fc0c4a5f9bb146e2102ed73db89b211c67dd6543c537b7",
+    "VLMExpert/src/psi/trainers/posttrain.py": "084cb2b196712bb3e66486af3987c2ac4bec022e3416cc6caef8cffb960ed088",
+    "VLMExpert/src/psi/trainers/trainer.py": "0f0253f5d32c8e15183cf230614f875835b6318910655a07869344a2f7c03c9f",
+    "VLMExpert/scripts/train.py": "4c4121d90e431daaafcb356d11a0d2613b8b494067d40f2d21b82b986f62ac14",
+    "VLMExpert/src/psi/trainers/resume_data.py": "3eba59504524fbf282d3eed2d0bb829ad8848e3a5afbba25534d42ce95859bce",
+    "VLMExpert/scripts/analysis/training_loss_curve.py": "8d32909ea0d4bed7f681ec9b2434c6eec7cc92416ae7a786e6f7e5f958c58838"
+  },
+  "model_batch_schedule_unchanged": {
+    "action_blocks": 6,
+    "state_token": "first token, clean observed state",
+    "vlm": "complete final-layer tokens and masked mean",
+    "motion": "complete11hidden tokens and mean",
+    "vlm_motion_trainable": true,
+    "gpus": 8,
+    "per_gpu_batch": 16,
+    "accumulation": 2,
+    "global_batch": 256,
+    "max_updates": 40000,
+    "warmup": 1000,
+    "scheduler": "cosine",
+    "optimizer_foreach": false,
+    "max_grad_norm_per_group": 1.0
+  },
+  "enabled_execution_flags": {
+    "CUDA_LAUNCH_BLOCKING": 0,
+    "vlm_skip_unused_logits": true,
+    "keep_train_batch_on_cpu": true,
+    "sync_metrics_on_update_only": true
+  },
+  "cpu_validation": {
+    "preparation_tests_previously_passed": 171,
+    "new_resume_data_tests_passed": 5,
+    "curve_monitor_tests_passed": 46,
+    "resume_data_scope": "Real two-rank CPU/Gloo with spawn workers, same shards, no decoding skipped rows, next epoch, odd-tail sync, model/SGD/scheduler equality."
+  },
+  "baseline_gpu_acceptance": {
+    "accumulation": 2,
+    "baseline_comparison": null,
+    "checkpoint_writes": 0,
+    "cold_restore_checked": true,
+    "gpu_count": 8,
+    "optimizer_foreach": false,
+    "passed": true,
+    "per_gpu_batch": 16,
+    "profile": "baseline",
+    "rank_reports": [
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank0.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank1.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank2.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank3.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank4.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank5.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank6.json",
+      "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/baseline/rank7.json"
+    ],
+    "scope": "each rank replays its own TWO archived real B16 batches; 256 rank/micro windows reused across updates; no dataset position replay",
+    "timing": {
+      "exclude_first": 2,
+      "max_rank_seconds_each_update": [
+        4.491556644439697,
+        4.406609058380127,
+        4.415067672729492,
+        4.417989730834961,
+        4.395030498504639,
+        4.395251750946045,
+        4.700369834899902,
+        4.409060478210449
+      ],
+      "mean_seconds_last_six": 4.455461661020915,
+      "scope": "same two archived batches per rank reused; no audit hooks/full hashes/checkpoint I/O; production finite gates/CPU snapshots remain enabled; not full-data throughput",
+      "updates": 8
+    }
+  },
+  "optimized_gpu_acceptance": {
+    "passed": true,
+    "checked_utc": "2026-10-20T02:49:46.870206+00:00",
+    "strict_single_update_all_eight_ranks": [
+      {
+        "rank": 0,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 1,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 2,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 3,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 4,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 5,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 6,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      },
+      {
+        "rank": 7,
+        "full_features_pools_source_grads_visual_grads_and_model_exact": true
+      }
+    ],
+    "production_health": [
+      {
+        "profile": "baseline",
+        "internal_health_passed": true,
+        "multi_update_cross_profile_bitwise_equality_claimed": false,
+        "mean_replay_seconds_last_six": 4.455461661020915,
+        "peak_allocated_bytes_max_rank": 68363480064
+      },
+      {
+        "profile": "baseline_repeat",
+        "internal_health_passed": true,
+        "multi_update_cross_profile_bitwise_equality_claimed": false,
+        "mean_replay_seconds_last_six": 4.496865908304851,
+        "peak_allocated_bytes_max_rank": 68363480576
+      },
+      {
+        "profile": "optimized",
+        "internal_health_passed": true,
+        "multi_update_cross_profile_bitwise_equality_claimed": false,
+        "mean_replay_seconds_last_six": 2.5075541734695435,
+        "peak_allocated_bytes_max_rank": 68333876736
+      }
+    ],
+    "source_file_sha256": {
+      "VLMExpert/src/psi/models/psi0.py": "20c138e057da0de500fc0c4a5f9bb146e2102ed73db89b211c67dd6543c537b7",
+      "VLMExpert/src/psi/trainers/posttrain.py": "084cb2b196712bb3e66486af3987c2ac4bec022e3416cc6caef8cffb960ed088",
+      "VLMExpert/src/psi/trainers/trainer.py": "0f0253f5d32c8e15183cf230614f875835b6318910655a07869344a2f7c03c9f",
+      "VLMExpert/scripts/train.py": "4c4121d90e431daaafcb356d11a0d2613b8b494067d40f2d21b82b986f62ac14",
+      "VLMExpert/src/psi/trainers/resume_data.py": "3eba59504524fbf282d3eed2d0bb829ad8848e3a5afbba25534d42ce95859bce",
+      "VLMExpert/scripts/analysis/training_loss_curve.py": "8d32909ea0d4bed7f681ec9b2434c6eec7cc92416ae7a786e6f7e5f958c58838"
+    },
+    "numerical_divergence_diagnostic": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/numerical_divergence_diagnostic.json",
+    "numerical_divergence_diagnostic_sha256": "6a4d075ce5b67312dcf710c78497ae94e8fd109b8bf05c3a4cb33a41be80b01e",
+    "strict_controls_test_only": true,
+    "formal_configuration_changes": "only authorized three speedups; foreach=False",
+    "limitation": "production BF16/attention can diverge across identical cold replays; short repeated-batch timing is not full-data throughput"
+  },
+  "formal_resume_health": null,
+  "loss_history_prefix": {
+    "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/prefix_loss_through_14000.csv",
+    "sha256": "27e209eb9aa2a5f8ab558ef6c89ad036b71297920b3c04194c06b487d0fa7362",
+    "through_update": 14000,
+    "source_run_timestamp": "261019053758",
+    "source_run_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019053758"
+  },
+  "limitations": [
+    "Cold resume does not restore DataLoader worker augmentation RNG bitwise.",
+    "GPU replay timing uses two archived batches per rank and is not full-data throughput.",
+    "Model/moment source comparison includes exact bounded samples, metadata and all-rank full model hashes; source optimizer ZIP CRC checked independently.",
+    "Original native CUDA assertion was not independently reproduced; finite guards are retained but cannot catch every native abort.",
+    "Production replay trajectories are not bitwise reproducible; strict equivalence controls were test-only. Actual full-data throughput is pending resumed-run observation."
+  ],
+  "gpu_release_gate": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance_passed.json",
+  "production_numerical_comparison": {
+    "initial_four_update_comparison_passed": false,
+    "reason": "Original non-deterministic attention/BF16 path diverges even across identical baseline repeats; no tolerance was loosened.",
+    "diagnostic": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance/numerical_divergence_diagnostic.json",
+    "diagnostic_sha256": "6a4d075ce5b67312dcf710c78497ae94e8fd109b8bf05c3a4cb33a41be80b01e",
+    "replacement_evidence": "Test-only strict backend: all eight ranks have bitwise-identical complete features/pools/source and visual gradients, sampled updates and full updated model; production paths independently pass continuous health checks.",
+    "strict_controls_enabled_in_formal_training": false
+  }
+}

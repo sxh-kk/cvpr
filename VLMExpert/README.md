@@ -408,54 +408,52 @@ scheduler及全部8个rank RNG文件检查通过，冻结的VLM末端norm与初�
 数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
 双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。
 
-#### UnifoLM 提速准备（未切换当前训练）
+#### UnifoLM 提速与断点恢复
 
-准备代码位于独立 worktree `/root/workspace/wbc/guanzerong/cvpr-speedup`，
-分支 `codex/unifolm-speedup-prep`；当前训练仍使用原目录和原启动参数。
-state token 仍放在 action 序列首位，与30个 action tokens 一起参与注意力，最终输出时移除。
-完整 VLM 最后一层 tokens、mask、masked mean `p_V`、完整11个 Motion tokens 与 mean `p_M` 均保持。
-不更改模型参数／buffer 布局、五组LR、8×16×2有效batch256、40k更新或损失。
+提速入口 `scripts/train/psi0/posttrain-dual-source-unifolm-speedup.sh` 默认只做检查，
+只有显式 `--run` 才启动。普通配方仍默认关闭可选开关。
+本次恢复只采用用户授权的前三项：外部启动器设置 `CUDA_LAUNCH_BLOCKING=0`、
+跳过不用的词表输出、减少诊断输入搬运和重复指标同步；AdamW 保持 `foreach=False`。
+state token 仍在 action 序列首位；完整 VLM 最后一层 tokens、mask、masked mean `p_V`、
+完整11个 Motion tokens 与 mean `p_M` 均保留，VLM／Motion 继续反传。
+模型参数／buffer 布局、五组 LR、8×16×2 有效 batch256、40k 更新及 loss 不变。
 
-| 显式开关 | 默认 | 准备实现 |
+| 显式开关 | 默认 | 行为 |
 | --- | --- | --- |
-| `model.vlm_skip_unused_logits` | `False` | 仅 `dual_source_v1`，外层 Qwen 加 `logits_to_keep=1`；完整 hidden tokens 长度不变，仍取原来的 pre-finalnorm 层，不绕过外层模型 |
-| `train.keep_train_batch_on_cpu` | `False` | 保留 Accelerate 的 rank sharding／RNG；train loader 不自动搬GPU，先保存CPU诊断快照，再由原 `training_step` 搬GPU；val路径不变 |
-| `train.sync_metrics_on_update_only` | `False` | 非更新 microbatch 省略日志用 gather／scalar读取，同步更新时合并读取梯度norm；clip运算、每micro loss gate、unscale后梯度gate均保留 |
-| `UNIFOLM_OPTIMIZER_FOREACH=True` | `False` | 单独选择 AdamW 执行方式；恢复后重新应用到全部组，不重建 moments、LR 或 scheduler；与 fused 冲突时拒绝 |
+| `model.vlm_skip_unused_logits` | `False` | 外层 Qwen 使用 `logits_to_keep=1`；完整 hidden 序列及 pre-finalnorm 取层不变 |
+| `train.keep_train_batch_on_cpu` | `False` | 保留 Accelerate 分片；在 CPU 保存诊断快照，再由原训练步骤搬 GPU，避免额外 GPU→CPU 诊断拷贝 |
+| `train.sync_metrics_on_update_only` | `False` | 仅更新 microbatch 同步日志指标；每 microbatch loss gate、unscale 后梯度 gate、原分组裁剪均保留 |
+| `UNIFOLM_OPTIMIZER_FOREACH=True` | `False` | 独立可选项，可能增加峰值显存；本次不启用 |
 
-日志 loss 仍为最后一个 microbatch 的跨卡均值，未改为整个累积窗口的均值。
-非更新 microbatch 不再重复记录图像；更新时的图像／指标记录保留。
-训练快照仍保留 CPU batch 及各类 RNG，NaN／Inf 全卡拦截与诊断落盘继续执行。
-`foreach=True` 可能增加 optimizer-step 峰值显存，因此未纳入默认提速组合。
-入口不修改 `CUDA_LAUNCH_BLOCKING`；关闭同步调试需另做 GPU 对照验收。
-
-在准备 worktree 中检查真实本地输入与命令，以下操作不加载模型、不启动 worker：
+wrapper 不自行改变 `CUDA_LAUNCH_BLOCKING`，启动器须显式设置。
+日志 loss 仍为最后一个累积 microbatch 的跨卡均值，不是完整累积窗口均值。
 
 ```bash
-cd /root/workspace/wbc/guanzerong/cvpr-speedup
+cd /root/workspace/wbc/guanzerong/cvpr
 source VLMExpert/scripts/train/psi0/unifolm-local.env.sh
-bash VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm-speedup.sh --check-only
-# 仅打印命令（不检查本地文件）：将 --check-only 换成 --dry-run。
+CUDA_LAUNCH_BLOCKING=0 UNIFOLM_OPTIMIZER_FOREACH=False \
+  bash VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm-speedup.sh --check-only
 ```
 
-不传模式也默认 `--check-only`；只有明确传 `--run` 才启动未来任务，本次未调用。
-wrapper 打开上述三个 bool 开关，默认八卡、batch16、累积2，并在父进程生成一次共同 timestamp。
-原配方默认不启用这三个开关。未来冷启动恢复可显式设置
-`UNIFOLM_RESUME_CHECKPOINT=/绝对路径/checkpoints/ckpt_N`；检查和启动时要求目录存在，
-避免路径错误静默从头训练。恢复时模型结构不变，但不承诺精确恢复 DataLoader 游标。
-显式恢复时同时开启原工程 `skip_resumed_steps`，按已完成更新数跳过 microbatches；
-这不等于恢复 worker 的随机增强状态或保证后续样本／增强逐位重放。
-不得将此准备入口当作原运行任务的 supervisor 或实时状态记录更新器。
+恢复时显式设置 `UNIFOLM_RESUME_CHECKPOINT=/绝对路径/ckpt_N`，目录必须存在。
+`ckpt_N` 表示已完成 N 次更新，下一次为 N+1；恢复模型、Adam moments、scheduler 和各 rank RNG，
+不重新 warmup。map-style 数据在已分片的 BatchSampler 上跳过已完成的微批，
+不会解码跳过的样本；下一 epoch 清零偏移并复用 persistent workers。Iterable 流保留原跳过路径。
+此恢复方式不保存 DataLoader worker 的增强随机状态，不保证增强逐位重放。
 
-验证范围见 [提速准备验证记录](../docs/unifolm_speedup_preparation_validation.json)：
-最终合并CPU回归171项通过（85.39秒），真实本地输入的 `--check-only` 也已通过。
-真实 tiny 图文 Qwen、实际 Accelerator 累积更新、两rank CPU/Gloo 分片／连续更新、
-NaN／Inf保护、实际 AdamW 保存恢复和真实 Tyro 配方解析均走CPU。
-这些验证不占用当前八卡，也不构成真实 BF16／FlashAttention2／CUDA 接口和性能验收。
-后续需在空闲 GPU 上，以相同batch／输入和RNG逐项对照 tokens、pooling、loss、梯度、
-各组更新与冷恢复，并检查连续多步跨卡参数一致性；先固定 `foreach=False`，再单独比较开启时的显存。
-吞吐需隔离预热、验证和保存的耗时，记录稳态秒／更新及 peak allocated／reserved，
-不能从CPU等价或短时利用率推算实际加速比。
+第14000步原始 checkpoint 已保留为不可随新任务轮转清理的恢复快照，
+原 run／checkpoint／W&B／曲线不覆盖。新任务使用新 timestamp 和目录，
+旧任务14000之后未保存的更新按用户选择重新计算。
+
+准备阶段的171项CPU回归见 [准备记录](../docs/unifolm_speedup_preparation_validation.json)。
+本次恢复新增5项CPU／双进程Gloo数据位置测试，覆盖spawn worker、分片、累积、下一epoch和奇数尾批；
+曲线及监控46项CPU回归通过。GPU验收使用八卡、B16、累积2，从同一14000快照分别冷恢复基线与提速配置，
+核对RNG、完整tokens／pooling契约、梯度、五组参数更新及连续跨卡参数一致性。
+生产配置各自通过4次带审计更新及8次独立计时更新，计时排除前2次；八卡连续参数一致、梯度有限且五组均更新。
+原生产路径重复运行自身也会发生多步数值分叉，最早出现在视觉反向；因此另在仅用于验收的确定性后端下对照同一快照的单次更新。
+该严格对照的八卡完整特征／pooling、来源梯度、视觉参数梯度和更新后完整模型逐位相同，没有放宽原比较容差。
+正式任务不启用这些额外确定性控制。短测基线约4.46秒／步，提速配置约2.51秒／步，
+重复归档输入的结果不代表完整数据吞吐。实际结果及续训状态见 [提速恢复记录](../docs/unifolm_speedup_resume_validation.json)。
 
 #### Loss 每100步持续绘图
 
@@ -470,21 +468,23 @@ W&B `_step=0` 对应第1次更新；分组为1–100、101–200，按同一步�
 最后更新可读取到的数据；文件锁阻止同一输出目录出现重复监控。
 监控出错只记录并重试，不向训练进程发送信号。
 
-当前任务固定输出目录为
-`/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261019053758`：
+恢复后的任务输出目录为
+`/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020022152`；
+原 `loss-100step-261019053758` 保留归档。新 state 的 `loss_history_prefix` 绑定旧更新1–14000的冻结CSV及SHA256，
+提取时先验证前缀，再接新run的14001及之后记录，拒绝重叠；旧任务被回退的14000之后记录不混入新曲线。
 
 - `loss_100step.png`／`.svg`：全程概览、最近1000步逐步波动和最近500步完整均值放大；原始loss为浅灰细线，100步均值为细绿线，未满100步尾段为橙色虚线。均值放大图独立缩放纵轴，只绘制完整分组；没有额外平滑或插值。图片在同一路径原子替换，每100步刷新策略不变。
 - `loss_100step.csv`、`loss_per_update.csv`、`loss_summary.json`：均值及原始记录。
 - `loss_plot_metadata.json`：已实际完成渲染的最后完整步数；提取成功但绘图失败不会跳过该组。
 - `monitor_status.json`、`monitor_events.jsonl`、`monitor.log`：PID、心跳、下次刷新步数和错误。
 
-在准备 worktree 中启动（默认 detached；已运行时复用，不增加第二个监控）：
+在当前仓库启动（默认 detached；已运行时复用，不增加第二个监控）：
 
 ```bash
-cd /root/workspace/wbc/guanzerong/cvpr-speedup
+cd /root/workspace/wbc/guanzerong/cvpr
 python3 VLMExpert/scripts/analysis/monitor_training_loss.py \
   --state /gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json \
-  --output-dir /gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261019053758 \
+  --output-dir /gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020022152 \
   --extract-python /gaozt-test1/datasets/UnifoLM/.pipeline/runtimes/psi0-py311-torch270-cu126/bin/python \
   --plot-python "$(command -v python3)" \
   --plot-library-dir /root/.cache/cvpr-loss-plot-libs

@@ -47,11 +47,13 @@ Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM
 新optimizer布局的两卡B16冷恢复与继续更新也已验收，原生断言仍未独立复现，不能视作长跑问题已消除。
 W&B使用离线本地记录；此前短时验收不代表长期收敛或正式吞吐验收。
 
-另在 `codex/unifolm-speedup-prep` 分支准备可选提速代码；当前运行目录与八卡进程不切换。
-保持 action 流首位的 state token、完整 VLM／11个 Motion tokens 及两路 pooling，
-只缩减未使用 logits、调整诊断 batch 的搬运位置并减少非更新 microbatch 指标同步。
-CPU 等价性、分布式更新和恢复验证范围及默认只检查入口见
-[提速准备](VLMExpert/README.md#unifolm-提速准备未切换当前训练)。真实 GPU 精度、显存和吞吐仍待单独验收。
+UnifoLM 提速代码已合入当前仓库，续训只启用同步调试关闭、跳过不用的VLM词表输出、
+CPU诊断输入／指标同步优化，AdamW保持 `foreach=False`；完整tokens、pooling、state接法和分组LR不变。
+第14000步已保留恢复快照；八卡连续更新健康检查及确定性单步完整模型一致性对照通过，
+新run从该步恢复模型／优化器／scheduler／RNG并继续40k日程。
+map-style恢复在采样前跳过已完成微批，loss曲线以校验过的1–14000步历史接续新run。
+[入口与边界](VLMExpert/README.md#unifolm-提速与断点恢复)、
+[八卡冷恢复与提速验收记录](docs/unifolm_speedup_resume_validation.json)。
 
 训练 loss 可由独立 CPU 观察进程按每100次优化器更新聚合并持续刷新 PNG／SVG／CSV，
 入口与状态文件见 [Loss 持续绘图](VLMExpert/README.md#loss-每100步持续绘图)；不改动训练进程或日志写入。

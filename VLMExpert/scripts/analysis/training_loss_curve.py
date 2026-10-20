@@ -3,8 +3,9 @@
 
 The two modes deliberately have separate optional dependencies: extraction needs
 wandb; plotting needs matplotlib. Both can inspect --help with only the stdlib.
-All source files are read only. A run timestamp and directory bind the outputs to
-one training run; this command never logs in, syncs W&B, or initializes a model.
+All source files are read only. A run timestamp, directory and optional frozen
+loss-history prefix bind the outputs; this command never logs in, syncs W&B, or
+initializes a model.
 """
 from __future__ import annotations
 
@@ -64,7 +65,31 @@ def load_run(state_path: Path, run_timestamp: str) -> dict[str, Any]:
     run_directory = state.get("run_directory")
     if not isinstance(run_directory, str) or not Path(run_directory).is_absolute():
         raise ValueError("Training state must contain an absolute run_directory")
-    return {"run_timestamp": run_timestamp, "run_directory": str(Path(run_directory).resolve())}
+    run = {"run_timestamp": run_timestamp, "run_directory": str(Path(run_directory).resolve())}
+    prefix = state.get("loss_history_prefix")
+    if prefix is not None:
+        if not isinstance(prefix, dict):
+            raise ValueError("loss_history_prefix must be a metadata object")
+        path, source_directory = prefix.get("path"), prefix.get("source_run_directory")
+        if any(not isinstance(value, str) or not Path(value).is_absolute()
+               for value in (path, source_directory)):
+            raise ValueError("Loss history prefix paths must be absolute")
+        digest = prefix.get("sha256")
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest.lower())):
+            raise ValueError("Loss history prefix sha256 must contain 64 hexadecimal characters")
+        through = prefix.get("through_update")
+        if type(through) is not int or through < 1:
+            raise ValueError("Loss history prefix through_update must be a positive integer")
+        source_timestamp = prefix.get("source_run_timestamp")
+        if not isinstance(source_timestamp, str) or not source_timestamp:
+            raise ValueError("Loss history prefix must identify its source_run_timestamp")
+        run["loss_history_prefix"] = {
+            "path": str(Path(path).resolve()), "sha256": digest.lower(),
+            "through_update": through, "source_run_timestamp": source_timestamp,
+            "source_run_directory": str(Path(source_directory).resolve()),
+        }
+    return run
 
 
 def check_binding(document: dict[str, Any], run: dict[str, Any]) -> None:
@@ -81,6 +106,39 @@ def check_binding(document: dict[str, Any], run: dict[str, Any]) -> None:
             raise ValueError("Existing output has no verifiable training run directory")
     elif str(Path(recorded_directory).resolve()) != run["run_directory"]:
         raise ValueError("Output directory is already bound to a different training run")
+    if document.get("loss_history_prefix") != run.get("loss_history_prefix"):
+        raise ValueError("Output loss history prefix differs from the requested training run")
+
+
+def read_history_prefix(prefix: dict[str, Any]) -> dict[int, float]:
+    """Read the exact frozen CSV snapshot, never the previous run's W&B file."""
+    snapshot = Path(prefix["path"]).read_bytes()
+    if hashlib.sha256(snapshot).hexdigest() != prefix["sha256"]:
+        raise ValueError("Loss history prefix CSV SHA256 does not match its binding")
+    fields = ["completed_update", "logged_train_loss"]
+    losses = {}
+    try:
+        reader = csv.DictReader(io.StringIO(snapshot.decode("utf-8"), newline=""), strict=True)
+        if reader.fieldnames != fields:
+            raise ValueError("Loss history prefix CSV must have completed_update,logged_train_loss columns")
+        for expected, row in enumerate(reader, start=1):
+            if set(row) != set(fields):
+                raise ValueError("Loss history prefix CSV has an invalid row")
+            try:
+                update = int(row["completed_update"])
+                value = float(row["logged_train_loss"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("Loss history prefix CSV has an invalid update or loss") from error
+            if update != expected or update > prefix["through_update"]:
+                raise ValueError("Loss history prefix must contain continuous updates 1..through_update")
+            if not math.isfinite(value):
+                raise ValueError(f"Loss history prefix has non-finite loss at update {update}")
+            losses[update] = value
+    except csv.Error as error:
+        raise ValueError(f"Invalid loss history prefix CSV: {error}") from error
+    if len(losses) != prefix["through_update"]:
+        raise ValueError("Loss history prefix must contain continuous updates 1..through_update")
+    return losses
 
 
 class _SnapshotReader(io.BytesIO):
@@ -196,10 +254,16 @@ def extract(args: argparse.Namespace, run: dict[str, Any]) -> int:
         path = output / name
         if path.exists():
             check_binding(json.loads(path.read_text(encoding="utf-8")), run)
+    prefix = run.get("loss_history_prefix")
+    history = read_history_prefix(prefix) if prefix is not None else {}
     files = sorted((Path(run["run_directory"]) / "wandb").glob("offline-run-*/*.wandb"))
     if len(files) != 1:
         raise ValueError(f"Expected exactly one local W&B file for this run, got {len(files)}")
     losses, scan_metadata = read_wandb_losses(files[0])
+    if prefix is not None:
+        if any(update <= prefix["through_update"] for update in losses):
+            raise ValueError("Current run contains train/loss at or before the frozen history prefix boundary")
+        losses = {**history, **losses}
     report = {
         "schema_version": 1,
         **run,

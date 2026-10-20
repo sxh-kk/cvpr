@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from psi.utils import batch_str_to_tensor, seed_everything, initialize_overwatch, nice, flatten, cfg_json_default
 from psi.trainers import Trainer
 from psi.trainers.trainer import should_save_training_checkpoint
+from psi.trainers.resume_data import ResumedMapDataLoader
 
 overwatch = initialize_overwatch(__name__)
 
@@ -266,7 +267,8 @@ def train(config: LaunchConfig):
     # Resume data position: skip already-consumed microbatches when skip_resumed_steps
     # is set. IterableDataset streams run longer than their reported __len__, so advance
     # from the start of the stream rather than modulo len(dataloader).
-    if isinstance(trainer.train_dataset, torch.utils.data.IterableDataset):
+    is_iterable_train_dataset = isinstance(trainer.train_dataset, torch.utils.data.IterableDataset)
+    if is_iterable_train_dataset:
         epoch_start = 0
         resumed_micro_steps_to_skip = initial_global_step * trainer.gradient_accumulation_steps
     else:
@@ -279,6 +281,19 @@ def train(config: LaunchConfig):
             "Resume data position: "
             f"epoch_start={epoch_start}, microbatches_to_skip={resumed_micro_steps_to_skip}"
         )
+    # Skip indices before workers fetch/decode the samples. Keep this wrapper for
+    # later epochs (with offset zero) so persistent-worker/generator semantics do
+    # not change when the first resumed epoch ends. Iterable streams retain the
+    # original fetch-and-skip behavior below.
+    resumed_map_dataloader = (
+        ResumedMapDataLoader(
+            trainer.train_dataloader,
+            skipped_batches=resumed_micro_steps_to_skip,
+            resume_epoch=epoch_start,
+        )
+        if config.train.skip_resumed_steps and not is_iterable_train_dataset
+        else None
+    )
 
     overwatch.info(f"Accelerator runs in: {trainer.project_dir}")
     trainer.set_train()
@@ -296,10 +311,17 @@ def train(config: LaunchConfig):
     skip = 0
     for epoch in range(epoch_start, MAX_TRAINING_EPOCHS):
         trainer.next_epoch(epoch)
+        local_step_start = 0
+        if resumed_map_dataloader is not None:
+            # Match Accelerator's active loader during accumulation and the
+            # validation-loader cleanup below; retain original microbatch IDs in
+            # safety snapshots and diagnostics.
+            trainer.train_dataloader, local_step_start = resumed_map_dataloader.for_epoch(epoch)
         accelerator.wait_for_everyone()
-        for local_step, batch in enumerate(trainer.train_dataloader):
+        for local_step, batch in enumerate(trainer.train_dataloader, start=local_step_start):
             if (
-                config.train.skip_resumed_steps
+                is_iterable_train_dataset
+                and config.train.skip_resumed_steps
                 and skip < resumed_micro_steps_to_skip
             ):
                 # skip to inital global step

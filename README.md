@@ -56,6 +56,13 @@ map-style恢复在采样前跳过已完成微批，loss曲线以校验过的1–
 [入口与边界](VLMExpert/README.md#unifolm-提速与断点恢复)、
 [八卡冷恢复与提速验收记录](docs/unifolm_speedup_resume_validation.json)。
 
+该提速任务在北京时间2026-10-20 12:06、完成15108次更新后，再次由rank5原生CUDA断言退出；
+尚未定位失败算子，不能将此前短测通过视作根因修复。可恢复点仍为受保护的14000步，需重算1108次更新。
+本轮恢复使用同步CUDA报错、全程tmpfs双窗口CPU batch/RNG快照，并按用户要求每1000步完整保存；
+模型、完整tokens／pooling、batch与分组学习率保持原配置。
+原因证据、恢复措施和验收边界见 [断言与恢复分析](docs/unifolm_assert_recovery_analysis.md)，
+实际启动及进度以外部运行状态为准。
+
 训练 loss 可由独立 CPU 观察进程按每100次优化器更新聚合并持续刷新 PNG／SVG／CSV，
 入口与状态文件见 [Loss 持续绘图](VLMExpert/README.md#loss-每100步持续绘图)；不改动训练进程或日志写入。
 

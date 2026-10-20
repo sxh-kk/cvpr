@@ -11,6 +11,9 @@ this does not guarantee a dump from other ranks or repair the native assertion.
 For a bounded native-crash investigation, PSI0_DIAGNOSTIC_BATCH_RANGE=start:end
 also atomically replaces one rolling CPU batch/RNG file per rank before forward.
 Only that inclusive, zero-based optimizer-step range performs healthy-step I/O.
+PSI0_ROLLING_DIAGNOSTICS_DIR enables full-run capture in a separate absolute
+directory (prefer a run-specific tmpfs directory). Two files per rank retain the
+current and previous update; these survive process aborts, not host restarts.
 """
 
 from collections import defaultdict, deque
@@ -58,6 +61,10 @@ class TrainingSafetyGuard:
         self.last_dump = None
         window = os.getenv("PSI0_DIAGNOSTIC_BATCH_RANGE")
         self.persist_range = None
+        rolling = os.getenv("PSI0_ROLLING_DIAGNOSTICS_DIR")
+        self.rolling_dir = Path(rolling) if rolling else None
+        if self.rolling_dir is not None and not self.rolling_dir.is_absolute():
+            raise ValueError("PSI0_ROLLING_DIAGNOSTICS_DIR must be an absolute, run-specific directory")
         if window:
             if not re.fullmatch(r"[0-9]+:[0-9]+", window):
                 raise ValueError("PSI0_DIAGNOSTIC_BATCH_RANGE must be start:end")
@@ -86,14 +93,22 @@ class TrainingSafetyGuard:
         }
         self.snapshots.append({**self.context, "batch": _cpu_snapshot(batch), "rng": rng})
         if self.persist_range is not None and self.persist_range[0] <= global_step <= self.persist_range[1]:
-            # Persist before launching the next model kernels. A process-level
-            # abort cannot run dump(), but this file survives independently.
-            self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
-            path = self.diagnostics_dir / f"latest_batch_rank_{self.rank:03d}.pt"
-            temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
-            torch.save({"schema_version": 1, **self.context, "stage": "pre_forward",
-                        "microbatches": list(self.snapshots)}, temporary)
-            os.replace(temporary, path)
+            self._persist_snapshot(self.diagnostics_dir / f"latest_batch_rank_{self.rank:03d}.pt")
+        if self.rolling_dir is not None:
+            # Keep the previous update intact while replacing the current one.
+            # Unlike the bounded investigation window, this remains active at
+            # every step; tmpfs avoids writing full RGB batches to shared disk.
+            self._persist_snapshot(self.rolling_dir / (
+                f"latest_batch_rank_{self.rank:03d}_slot_{int(global_step) % 2}.pt"))
+
+    def _persist_snapshot(self, path):
+        # Persist before launching the next model kernels. A process-level
+        # abort cannot run dump(), but this file survives independently.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+        torch.save({"schema_version": 1, **self.context, "stage": "pre_forward",
+                    "microbatches": list(self.snapshots)}, temporary)
+        os.replace(temporary, path)
 
     def dump(self, reason, **details):
         """Write only cached CPU material, including when CUDA is poisoned."""

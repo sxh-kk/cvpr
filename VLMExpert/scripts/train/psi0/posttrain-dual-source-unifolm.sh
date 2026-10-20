@@ -43,6 +43,23 @@ case "${UNIFOLM_OPTIMIZER_FOREACH:-False}" in
     True|False) ;;
     *) echo "UNIFOLM_OPTIMIZER_FOREACH must be True or False" >&2; exit 2 ;;
 esac
+# An explicitly empty override is an error; only an unset variable uses defaults.
+# Normalize every whitespace character before read so later lines are validated too.
+early_checkpoint_steps_text="${UNIFOLM_EARLY_CHECKPOINT_STEPS-100 500 1000}"
+early_checkpoint_steps_text="${early_checkpoint_steps_text//[[:space:]]/ }"
+read -r -a early_checkpoint_steps <<< "$early_checkpoint_steps_text"
+if (( ${#early_checkpoint_steps[@]} == 0 )); then
+    echo "UNIFOLM_EARLY_CHECKPOINT_STEPS must contain positive integers" >&2; exit 2
+fi
+for checkpoint_step in "${early_checkpoint_steps[@]}"; do
+    [[ "$checkpoint_step" =~ ^[1-9][0-9]*$ ]] || {
+        echo "UNIFOLM_EARLY_CHECKPOINT_STEPS must contain positive integers: $checkpoint_step" >&2; exit 2;
+    }
+done
+checkpointing_steps="${UNIFOLM_CHECKPOINTING_STEPS-2000}"
+[[ "$checkpointing_steps" =~ ^[1-9][0-9]*$ ]] || {
+    echo "UNIFOLM_CHECKPOINTING_STEPS must be a positive integer" >&2; exit 2;
+}
 if [[ -n "${UNIFOLM_RESUME_CHECKPOINT:-}" ]] && (( ! dry_run )); then
     [[ "$UNIFOLM_RESUME_CHECKPOINT" = /* && -d "$UNIFOLM_RESUME_CHECKPOINT" &&
        "${UNIFOLM_RESUME_CHECKPOINT##*/}" =~ ^ckpt_[0-9]+$ ]] || {
@@ -115,8 +132,8 @@ command=("$python_bin" -m torch.distributed.run --standalone --nproc_per_node="$
     "--train.gradient_accumulation_steps=${GRAD_ACCUM_STEPS:-2}"
     --train.learning_rate=1e-4 "--train.max_training_steps=${MAX_STEPS:-40000}"
     --train.warmup_ratio=None --train.warmup_steps=1000
-    --train.early-checkpoint-steps 100 500 1000
-    --train.max_checkpoints_to_keep=3 --train.checkpointing_steps=2000
+    --train.early-checkpoint-steps "${early_checkpoint_steps[@]}"
+    --train.max_checkpoints_to_keep=3 "--train.checkpointing_steps=$checkpointing_steps"
     --train.preserve-checkpoint-every=None
     --train.validation_steps=5000 --train.val_num_batches=20 --train.max_grad_norm=1.0
     --train.lr_scheduler_type=cosine --train.lr_scheduler_kwargs.weight_decay=1e-6

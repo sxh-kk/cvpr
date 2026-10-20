@@ -103,24 +103,73 @@ def test_actual_saver_strict_latest_three_has_at_most_four_before_prune(tmp_path
     assert max(peaks) == 4
 
 
-def test_actual_recipe_tuple_cli_parses_with_real_tyro_and_config(tmp_path):
+def _recipe_environment(tmp_path, early_steps, checkpointing_steps=None):
     env = dict(os.environ, EGO_DEX_VLM_PATH=str(tmp_path / "vlm"),
                MOTION_EXPERT_CHECKPOINT=str(tmp_path / "motion.ckpt"), MOTION_USE_EMA="1",
                UNIFOLM_DINO_ROOT=str(tmp_path), UNIFOLM_DINO_TRAIN_ID="train",
                UNIFOLM_DINO_VAL_ID="val", UNIFOLM_DINO_CACHE=str(tmp_path / "dino"),
                PSI_PYTHON=sys.executable, NPROC_PER_NODE="8", BATCH_SIZE="16",
                GRAD_ACCUM_STEPS="2", MAX_STEPS="40000", REPORT_TO="wandb")
+    env.pop("UNIFOLM_EARLY_CHECKPOINT_STEPS", None)
+    if early_steps is not None:
+        env["UNIFOLM_EARLY_CHECKPOINT_STEPS"] = early_steps
+    env.pop("UNIFOLM_CHECKPOINTING_STEPS", None)
+    if checkpointing_steps is not None:
+        env["UNIFOLM_CHECKPOINTING_STEPS"] = checkpointing_steps
+    return env
+
+
+@pytest.mark.parametrize("early_steps, checkpointing_steps, expected, expected_interval", [
+    (None, None, (100, 500, 1000), 2000),
+    (None, "1000", (100, 500, 1000), 1000),
+    ("14100 14500 15000 15100 15500", None, (14100, 14500, 15000, 15100, 15500), 2000),
+    (" \t14100\n14500\r 15000 ", None, (14100, 14500, 15000), 2000),
+])
+def test_actual_recipe_tuple_cli_parses_with_real_tyro_and_config(
+    tmp_path, early_steps, checkpointing_steps, expected, expected_interval,
+):
+    env = _recipe_environment(tmp_path, early_steps, checkpointing_steps)
     result = subprocess.run(["bash", str(ROOT / "scripts/train/psi0/posttrain-dual-source-unifolm.sh"),
                              "--dry-run", "cadence_test"], env=env, check=True, text=True, capture_output=True)
     command = shlex.split(result.stdout.split("Command:", 1)[1])
     cfg = tyro.cli(DynamicLaunchConfig, config=(tyro.conf.ConsolidateSubcommandArgs,),
                    args=command[command.index("scripts/train.py") + 2:])
-    assert cfg.train.early_checkpoint_steps == (100, 500, 1000)
+    assert cfg.train.early_checkpoint_steps == expected
     assert cfg.train.training_safety_checks is True
     assert (cfg.train.max_checkpoints_to_keep, cfg.train.preserve_checkpoint_every) == (3, None)
-    assert cfg.train.checkpointing_steps == 2000
+    assert cfg.train.checkpointing_steps == expected_interval
     assert (cfg.train.train_batch_size, cfg.train.gradient_accumulation_steps) == (16, 2)
     assert (cfg.train.max_training_steps, cfg.train.warmup_steps, cfg.train.lr_scheduler_type) == (40000, 1000, "cosine")
     assert cfg.train.learning_rate == 1e-4
     assert (cfg.model.lang_backbone_lr, cfg.model.vision_tower_lr,
             cfg.model.mm_projector_lr, cfg.model.motion_expert_lr) == (1e-6, 1e-5, 1e-4, 1e-5)
+
+
+@pytest.mark.parametrize("early_steps", [
+    "", " \t\n", "0", "-1", "+100", "01", "1.5", "1e3", "100,500",
+    "14100 0 14500", "14100\ninvalid", "14100 --train.max_training_steps=1",
+])
+def test_actual_recipe_rejects_invalid_early_checkpoint_override_before_launch(tmp_path, early_steps):
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train/psi0/posttrain-dual-source-unifolm.sh"),
+         "--dry-run", "invalid_cadence_test"],
+        env=_recipe_environment(tmp_path, early_steps), text=True, capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "UNIFOLM_EARLY_CHECKPOINT_STEPS must contain positive integers" in result.stderr
+    assert "Command:" not in result.stdout
+
+
+@pytest.mark.parametrize("checkpointing_steps", [
+    "", " \t\n", "0", "-1", "+1000", "01000", "1.5", "1e3", "1000 2000",
+    "1000\ninvalid", "1000 --train.max_training_steps=1",
+])
+def test_actual_recipe_rejects_invalid_checkpoint_interval_before_launch(tmp_path, checkpointing_steps):
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/train/psi0/posttrain-dual-source-unifolm.sh"),
+         "--dry-run", "invalid_interval_test"],
+        env=_recipe_environment(tmp_path, None, checkpointing_steps), text=True, capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "UNIFOLM_CHECKPOINTING_STEPS must be a positive integer" in result.stderr
+    assert "Command:" not in result.stdout

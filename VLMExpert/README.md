@@ -459,6 +459,27 @@ CUDA_LAUNCH_BLOCKING=0 UNIFOLM_OPTIMIZER_FOREACH=False \
 新的周期验证尚未执行，下一次在完成15001更新后，下一完整checkpoint为16000。
 实际结果及续训状态见 [提速恢复记录](../docs/unifolm_speedup_resume_validation.json)。
 
+上述时间对应历史检查。该run随后在北京时间2026-10-20 12:06、最后完成15108次更新时，
+再次出现rank5原生CUDA断言；没有16000步checkpoint，恢复仍使用受保护的14000步完整快照。
+目前未精确复现故障，不修改MoE／Qwen索引计算或学习率。本轮恢复暂设 `CUDA_LAUNCH_BLOCKING=1`，
+保留词表输出与CPU输入／指标优化；吞吐可能降低，措施用于同步定位，并非已证明修复根因。
+详见 [两次断言及恢复边界](../docs/unifolm_assert_recovery_analysis.md)。
+
+持续诊断由显式环境变量 `PSI0_ROLLING_DIAGNOSTICS_DIR=/dev/shm/本次run专用目录` 开启：
+每rank仅保留两个update槽，分别保存当前累积窗口和前一个update的CPU batch／RNG，
+每次forward前原子替换；本轮正式B16×2八卡约占1.2GB主机内存，实际占用以落盘大小为准。
+写入临时文件时还需额外一份空间；I/O失败直接报错停止，避免丢失诊断后继续训练。
+原 `PSI0_DIAGNOSTIC_BATCH_RANGE=start:end` 仍支持有限区间调查；两者均未设置时不增加健康步写盘。
+tmpfs文件可跨训练进程退出保留，主机重启会丢失；故障后启动器将其归档到本次launch目录。
+这些文件只包含输入和RNG，不能替代模型／optimizer checkpoint。
+
+本轮按用户要求显式设置 `UNIFOLM_CHECKPOINTING_STEPS=1000`，每1000次完整更新保存模型、
+optimizer、scheduler与各卡RNG；下一次为15000，最多保留3份，受保护的14000步快照独立保留。
+未设置该变量时入口仍默认2000；`UNIFOLM_EARLY_CHECKPOINT_STEPS` 可指定额外已完成更新数，
+未设置时为 `100 500 1000`，本轮恢复后均已过去；两个变量的空串／非法项均拒绝启动。
+恢复历史曲线仅接续原run至14000步，再接本次新run，
+避免混入失败run中将被重算的14001–15108步。
+
 #### Loss 每100步持续绘图
 
 `scripts/analysis/monitor_training_loss.py` 是独立的 CPU 观察进程：默认每10秒只读控制台日志末尾，

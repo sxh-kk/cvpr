@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "checked_utc": "2026-10-20T04:46:06.238719+00:00",
+  "failure": {
+    "last_completed_updates": 15108,
+    "first_failing_rank": 5,
+    "cuda_message": "TensorCompare.cu:112 _assert_async_cuda_kernel Assertion `` failed",
+    "cuda_oom_observed": false,
+    "root_cause_resolved": false,
+    "exact_failed_batch_available": false,
+    "recoverable_update": 14000,
+    "updates_to_recompute": 1108
+  },
+  "cpu": {
+    "schema_version": 1,
+    "tests": [
+      {
+        "files": [
+          "VLMExpert/tests/test_native_crash_snapshot.py",
+          "VLMExpert/tests/test_training_safety.py"
+        ],
+        "passed": 20,
+        "seconds": 30.35,
+        "note": "includes original snapshot tests; added two regression cases subsequently"
+      },
+      {
+        "files": [
+          "VLMExpert/tests/test_native_crash_snapshot.py",
+          "VLMExpert/tests/test_checkpoint_cadence.py"
+        ],
+        "passed": 33,
+        "seconds": 24.18,
+        "note": "includes two added rolling I/O/RNG regressions; before new checkpoint interval option"
+      },
+      {
+        "files": [
+          "VLMExpert/tests/test_checkpoint_cadence.py"
+        ],
+        "passed": 34,
+        "seconds": 13.09,
+        "note": "final actual CLI interval1000 and invalid-input cases"
+      }
+    ],
+    "distinct_final_test_cases_passed": 56,
+    "formal_preflight": {
+      "passed": true,
+      "only_authorized_changes": {
+        "exp": {
+          "before": "dual_source_unifolm_joint_motion100_8gpu_speedup",
+          "after": "dual_source_unifolm_joint_motion100_8gpu_recovery"
+        },
+        "train.checkpointing_steps": {
+          "before": 2000,
+          "after": 1000
+        },
+        "timestamp": {
+          "before": "261020022152",
+          "after": "261020043942"
+        }
+      }
+    },
+    "shell_syntax_and_diff_whitespace_passed": true
+  },
+  "gpu": {
+    "passed": true,
+    "gpu_count": 8,
+    "per_gpu_batch": 16,
+    "accumulation_steps": 2,
+    "global_batch": 256,
+    "checkpoint": "/gaozt-test1/datasets/UnifoLM/.pipeline/recovery_snapshots/unifolm-261019053758-speedup-20261020T021809Z/ckpt_14000",
+    "cold_restore_all_state": true,
+    "audit_updates": 4,
+    "timed_updates": 8,
+    "full_model_cross_rank_consistent": true,
+    "five_parameter_groups_updated": true,
+    "finite_loss_source_gradients_and_parameter_gradients": true,
+    "unchanged_full_vlm_motion_tokens_pooling_and_state_contract": true,
+    "cuda_launch_blocking": 1,
+    "checkpoint_writes": 0,
+    "max_peak_allocated_GiB": 63.672329902648926,
+    "max_peak_reserved_GiB": 66.83984375,
+    "mean_replay_seconds_per_update_last_six": 4.580953359603882,
+    "rolling_snapshot_count": 16,
+    "rolling_mean_write_seconds_per_rank_micro": 0.05055242040543817,
+    "evidence": "/gaozt-test1/datasets/UnifoLM/.pipeline/runs/recovery-clb1-speedups-8gpu-b16-20261020T043822Z/gpu_acceptance/optimized",
+    "scope": "each rank replays its own TWO archived real B16 batches; 256 rank/micro windows reused across updates; no dataset position replay",
+    "limitation": "Archived batches reused; this is not full dataset throughput or proof the rare assertion is fixed."
+  },
+  "formal_plan": {
+    "repository": "/root/workspace/wbc/guanzerong/cvpr",
+    "new_timestamp": "261020043942",
+    "new_experiment": "dual_source_unifolm_joint_motion100_8gpu_recovery",
+    "new_run_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu_recovery.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261020043942",
+    "snapshot_checkpoint": "/gaozt-test1/datasets/UnifoLM/.pipeline/recovery_snapshots/unifolm-261019053758-speedup-20261020T021809Z/ckpt_14000",
+    "old_timestamp": "261020022152",
+    "loss_history_prefix": {
+      "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-assert-recovery-20261020T043942Z/prefix_loss_through_14000.csv",
+      "sha256": "27e209eb9aa2a5f8ab558ef6c89ad036b71297920b3c04194c06b487d0fa7362",
+      "through_update": 14000,
+      "source_run_timestamp": "261019053758",
+      "source_run_directory": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019053758"
+    },
+    "rolling_diagnostics_dir": "/dev/shm/cvpr-unifolm-261020043942",
+    "early_checkpoint_steps": [
+      100,
+      500,
+      1000
+    ],
+    "checkpointing_steps": 1000
+  },
+  "formal_state": "pending_launch",
+  "policy": {
+    "checkpointing_steps": 1000,
+    "keep_latest": 3,
+    "protected_14000_snapshot_retained": true,
+    "full_run_two_update_cpu_snapshots": true,
+    "resume_original_cosine_schedule": true
+  }
+}

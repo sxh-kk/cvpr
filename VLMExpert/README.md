@@ -493,9 +493,9 @@ W&B `_step=0` 对应第1次更新；分组为1–100、101–200，按同一步�
 最后更新可读取到的数据；文件锁阻止同一输出目录出现重复监控。
 监控出错只记录并重试，不向训练进程发送信号。
 
-恢复后的任务输出目录为
-`/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020022152`；
-原 `loss-100step-261019053758` 保留归档。新 state 的 `loss_history_prefix` 绑定旧更新1–14000的冻结CSV及SHA256，
+本轮恢复后的任务输出目录为
+`/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020043942`；
+原 `loss-100step-261019053758` 与失败任务 `loss-100step-261020022152` 均保留归档。新 state 的 `loss_history_prefix` 绑定旧更新1–14000的冻结CSV及SHA256，
 提取时先验证前缀，再接新run的14001及之后记录，拒绝重叠；旧任务被回退的14000之后记录不混入新曲线。
 
 - `loss_100step.png`／`.svg`：全程概览、最近1000步逐步波动和最近500步完整均值放大；原始loss为浅灰细线，100步均值为细绿线，未满100步尾段为橙色虚线。均值放大图独立缩放纵轴，只绘制完整分组；没有额外平滑或插值。图片在同一路径原子替换，每100步刷新策略不变。
@@ -509,7 +509,7 @@ W&B `_step=0` 对应第1次更新；分组为1–100、101–200，按同一步�
 cd /root/workspace/wbc/guanzerong/cvpr
 python3 VLMExpert/scripts/analysis/monitor_training_loss.py \
   --state /gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json \
-  --output-dir /gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020022152 \
+  --output-dir /gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020043942 \
   --extract-python /gaozt-test1/datasets/UnifoLM/.pipeline/runtimes/psi0-py311-torch270-cu126/bin/python \
   --plot-python "$(command -v python3)" \
   --plot-library-dir /root/.cache/cvpr-loss-plot-libs
@@ -519,7 +519,7 @@ python3 VLMExpert/scripts/analysis/monitor_training_loss.py \
 图表文件在后台更新；聊天里已经显示的图片是生成时的快照，重新打开文件可查看新版本。
 观察进程可独立退出；训练启动方式、学习率、batch及checkpoint保存均不受其控制。
 
-2026-10-20北京时间10:51已为恢复任务启动独立观察进程，旧历史已接续至完整第14000步，
+本轮在2026-10-20北京时间12:47重新启动独立观察进程，旧历史已接续至完整第14000步，
 下一刷新点为14100；实时心跳／错误和后续进度以新输出目录的 `monitor_status.json` 为准。
 15项CPU回归通过，覆盖真实W&B记录的去重／截断／缺步、窗口边界、日志未齐时重试、
 重复启动锁及训练退出同时最终绘图失败时仍能退出；真实本地记录的提取与PNG／SVG生成也已通过。

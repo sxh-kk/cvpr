@@ -100,3 +100,18 @@ assert15108-gpu1-profiler-only-20261020T043210Z/result.json
 全程双槽诊断实际保留16个文件，覆盖最近两个update的两个microbatch；每rank每micro写入均值约0.051秒。归档输入重播最后6次更新均值约4.58秒，包含同步CUDA与持续快照；不等同全量数据吞吐，也不证明罕见断言已消除。
 
 CPU已通过56项不同回归用例，含子进程原生abort后快照可读、RNG不推进、I/O失败保持旧快照及实际CLI解析。GPU报告、配置比较及随后正式启动状态见 [恢复验收记录](unifolm_assert_recovery_validation.json)。正式训练是否在跑，以仓库外运行状态为准。
+
+## 正式恢复后的初期检查
+
+新任务 `261020043942` 于北京时间2026-10-20 12:47启动，使用源码提交 `730d796`。
+日志确认完整模型／optimizer／scheduler／RNG加载成功，并跳过已完成的28000个数据微批；
+实际通信包含P2P/CUMEM/read路径，每1000次更新保存、保留最近3份，下一次完整保存为15000。
+
+北京时间12:58的只读检查确认训练已完成14054次更新，八卡均运行，未出现新的CUDA错误；
+16个实际CPU快照已验证当前及前一更新窗口、全部CPU张量与四类RNG。
+五组梯度均有限非零，学习率继续原cosine日程；这只说明初期更新健康，仍不证明罕见断言已消除。
+实时loss观察进程也已重新绑定新任务，历史仅接续至原14000步，下一完整均值刷新点为14100。
+
+当前状态及日志：
+`/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json`，
+本次launch目录为 `training_launches/unifolm-assert-recovery-20261020T043942Z/`。

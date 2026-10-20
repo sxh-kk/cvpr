@@ -62,6 +62,8 @@ map-style恢复在采样前跳过已完成微批，loss曲线以校验过的1–
 模型、完整tokens／pooling、batch与分组学习率保持原配置。
 原因证据、恢复措施和验收边界见 [断言与恢复分析](docs/unifolm_assert_recovery_analysis.md)，
 实际启动及进度以外部运行状态为准。
+八卡恢复已于北京时间12:47启动，12:58初期检查完成14054次更新，loss与五组梯度有限，
+真实双窗口CPU快照及每100步绘图监控均已接回；详见 [恢复验收记录](docs/unifolm_assert_recovery_validation.json)。
 
 训练 loss 可由独立 CPU 观察进程按每100次优化器更新聚合并持续刷新 PNG／SVG／CSV，
 入口与状态文件见 [Loss 持续绘图](VLMExpert/README.md#loss-每100步持续绘图)；不改动训练进程或日志写入。

@@ -108,12 +108,82 @@
     ],
     "checkpointing_steps": 1000
   },
-  "formal_state": "pending_launch",
+  "formal_state": "running_as_of_initial_health_check",
   "policy": {
     "checkpointing_steps": 1000,
     "keep_latest": 3,
     "protected_14000_snapshot_retained": true,
     "full_run_two_update_cpu_snapshots": true,
     "resume_original_cosine_schedule": true
+  },
+  "formal_started_utc": "2026-10-20T04:47:01.812482+00:00",
+  "formal_live_health": {
+    "passed": true,
+    "checked_utc": "2026-10-20T04:58:05.720560+00:00",
+    "run_timestamp": "261020043942",
+    "state": "running",
+    "source_revision": "730d796d96d3a59967e859b2613d864794a72cd8",
+    "completed_optimizer_updates_observed_in_console": 14054,
+    "model_optimizer_scheduler_rng_restore_logged": true,
+    "sampler_skip_28000_logged": true,
+    "P2P_CUMEM_read_log_count": 192,
+    "training_error_markers": [],
+    "gpus": [
+      {
+        "index": 0,
+        "memory_used_MiB": 69467,
+        "utilization_percent": 15
+      },
+      {
+        "index": 1,
+        "memory_used_MiB": 69435,
+        "utilization_percent": 15
+      },
+      {
+        "index": 2,
+        "memory_used_MiB": 69493,
+        "utilization_percent": 25
+      },
+      {
+        "index": 3,
+        "memory_used_MiB": 69567,
+        "utilization_percent": 18
+      },
+      {
+        "index": 4,
+        "memory_used_MiB": 69633,
+        "utilization_percent": 23
+      },
+      {
+        "index": 5,
+        "memory_used_MiB": 69457,
+        "utilization_percent": 21
+      },
+      {
+        "index": 6,
+        "memory_used_MiB": 69577,
+        "utilization_percent": 11
+      },
+      {
+        "index": 7,
+        "memory_used_MiB": 69469,
+        "utilization_percent": 18
+      }
+    ],
+    "live_cpu_snapshot_check": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-assert-recovery-20261020T043942Z/live_snapshot_health.json",
+    "live_cpu_snapshot_check_sha256": "338b13f8272ccc9da5cbd2cf1b926b9f3cbfb23192ec2766abc590852b3e9ea1",
+    "loss_monitor": {
+      "state": "running",
+      "pid": 499441,
+      "training_alive": true,
+      "last_rendered_complete_update": 14000,
+      "next_refresh_update": 14100,
+      "last_error": null
+    },
+    "checkpointing_steps": 1000,
+    "next_checkpoint": 15000,
+    "keep_latest_checkpoints": 3,
+    "root_cause_resolved": false,
+    "scope": "Initial live real-data progress after successful twelve-update eight-GPU acceptance; not long-run stability proof."
   }
 }

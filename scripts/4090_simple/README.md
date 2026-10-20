@@ -4,6 +4,9 @@
 本机路径配置与不依赖权重的冒烟检查；没有接通生产双来源服务或控制策略。
 实际安装／验证记录在本机仓库外 `~/CVPR_Evaluation_runtime/reports/`。
 
+A100已提供CPU导出与保存完成等待工具`export_bundle.py`，4090可通过SSH／rsync拉取资源。
+具体源路径、READY判定、SHA校验及当前缺项见[资源交接](../../docs/4090_SIMPLE_TRANSFER.md)。
+
 ## Conda 与依赖
 
 本机创建了两个新环境，未复用用户其他机器人环境：

@@ -1033,6 +1033,7 @@ See dedicated doc here [baseline/act](baselines/act/README.md)
 本仓库双来源UnifoLM-20k模型在4090单机独立测评的专用交接说明见
 [4090 SIMPLE需求与环境配置](../docs/4090_SIMPLE_HANDOFF.md)。模型侧Python3.11与SIMPLE侧Python3.10分环境运行，
 现有上游单帧服务与旧动作客户端尚需历史DINO及SONIC v1.1接线；下面的官方通用命令不能直接视为双来源模型已验收入口。
+20k保存后资源发布、SSH拉取与SHA校验见[资源交接](../docs/4090_SIMPLE_TRANSFER.md)。
 
 We use [SIMPLE](https://github.com/physical-superintelligence-lab/SIMPLE) to benchmark $\Psi_0$ and all the baselines.
 

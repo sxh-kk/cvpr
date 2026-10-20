@@ -119,4 +119,5 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 见 [4090独立测评交接](docs/4090_SIMPLE_HANDOFF.md)。该文档可直接交给4090端Codex执行环境准备；权重与大仿真资源另行传输。
 4090本机的两套Conda环境约束、外部资源路径和无权重冒烟命令见
 [环境工具](scripts/4090_simple/README.md)；实际阶段结果见 [4090环境记录](docs/4090_SIMPLE_ENVIRONMENT.md)。
+A100等待20k完整保存后的保护／导出、4090 SSH拉取及SHA核验见[资源交接](docs/4090_SIMPLE_TRANSFER.md)。
 第三方代码沿用各目录原许可与版权。

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "state": "gpu_accepted_formal_resume_prepared",
-  "updated_utc": "2026-10-20T02:50:26.067355+00:00",
+  "state": "formal_resume_verified_running",
+  "updated_utc": "2026-10-20T03:03:16.833330+00:00",
   "user_authorization": "Preserve checkpoint14000; enable only first three speedups, test before eight-GPU resume; foreach remainsFalse.",
   "resume_checkpoint": "/gaozt-test1/datasets/UnifoLM/.pipeline/recovery_snapshots/unifolm-261019053758-speedup-20261020T021809Z/ckpt_14000",
   "previous_run": "/gaozt-test1/datasets/UnifoLM/.pipeline/training/posttrain/dual_source_unifolm_joint_motion100_8gpu.us.flow1000.cosine.lr1.0e-04.b256.gpus8.261019053758",
@@ -160,7 +160,161 @@
     "formal_configuration_changes": "only authorized three speedups; foreach=False",
     "limitation": "production BF16/attention can diverge across identical cold replays; short repeated-batch timing is not full-data throughput"
   },
-  "formal_resume_health": null,
+  "formal_resume_health": {
+    "passed": true,
+    "checked_utc": "2026-10-20T03:01:58.776274+00:00",
+    "checked_beijing": "2026-10-20T11:01:58.776306+08:00",
+    "record": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/initial_health.json",
+    "record_sha256": "1993e0f8114a767396f45edbd0d043560f10ae6375a5dc6f389735fa0658d088",
+    "source_revision": "b421a4ae5cda59930a700b037c8c26a37e8ae584",
+    "completed_update_at_check": 14073,
+    "checks": {
+      "eight_ranks_alive_bound": true,
+      "eight_spawn_workers_each": true,
+      "rank_env_matches": true,
+      "all_restore_components_logged": true,
+      "skip28000_logged": true,
+      "failure_markers_zero": true,
+      "p2p_transport_observed": true,
+      "all_metrics_finite": true,
+      "all_five_gradient_groups_nonzero_finite": true,
+      "lr_schedule_unchanged": true,
+      "first_wandb_step14000": true,
+      "source_files_match_launch": true,
+      "monitor_bound_error_free": true,
+      "validation_not_yet_run": true
+    },
+    "gpus_at_documentation_update": [
+      {
+        "index": 0,
+        "used_mib": 69337,
+        "total_mib": 81920
+      },
+      {
+        "index": 1,
+        "used_mib": 69235,
+        "total_mib": 81920
+      },
+      {
+        "index": 2,
+        "used_mib": 69293,
+        "total_mib": 81920
+      },
+      {
+        "index": 3,
+        "used_mib": 69415,
+        "total_mib": 81920
+      },
+      {
+        "index": 4,
+        "used_mib": 69421,
+        "total_mib": 81920
+      },
+      {
+        "index": 5,
+        "used_mib": 69269,
+        "total_mib": 81920
+      },
+      {
+        "index": 6,
+        "used_mib": 69383,
+        "total_mib": 81920
+      },
+      {
+        "index": 7,
+        "used_mib": 69285,
+        "total_mib": 81920
+      }
+    ],
+    "loss": {
+      "mean": 1.0230300616134296,
+      "min": 0.6642345190048218,
+      "max": 1.4992952346801758,
+      "first": 1.1309887170791626,
+      "latest": 1.1654313802719116
+    },
+    "flushed_training_rows": 66,
+    "logged_update_range": [
+      14001,
+      14066
+    ],
+    "gradient_groups": {
+      "action_header": {
+        "count": 66,
+        "mean": 3.176034526391463,
+        "min": 2.6263020038604736,
+        "max": 3.9940295219421387,
+        "zero_count": 0,
+        "nonfinite_count": 0,
+        "clip_fraction": 1.0
+      },
+      "lang_backbone": {
+        "count": 66,
+        "mean": 0.5885806264299335,
+        "min": 0.5003094673156738,
+        "max": 0.6819277405738831,
+        "zero_count": 0,
+        "nonfinite_count": 0,
+        "clip_fraction": 0.0
+      },
+      "vision_tower": {
+        "count": 66,
+        "mean": 0.7407742883219863,
+        "min": 0.6234748363494873,
+        "max": 1.033475637435913,
+        "zero_count": 0,
+        "nonfinite_count": 0,
+        "clip_fraction": 0.015151515151515152
+      },
+      "mm_projector": {
+        "count": 66,
+        "mean": 0.16860464666828964,
+        "min": 0.14971593022346497,
+        "max": 0.20363886654376984,
+        "zero_count": 0,
+        "nonfinite_count": 0,
+        "clip_fraction": 0.0
+      },
+      "motion_expert": {
+        "count": 66,
+        "mean": 0.12780738351019946,
+        "min": 0.1003214493393898,
+        "max": 0.16941779851913452,
+        "zero_count": 0,
+        "nonfinite_count": 0,
+        "clip_fraction": 0.0
+      }
+    },
+    "lr_schedule_max_abs_error": 1.3552527156068805e-20,
+    "actual_real_data_throughput": {
+      "start": {
+        "utc": "2026-10-20T02:58:32.546387+00:00",
+        "monotonic": 2498616.644842974,
+        "console_update": 14020,
+        "tqdm_elapsed": "02:58",
+        "tqdm_elapsed_seconds": 178,
+        "log_bytes": 330139
+      },
+      "end": {
+        "utc": "2026-10-20T03:01:58.703278+00:00",
+        "monotonic": 2498822.801741072,
+        "console_update": 14073,
+        "tqdm_elapsed": "06:24",
+        "tqdm_elapsed_seconds": 384
+      },
+      "new_real_data_optimizer_updates": 53,
+      "wall_seconds": 206.15689809806645,
+      "wall_seconds_per_update": 3.8897527943031407,
+      "tqdm_elapsed_delta_seconds": 206,
+      "tqdm_seconds_per_update": 3.8867924528301887,
+      "effective_examples_per_second": 65.81395104977695,
+      "scope": "Short actual-data observation after update14020; excludes worker startup and first five rolling-diagnostic writes. Sampled counter boundaries; not a full epoch benchmark.",
+      "replay_timing_used": false
+    },
+    "new_validation_performed": false,
+    "next_validation_update": 15001,
+    "next_checkpoint_update": 16000
+  },
   "loss_history_prefix": {
     "path": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/prefix_loss_through_14000.csv",
     "sha256": "27e209eb9aa2a5f8ab558ef6c89ad036b71297920b3c04194c06b487d0fa7362",
@@ -173,7 +327,8 @@
     "GPU replay timing uses two archived batches per rank and is not full-data throughput.",
     "Model/moment source comparison includes exact bounded samples, metadata and all-rank full model hashes; source optimizer ZIP CRC checked independently.",
     "Original native CUDA assertion was not independently reproduced; finite guards are retained but cannot catch every native abort.",
-    "Production replay trajectories are not bitwise reproducible; strict equivalence controls were test-only. Actual full-data throughput is pending resumed-run observation."
+    "Production replay trajectories are not bitwise reproducible; strict equivalence controls were test-only.",
+    "Real-data speed is an early53-update observation, not a full-epoch throughput result."
   ],
   "gpu_release_gate": "/gaozt-test1/datasets/UnifoLM/.pipeline/training_launches/unifolm-speedup-resume-20261020T021809Z/gpu_acceptance_passed.json",
   "production_numerical_comparison": {
@@ -183,5 +338,14 @@
     "diagnostic_sha256": "6a4d075ce5b67312dcf710c78497ae94e8fd109b8bf05c3a4cb33a41be80b01e",
     "replacement_evidence": "Test-only strict backend: all eight ranks have bitwise-identical complete features/pools/source and visual gradients, sampled updates and full updated model; production paths independently pass continuous health checks.",
     "strict_controls_enabled_in_formal_training": false
+  },
+  "loss_monitor": {
+    "pid": 303760,
+    "training_pid": 303170,
+    "window": 100,
+    "last_rendered_complete_update": 14000,
+    "next_refresh_update": 14100,
+    "error_count": 0,
+    "status_path": "/gaozt-test1/datasets/UnifoLM/.pipeline/analysis/loss-100step-261020022152/monitor_status.json"
   }
 }

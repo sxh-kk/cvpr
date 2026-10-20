@@ -50,7 +50,8 @@ W&B使用离线本地记录；此前短时验收不代表长期收敛或正式�
 UnifoLM 提速代码已合入当前仓库，续训只启用同步调试关闭、跳过不用的VLM词表输出、
 CPU诊断输入／指标同步优化，AdamW保持 `foreach=False`；完整tokens、pooling、state接法和分组LR不变。
 第14000步已保留恢复快照；八卡连续更新健康检查及确定性单步完整模型一致性对照通过，
-新run从该步恢复模型／优化器／scheduler／RNG并继续40k日程。
+新run已从该步恢复模型／优化器／scheduler／RNG并继续40k日程。
+正式恢复后的53次真实数据更新短测约3.89秒／步，loss及五组梯度正常；长跑状态以外部实时记录为准。
 map-style恢复在采样前跳过已完成微批，loss曲线以校验过的1–14000步历史接续新run。
 [入口与边界](VLMExpert/README.md#unifolm-提速与断点恢复)、
 [八卡冷恢复与提速验收记录](docs/unifolm_speedup_resume_validation.json)。

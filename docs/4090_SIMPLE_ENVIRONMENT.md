@@ -6,8 +6,10 @@
 [环境工具](../scripts/4090_simple/README.md)，需求与协议仍以
 [交接文档](4090_SIMPLE_HANDOFF.md)为准。
 
-**当前结论：两套独立 Conda 环境的基础冒烟检查通过；20k 模型推理、G1 控制闭环及正式
-SIMPLE 测评均未验收。** 本次没有登录或修改 A100，没有启动训练、微调或正式测评。
+**本页为首次基础环境检查快照。后续20k资源迁移、GPU推理与闭环的实际进展见
+[GPU验收记录](4090_SIMPLE_GPU_ACCEPTANCE.md)。** 下文“尚未验收／缺失”均指首次检查时，
+不要据此推断后续检查结果。首次环境安装没有登录A100；后续迁移仅通过SSH读取已发布包，
+没有启动、停止或修改A100训练。
 
 ## 本机与环境
 
@@ -114,7 +116,7 @@ CuRobo 与 LeRobot 的外部 editable 源码是环境的一部分，不可作为
   interpreter cleanup 关闭 app；失败也写入 JSON。应同时看 JSON status 和日志，
   不把单独的退出码0当作成功。关闭流程本身未作独立生命周期验收。
 
-## 缺失资源与尚未解决的接口
+## 首次检查时缺失的资源与接口
 
 当前本机资源清单中的九类路径均缺少有效载荷，见外部 `reports/resources.json`：
 固定20k联合 `model.safetensors`、run_config、argv、dataset_statistics、Qwen 小文件目录、

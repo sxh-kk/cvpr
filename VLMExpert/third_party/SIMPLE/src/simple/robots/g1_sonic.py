@@ -366,6 +366,12 @@ class G1Sonic(CuRoboMixin,Humanoid,Robot,HeadCamMountable,HasDexterousHand):
         assert isinstance(self.controller, WholeBodyEEFController)
 
         match action_cmd.type:
+            case "sonic_v1_1":
+                # Run v1.1 decoder/proprioception at 50 Hz in simulator time,
+                # then apply named torque PD at each MuJoCo physical substep.
+                action_cmd["controller"].apply_physics(
+                    self, action_cmd["body_token"], action_cmd["hand_targets"])
+
             case "elastic_band":
                 pose = np.concatenate(
                     [

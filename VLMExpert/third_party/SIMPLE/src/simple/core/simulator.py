@@ -8,6 +8,7 @@ Licensed under the terms in LICENSE file.
 from typing import Protocol, Any, Dict, List, Union
 
 from abc import ABC
+import os
 import numpy as np
 
 import importlib.resources as res
@@ -37,7 +38,10 @@ class Simulator(ABC):
         return res.files("simple") / "resources" # type: ignore
 
     def get_data_dir(self) -> str:
-        return res.files("simple").parent.parent / "data" # type: ignore
+        # Keep robot USD/material resolution on the same external local root as
+        # task configuration and assets; the default remains package-relative.
+        from simple.utils import get_data_dir
+        return get_data_dir()
 
     def resolve_data_path(self,rel_path = None, create_if_not_exist=False) -> str:
         data_dir = self.get_data_dir()
@@ -48,9 +52,8 @@ class Simulator(ABC):
             if not res_path.exists():
                 if create_if_not_exist:
                     os.makedirs(res_path, exist_ok=True)
-                    
+
                 else:
                     raise FileNotFoundError(res_path)
         return str(res_path)
 
-        

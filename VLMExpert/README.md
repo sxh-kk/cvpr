@@ -405,8 +405,8 @@ scheduler及全部8个rank RNG文件检查通过，冻结的VLM末端norm与初�
 保存后已继续至少16次正常更新；截至2026-10-19 06:14 UTC的进度和指标见重启验收JSON，
 这些是有时间戳的早期检查，后续实时运行状态仍以外部状态文件和日志为准。
 
-数据准备与验证不启动训练。现有 HTTP／机器人服务还没有历史 DINO 请求字段；
-双来源服务部署仍需接入真实历史缓冲，与已实现的离线 LeRobot 读取分开验收。
+数据准备与验证不启动训练。HTTP 双来源服务已接入真实历史缓冲与本机在线 DINO，
+协议与 CPU 回归见下文；真实 GPU、SONIC 控制与完整仿真仍须分别验收。
 
 #### UnifoLM 提速与断点恢复
 
@@ -1032,8 +1032,53 @@ See dedicated doc here [baseline/act](baselines/act/README.md)
 
 本仓库双来源UnifoLM-20k模型在4090单机独立测评的专用交接说明见
 [4090 SIMPLE需求与环境配置](../docs/4090_SIMPLE_HANDOFF.md)。模型侧Python3.11与SIMPLE侧Python3.10分环境运行，
-现有上游单帧服务与旧动作客户端尚需历史DINO及SONIC v1.1接线；下面的官方通用命令不能直接视为双来源模型已验收入口。
+双来源 HTTP 服务支持真实历史／在线 DINO；SONIC v1.1身份与完整闭环按交接验收，
+下面的官方通用命令不能直接视为双来源模型已验收入口。
 20k保存后资源发布、SSH拉取与SHA校验见[资源交接](../docs/4090_SIMPLE_TRANSFER.md)。
+
+### 双来源本机 HTTP 协议
+
+从仓库根目录使用模型侧 Conda 环境启动；run 目录中的
+`dino_training_contract.json` 绑定本机绝对路径、训练 DINO 权重逐文件 SHA、
+NumPy/Pillow／ImageProcess 身份、无增强 `256x320` 及慢版 processor。
+DINO 的第二次 resize／center crop 关闭，参数冻结。
+
+```bash
+/home/zxc/miniconda3/envs/cvpr-simple-model311/bin/python -m psi.deploy.serve_psi0_simple \
+  --policy psi0 \
+  --run-dir /home/zxc/CVPR_Evaluation_runtime/resources/joint20k \
+  --ckpt-step 20000 --host 127.0.0.1 --port 21074 --device cuda:0 \
+  --action-exec-horizon 30 --rtc-mode off --num-inference-steps 10
+```
+
+`/observe` 与 `/act` 均使用现有 `RequestMessage.serialize()`，包含所有原请求字段及
+NumPy base64 图像编码；`history` 必须含稳定的 `session_id`、每次 episode 唯一的
+`episode_id` 和真实 `sim_time_s`。观察可使用空 state，动作请求须带已按训练顺序映射的
+43维 state（服务补到45维），或带末两维为零的45维 state。`/act` 的成功响应仍为
+`ResponseMessage.serialize()`，只返回配置的执行窗口，内部完整预测保持 `30×80`。
+当前 `DualSourcePsi0Agent` 接收完整 `30×80` chunk，首轮使用上述30行窗口、
+`execute_steps=30` 与 RTC off。服务允许较短执行窗口，但客户端须相应适配响应行数，
+且实际执行步数必须与服务的 `action_exec_horizon` 一致后才能使用 RTC。
+
+客户端从 episode 开始，且在动作执行队列期间，持续将真实相机帧发送到 `/observe`；
+`/act` 同时提交当前帧并按 `t−1.0,t−0.8,…,t` 选取6个不同的因果观察。
+各历史目标最多允许一帧30Hz周期加1ms延迟，当前帧必须与 `t` 严格同时间。
+不足历史返回 HTTP425，JSON 中 `detail.status="warming_up"`；客户端继续采集真实观察。
+重复同一仿真时间不推进历史；同时间不同RGB、倒退时间及未reset切换episode返回错误。
+
+`POST /reset` 发送平坦 JSON `{"session_id":"...","episode_id":"..."}`，
+清除此 session 的历史及 RTC；其他 session 独立。reset不等待推理锁，
+reset期间仍在执行的旧episode推理结果以HTTP409丢弃。
+`/info` 返回接口与权重身份。`/observe`不持有模型推理锁。
+服务以 `eval()`、冻结参数、`no_grad` 推理；test-time RTC 仅在动作样本上局部计算 VJP。
+
+CPU 回归使用专家替身，验证上述 HTTP／时间戳／RTC／reset／身份拒绝逻辑，
+不代表真实模型、GPU或物理闭环通过：
+
+```bash
+CUDA_VISIBLE_DEVICES='' /home/zxc/miniconda3/envs/cvpr-simple-model311/bin/python \
+  -m unittest discover -s VLMExpert/tests -p test_dual_source_serving.py -v
+```
 
 We use [SIMPLE](https://github.com/physical-superintelligence-lab/SIMPLE) to benchmark $\Psi_0$ and all the baselines.
 

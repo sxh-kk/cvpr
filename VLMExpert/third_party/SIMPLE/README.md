@@ -16,6 +16,37 @@ It is a `simple` simulation environment supports:
 
 SIMPLE is built on top of `IsaacSim 4.5` and `MuJoCo 3.3`.
 
+### This repository: independent 4090 UnifoLM-20k adapter
+
+The current CVPR deployment uses separate Conda environments: Python 3.11 for
+the local model service and Python 3.10 for SIMPLE. Use
+[`run_closed_loop.py`](../../../scripts/4090_simple/run_closed_loop.py) with
+`DualSourcePsi0Agent` and `SonicV11OnnxController`; the older `psi0` and
+`psi0_decoupled_wbc` agents use a different state/action protocol.
+
+The new adapter maps all 43 named joint positions into training order and pads
+to 45. Its action is exactly `30×80`: `body_token_v1_1[64]`, named hand targets
+`[14]`, and unused padding `[2]`. Both hands are reordered by joint name.
+Observations expose `joint_names` and `sim_time_s` from MuJoCo `mjData.time`.
+Every real camera frame is sent to localhost `/observe`; `/act` requires six
+causal frames over the past second, and `/reset` clears each episode's history
+and controller state. At the default task settings, physics runs at 200 Hz,
+the SONIC decoder at 50 Hz, and action samples at 30 Hz in simulation time.
+Simulation pauses during synchronous HTTP inference; these rates do not imply
+wall-clock real-time operation.
+
+Official SONIC v1.1 files are checked by SHA256. Their binding to the training
+encoder is a separate gate: unresolved binding requires explicit
+`--diagnostic-unverified-sonic`, and those results are excluded from formal
+success-rate claims. The default `--pd-profile fixed_cpp_baseline` preserves
+the pinned C++ gains. Optional `--pd-profile official_v1_1_ankle_pitch_1_5`
+checks the official README identity and applies its extra 1.5× ankle-pitch KP/KD
+scales; actual gains and all boundaries are recorded with each run.
+
+See [control commands and contracts](../../../scripts/4090_simple/CONTROL.md)
+and the [4090 GPU acceptance record](../../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)
+for verified stages, real observations, latency, and remaining limitations.
+
 | Component | Minimum | Recommended |
 | :--- | :--- | :--- |
 | **OS** | Ubuntu 22.04 | Ubuntu 22.04 |

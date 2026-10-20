@@ -14,6 +14,7 @@ import numpy as np
 
 from simple.core.task import Task
 from simple.envs.base_dual_env import BaseDualSim
+from simple.envs.observation_contract import named_sim_observation_space
 from simple.robots.protocols import Humanoid
 
 # import transforms3d as t3d
@@ -35,12 +36,15 @@ class LocoManipulationEnv(BaseDualSim):
         **kwargs
     ) -> None:
         super().__init__(task, sim_mode, headless, *args, **kwargs)
+        self.observation_space = named_sim_observation_space(self.observation_space, self.task.robot.joint_names)
     
     def _get_obs(self):
-        qpos = np.asarray(list(self.mujoco.get_robot_qpos().values()), dtype=np.float32)
+        named_qpos = self.mujoco.get_robot_qpos()
+        joint_names = tuple(named_qpos)
+        qpos = np.asarray(list(named_qpos.values()), dtype=np.float32)
         if self.isaac:
             isaacsim_joint_indices = []
-            for jname, _ in self.mujoco.get_robot_qpos().items():
+            for jname in joint_names:
                 isaac_jname = self.task.robot.jname_mujoco_to_isaac(jname)
                 isaacsim_joint_indices.append(self.isaac.robot.get_dof_index(isaac_jname))
             qpos = self.isaac.robot.get_joint_positions(joint_indices=isaacsim_joint_indices)
@@ -49,6 +53,8 @@ class LocoManipulationEnv(BaseDualSim):
 
         return {
             "joint_qpos": qpos,
+            "joint_names": joint_names,
+            "sim_time_s": float(self.mujoco.mjData.time),
             ** self._render_frame()
         }
     

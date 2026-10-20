@@ -1,7 +1,8 @@
 # 4090 独立 SIMPLE 环境工具
 
-遵守 [交接文档](../../docs/4090_SIMPLE_HANDOFF.md)。本目录仅提供环境约束、
-本机路径配置与不依赖权重的冒烟检查；没有接通生产双来源服务或控制策略。
+遵守 [交接文档](../../docs/4090_SIMPLE_HANDOFF.md)。本目录提供双Conda环境约束、
+本机路径、资源核验、真实历史／联合模型／HTTP检查及有界SIMPLE控制闭环工具。
+实际结果与未通过的边界见[GPU验收记录](../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)。
 实际安装／验证记录在本机仓库外 `~/CVPR_Evaluation_runtime/reports/`。
 
 A100已提供CPU导出与保存完成等待工具`export_bundle.py`，4090可通过SSH／rsync拉取资源。
@@ -66,8 +67,8 @@ python -m pip check
 ```
 
 `SIMPLE_DATA_DIR` 现在可覆盖 SIMPLE 数据根目录；为空时保持旧默认。
-其余 `CVPR_*` 变量是部署约定，**现有生产模型服务不会自动读取这些变量或补齐接口**。
-资源包到达后仍需重映射 run_config 中的路径，严格加载与校验。
+其余 `CVPR_*` 变量是部署约定，模型服务的资源目录和端口仍须显式传参。
+资源包换目录后须同步重映射 run_config 和argv，严格加载与校验。
 
 模型环境：
 
@@ -114,10 +115,68 @@ server 只绑定 `127.0.0.1`，复用 Psi0 的 NumPy wire helpers；client 使�
 此 fixture 没有实现真实历史、在线 DINO、RTC 或生产服务的 session 生命周期。
 检查后停止 fixture server，不将它作为正式推理服务保留。
 
-## 尚须验收
+## 真实20k模型与有界闭环
 
-固定 20k 联合 checkpoint、构造配置、统计、Qwen 小文件、DINO 身份及匹配的
-`body_token_v1_1` SONIC decoder／controller、SIMPLE 任务／USD／纹理／初始条件全部到齐后，
-才继续真实六帧历史、43→45 state、30×80 action／反归一化、单 episode 闭环、
-多 episode reset，以及模型／仿真各自与同时运行的显存和延迟测量。
-不得以默认官方权重、旧 SONIC 或额外 SIMPLE 微调替代 UnifoLM-20k 零样本测评。
+以下从仓库根运行，产物均在仓库外。两个终端分别激活对应的Conda环境并source本机配置。
+先完整核验包。官方scene0的props路径有误，首次使用仿真Conda环境创建独立修复目录，
+保留源USD／纹理，记录源／派生SHA与大小写纠错；不覆盖已有派生目录：
+
+```bash
+conda activate cvpr-simple-sim310
+source scripts/4090_simple/local.env.example.sh
+python scripts/4090_simple/prepare_simple_assets.py \
+  --source-root "$CVPR_SIMPLE_SOURCE_DATA_DIR" --output-root "$SIMPLE_DATA_DIR"
+```
+
+仅此步骤的文件与CPU USD组合检查不代表MDL编译或RTX渲染通过。
+然后用真实任务采集图像和状态；采集使用测量姿态PD，不是模型控制：
+
+```bash
+conda activate cvpr-simple-sim310
+source scripts/4090_simple/local.env.example.sh
+python scripts/4090_simple/capture_simple.py --data-root "$SIMPLE_DATA_DIR" \
+  --sonic-resources "$CVPR_SONIC_DIR" --sim-mode mujoco \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/joint20k/simple-history.npz"
+```
+
+在模型环境使用严格加载和真实在线DINO，检测完整tokens／pooling及有限动作：
+
+```bash
+conda activate cvpr-simple-model311
+source scripts/4090_simple/local.env.example.sh
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+python scripts/4090_simple/probe_joint.py --resources "$CVPR_SIMPLE_RUNTIME/resources" \
+  --history "$CVPR_SIMPLE_RUNTIME/reports/joint20k/simple-history.npz" \
+  --instruction 'bend to pick up the cracker box' \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/joint20k"
+python -m psi.deploy.serve_psi0_simple --policy psi0 --run-dir "$CVPR_JOINT_20K_DIR" \
+  --ckpt-step 20000 --device cuda:0 --host 127.0.0.1 --port "$CVPR_MODEL_PORT" \
+  --action-exec-horizon 30 --rtc-mode off --num-inference-steps 10
+```
+
+回到仿真环境。生产服务ready后依次执行；HTTP replay校验425/409及跨episode reset，
+不把replay当作真实控制：
+
+```bash
+python scripts/4090_simple/probe_http.py \
+  --history "$CVPR_SIMPLE_RUNTIME/reports/joint20k/simple-history.npz" \
+  --port "$CVPR_MODEL_PORT" --output "$CVPR_SIMPLE_RUNTIME/reports/joint20k/http-replay-new"
+OMNI_KIT_ACCEPT_EULA=YES python scripts/4090_simple/run_closed_loop.py \
+  --data-root "$SIMPLE_DATA_DIR" --sonic-resources "$CVPR_SONIC_DIR" \
+  --port "$CVPR_MODEL_PORT" --sim-mode mujoco_isaac --seconds 5 \
+  --pd-profile official_v1_1_ankle_pitch_1_5 --diagnostic-unverified-sonic \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/joint20k/loop-new"
+```
+
+闭环默认3个官方任务，各dr0 episode0。`--tasks`可筛选任务，`--episodes-per-task 2`
+验证同一session重置；`--sim-mode mujoco`用于不带RTX的对照。每次使用新输出目录保留证据。
+50Hz真实本体历史和30Hz高层动作均用仿真时钟；同步HTTP期间仿真暂停，不能据此声称实时。
+正式任务得分还需完整episode、成功判定、视频与足够样本；有界5秒通过仅表示集成链路可执行。
+
+`--diagnostic-unverified-sonic`明确记录SONIC官方v1.1与训练token精确权重绑定仍缺独立证据。
+不设置该选项时，须提供真实可追溯的 `--compatibility-evidence`，不得自行把未验证项置真。
+不得以默认官方Psi0权重、旧SONIC或额外SIMPLE微调替代UnifoLM-20k测评。
+
+CPU回归：模型环境运行 `python -m unittest discover -s VLMExpert/tests -p test_dual_source_serving.py -v`；
+仿真环境运行 `python -m unittest discover -s scripts/4090_simple/tests -p 'test_*control.py' -v`
+及 `-p test_smoke_reporting.py`。CPU测试覆盖契约与报告，不代替上述GPU／物理检查。

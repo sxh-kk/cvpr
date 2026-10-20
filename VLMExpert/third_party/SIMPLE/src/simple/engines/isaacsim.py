@@ -508,8 +508,22 @@ class IsaacSimSimulator(Simulator):
         obj_geom = GeometryPrim(prim_path=geom_prim_path)
         obj_rigid = RigidPrim(prim_path=geom_prim_path)
         obj_rigid.disable_rigid_body_physics()
-        obj_collision_geom = GeometryPrim(f"{geom_prim_path}/collision")
-        obj_collision_geom.set_collision_enabled(False)
+        # Objects here mirror MuJoCo poses; Isaac does not simulate their
+        # collisions. Some upstream assets reference OBJ children from an empty
+        # parent Mesh. GeometryPrim on that parent registers an invalid collider
+        # even when subsequently disabled. Edit only this render stage: preserve
+        # geometry and source files, and disable existing usable colliders.
+        collision_prim = isaacsim_prims.get_prim_at_path(f"{geom_prim_path}/collision")
+        if collision_prim.IsValid():
+            for prim in Usd.PrimRange(collision_prim):
+                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                points = UsdGeom.Mesh(prim).GetPointsAttr().Get() if prim.IsA(UsdGeom.Mesh) else None
+                if prim.IsA(UsdGeom.Mesh) and (points is None or len(points) == 0):
+                    prim.RemoveAPI(UsdPhysics.CollisionAPI)
+                    prim.RemoveAPI(UsdPhysics.MeshCollisionAPI)
+                else:
+                    UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
 
         usd_prim = isaacsim_prims.get_prim_at_path(object_prim_path)
         semantics=[("prim", f"{obj_id}")]

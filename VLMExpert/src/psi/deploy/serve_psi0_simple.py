@@ -17,6 +17,7 @@ from numpy.lib.format import descr_to_dtype, dtype_to_descr
 from torchvision.transforms import v2
 
 from psi.deploy.helpers import *
+from psi.deploy.dual_source_runtime import (SimulationHistory, LocalDinoEncoder, HistoryError)
 from psi.config.config import LaunchConfig, ServerConfig
 from psi.config.transform import SimpleRepackTransform, Psi0ModelTransform, ActionStateTransform
 import json
@@ -69,6 +70,13 @@ class Server:
         self.model = Psi0Model.from_pretrained(run_dir, ckpt_step, launch_config, device=device)
         self.model.to(device)
         self.model.eval()
+        self.model.requires_grad_(False)
+        self.uses_dual_source = bool(getattr(self.model, "uses_dual_source", False))
+        if self.uses_dual_source:
+            # The exported contract binds absolute local resources and clean RGB.
+            contract_path = Path(run_dir) / "dino_training_contract.json"
+            self.online_dino = LocalDinoEncoder(contract_path, device=device)
+            self.motion_history = SimulationHistory(self.online_dino.contract["shared_image_profile"])
 
         self.maxmin:ActionStateTransform = launch_config.data.transform.field # type:ignore
         self.repack_transform:SimpleRepackTransform = launch_config.data.transform.repack # type:ignore
@@ -302,12 +310,24 @@ class Server:
         (N, Ds) history stack the simple client posts; only the last To frames are kept,
         since that is all the model was trained to read.
         """
-        states = np.asarray(state_dict["states"], dtype=np.float32).copy()
+        try:
+            states = np.asarray(state_dict["states"], dtype=np.float32).copy()
+        except (KeyError, TypeError, ValueError) as error:
+            if getattr(self, "uses_dual_source", False):
+                raise HistoryError("state.states must contain the mapped numerical state vector") from error
+            raise
         if states.ndim == 1:
             states = states[np.newaxis, :]
+        if getattr(self, "uses_dual_source", False) and states.ndim != 2:
+            raise HistoryError("state.states must be (43,), (45,), (1,43) or (1,45)")
         assert states.ndim == 2, f"states must be (Ds,) or (N, Ds), got {states.shape}"
         if states.shape[0] > self.To:
             states = states[-self.To:]
+        if getattr(self, "uses_dual_source", False):
+            if states.shape != (1, 43) and states.shape != (1, 45):
+                raise HistoryError("dual_source_v1 needs one mapped 43-state vector (or 45 with two zero pads)")
+            if not np.isfinite(states).all() or (states.shape[1] == 45 and np.any(states[:, 43:] != 0)):
+                raise HistoryError("state must be finite; the last two state padding channels must be zero")
         states, _ = pad_to_len(states, self.pad_state_dim, dim=1)
         if self.maxmin.normalize_state:  # type:ignore
             states = self.maxmin.normalize_state_func(states)
@@ -327,6 +347,39 @@ class Server:
         ], axis=1)  # (1, Tp, Da)
         return torch.from_numpy(prev).to(self.device)
 
+    @staticmethod
+    def _dual_image(image_dict: Dict[str, Any]) -> np.ndarray:
+        if not isinstance(image_dict, dict) or len(image_dict) != 1:
+            raise HistoryError("dual_source_v1 requires exactly one egocentric RGB observation")
+        return np.asarray(next(iter(image_dict.values())))
+
+    @staticmethod
+    def _dual_request(payload: Dict[str, Any]) -> RequestMessage:
+        """Use the existing ndarray wire format on both observation endpoints."""
+        try:
+            return RequestMessage.deserialize(payload)
+        except (KeyError, TypeError, ValueError) as error:
+            raise HistoryError(f"Invalid RequestMessage: {error}") from error
+
+    def observe(self, payload: Dict[str, Any]) -> JSONResponse:
+        """Collect real camera observations while the policy's action queue executes."""
+        if not self.uses_dual_source:
+            raise HTTPException(status_code=404, detail="Online history is only available for dual_source_v1")
+        try:
+            request = self._dual_request(payload)
+            result = self.motion_history.observe(request.history, self._dual_image(request.image))
+            return JSONResponse(content=result)
+        except HistoryError as error:
+            raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
+    def reset(self, payload: Dict[str, Any]) -> JSONResponse:
+        if not self.uses_dual_source:
+            raise HTTPException(status_code=404, detail="Explicit episode reset is only available for dual_source_v1")
+        try:
+            return JSONResponse(content=self.motion_history.reset(payload))
+        except HistoryError as error:
+            raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
     def predict_action(self, payload: Dict[str, Any], http_request: Request) -> JSONResponse:
         # overwatch.info(f"Received request with payload: {payload}")
         # Last-resort identity, used only when the client sends no session/client id.
@@ -336,7 +389,8 @@ class Server:
         # request and 409 the whole episode away.
         peer = http_request.client.host if http_request.client else "unknown"
         try:
-            request = RequestMessage.deserialize(payload)
+            request = (self._dual_request(payload) if self.uses_dual_source
+                       else RequestMessage.deserialize(payload))
             image_dict, instruction, history_dict, state_dict, gt_action, dataset_name = \
                 request.image, request.instruction, request.history, request.state, request.gt_action, request.dataset_name
             
@@ -347,12 +401,14 @@ class Server:
             instruction = str(instruction).lower()
             overwatch.info(f"Instruction: {instruction}")
             overwatch.info(f"history_dict: {history_dict}")
-            self._claim_rtc_session(history_dict, peer)
-
-            transforms = [self.model_transform.resize(), self.model_transform.center_crop()]
-            t = v2.Compose(transforms)
-
-            images = [[t(img) for img in self._order_images(image_dict)]]  # B=1
+            if self.uses_dual_source:
+                self.motion_history.observe(history_dict, self._dual_image(image_dict))
+                images = None  # Bound to the same clean current RGB as DINO below.
+            else:
+                self._claim_rtc_session(history_dict, peer)
+                transforms = [self.model_transform.resize(), self.model_transform.center_crop()]
+                t = v2.Compose(transforms)
+                images = [[t(img) for img in self._order_images(image_dict)]]  # B=1
             states = self._prepare_states(state_dict)  # (To, Ds)
 
             # uvicorn runs this sync handler in a threadpool, so two clients hitting /act
@@ -360,7 +416,17 @@ class Server:
             # requests -- the diffusers scheduler's step index (IndexError in
             # noise_scheduler.step) and self.previous_action. Serialize inference; only
             # request decoding and image transforms run in parallel.
-            with self._infer_lock:
+            # Test-time RTC locally enables an action-sample VJP. no_grad prevents
+            # policy parameter graphs while still allowing that sampler operation;
+            # inference_mode would make the second RTC request fail autograd.
+            with self._infer_lock, torch.no_grad():
+                snapshot = None
+                if self.uses_dual_source:
+                    snapshot = self.motion_history.snapshot(history_dict)
+                    images = [[Image.fromarray(snapshot.rgb[-1])]]
+                    previous_action = snapshot.previous_action
+                else:
+                    previous_action = self.previous_action
                 common: Dict[str, Any] = dict(
                     observations=images,
                     states=states.unsqueeze(0), # B, To, Ds
@@ -368,9 +434,11 @@ class Server:
                     num_inference_steps=self.num_inference_steps,
                     traj2ds=None,
                 )
+                if snapshot is not None:
+                    common["motion_img_embs"] = torch.from_numpy(self.online_dino.encode(snapshot)).unsqueeze(0).to(self.device)
                 current_time = time.monotonic()
-                if (not self.enable_rtc or self.previous_action is None
-                        or "reset" in history_dict):
+                if (not self.enable_rtc or previous_action is None
+                        or history_dict.get("reset") is True):
                     #  or (current_time - self.last_serve_time) > 30  #if idle more than 60s, reset previous action
                     if self.enable_rtc:
                         overwatch.info("===Reset or first step, without condition===")
@@ -378,7 +446,12 @@ class Server:
                 else:
                     overwatch.info(f"RTC enabled ({self.rtc_mode}), using RTC inference")
                     overwatch.info("Last chunk execution loop time: {:.2f}s ago".format(current_time - self.last_serve_time))
-                    prev_actions = self._shifted_prev_actions()  # (1, Tp, Da)
+                    if snapshot is not None:
+                        shifted = np.concatenate([previous_action[self.exec_shift:],
+                                                  np.zeros((self.exec_shift, self.Da), dtype=np.float32)])
+                        prev_actions = torch.from_numpy(shifted).unsqueeze(0).to(self.device)
+                    else:
+                        prev_actions = self._shifted_prev_actions()  # (1, Tp, Da)
 
                     if self.rtc_mode == "test_time":
                         raw_pred_actions = self.model.predict_action_with_rtc_flow(
@@ -397,15 +470,25 @@ class Server:
                             max_delay=self.rtc_max_delay
                         )
 
+                if raw_pred_actions.shape != (1, self.Tp, self.Da) or not torch.isfinite(raw_pred_actions).all():
+                    raise RuntimeError(f"Policy output must be finite [1,{self.Tp},{self.Da}]; got {raw_pred_actions.shape}")
                 raw_pred_actions = raw_pred_actions.reshape(-1, self.Da).float().detach().cpu().numpy() # (Tp, Da)
                 pred_actions = self.maxmin.denormalize(raw_pred_actions) # (Tp, Da)
-                self.previous_action = raw_pred_actions.copy().astype(np.float32) # for rtc
+                if np.asarray(pred_actions).shape != (self.Tp, self.Da) or not np.isfinite(pred_actions).all():
+                    raise RuntimeError("Denormalized policy action has invalid shape or nonfinite values")
+                if snapshot is not None:
+                    self.motion_history.commit_action(snapshot, raw_pred_actions)
+                else:
+                    self.previous_action = raw_pred_actions.copy().astype(np.float32) # for rtc
                 pred_actions = pred_actions[:self.Ta] # type:ignore
                 overwatch.info(f"Return Action ({pred_actions.shape})") # : {pred_actions}
 
                 self.last_serve_time = time.monotonic()
             response = ResponseMessage(pred_actions, 0.0) # type:ignore
             return JSONResponse(content=response.serialize())
+
+        except HistoryError as error:
+            raise HTTPException(status_code=error.status_code, detail=error.detail) from error
 
         except HTTPException as e:
             # session rejection: let FastAPI return the real status code instead of the
@@ -416,6 +499,8 @@ class Server:
         except Exception as e:
             import traceback
             overwatch.warning(traceback.format_exc())
+            if self.uses_dual_source:
+                raise HTTPException(status_code=500, detail={"status": "inference_failed", "message": str(e)}) from e
             return JSONResponse(content=f'{{"status": "{e}"}}')
 
     def info(self) -> JSONResponse:
@@ -462,14 +547,35 @@ class Server:
             "pig_guidance_alpha": self.pig_guidance_alpha if self.rtc_mode == "test_time" else None,
             "num_inference_steps": self.num_inference_steps,
         }
+        if self.uses_dual_source:
+            content["transforms"] = [{"name": "ImageProcess", "profile": self.online_dino.contract["shared_image_profile"],
+                                       "augmentation": "none", "shared_current_rgb": True}]
+            content["expected_keys"]["history"] = {
+                "session_id": "required stable string", "episode_id": "required stable string",
+                "sim_time_s": "required float simulator seconds; never wall clock/request count",
+                "reset": "optional boolean; true clears this session's history and RTC"}
+            content["online_history"] = {
+                "observe_endpoint": "/observe", "reset_endpoint": "/reset", "warming_up_http_status": 425,
+                "frames": 6, "offsets_s": [-1., -.8, -.6, -.4, -.2, 0.],
+                "selection": "latest causal frame at each target, tolerance 1/30+0.001 seconds",
+                "observation_collection": "post each camera frame while returned actions execute",
+                "dino_weights_sha256": self.online_dino.contract["encoder"]["weights_sha256"]}
         return JSONResponse(content=content)
 
 
-    def run(self, host: str = "0.0.0.0", port: int = 8000) -> None:
+    def create_app(self) -> FastAPI:
+        """Build the ASGI app separately so the real protocol can be CPU tested."""
         self.app = FastAPI()
         self.app.post("/act")(self.predict_action)
         self.app.get("/info")(self.info)
+        if self.uses_dual_source:
+            self.app.post("/observe")(self.observe)
+            self.app.post("/reset")(self.reset)
         self.app.get("/health")(lambda: JSONResponse(content={"status": "ok"}))
+        return self.app
+
+    def run(self, host: str = "0.0.0.0", port: int = 8000) -> None:
+        self.create_app()
         overwatch.info(f"Server listens on {host}:{port}")
         try:
             uvicorn.run(self.app, host=host, port=port)
@@ -504,12 +610,12 @@ def main():
     overwatch.info("Start Serving from uv")
     overwatch.info(f"Args: {sys.argv}")
     from dotenv import load_dotenv
-    assert load_dotenv() 
+    load_dotenv()
     config = tyro.cli(ServerConfig, config=(tyro.conf.ConsolidateSubcommandArgs,), args=sys.argv[1:])
     serve(config)
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
-    assert load_dotenv()
+    load_dotenv()
     config = tyro.cli(ServerConfig, config=(tyro.conf.ConsolidateSubcommandArgs,))
     serve(config)

@@ -12,15 +12,16 @@ def main():
     args = p.parse_args()
     root = args.root.expanduser().resolve()
     expected = [
-        ("joint20k/checkpoints/ckpt_20000/model.safetensors", "exact 20k joint model; strict load and identity pending"),
+        ("joint20k/checkpoints/ckpt_20000/model.safetensors", "exact 20k joint model; verify strict loading and identity separately"),
         ("joint20k/run_config.json", "remap construction paths locally; retain architecture/statistics contracts"),
         ("joint20k/argv.txt", "original launch provenance"),
         ("joint20k/dataset_statistics.json", "original bounds and state/action order; no test-set refit"),
         ("joint20k/qwen", "local tokenizer/config/processor; joint checkpoint holds VLM weights"),
         ("joint20k/motion", "portable construction checkpoint + metadata and normalization"),
         ("dinov2-with-registers-large", "same frozen DINO identity and processor as training"),
-        ("sonic-body-token-v1.1", "matched controller/decoder identity; shape alone is insufficient"),
+        ("sonic_v1_1", "matched controller/decoder identity; shape alone is insufficient"),
         ("simple", "fixed task, robot/USD/textures, evaluation initial conditions"),
+        ("simple_local_usd_v1/DERIVATION_MANIFEST.json", "derived local USD paths; original SHA preserved; render acceptance separate"),
     ]
     items = []
     for relative, contract in expected:

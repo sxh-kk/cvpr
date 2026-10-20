@@ -15,6 +15,7 @@ from typing import Any
 
 from simple.core.task import Task
 from simple.envs.base_dual_env import BaseDualSim
+from simple.envs.observation_contract import named_sim_observation_space
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 class SonicLocoManipEnv(BaseDualSim):
@@ -34,6 +35,7 @@ class SonicLocoManipEnv(BaseDualSim):
         **kwargs
     ) -> None:
         super().__init__(task, sim_mode, headless, sonic_config=sonic_config, *args, **kwargs)
+        self.observation_space = named_sim_observation_space(self.observation_space, self.task.robot.joint_names)
         self.sonic_config = sonic_config
         
         self.offscreen = "isaac" in sim_mode or headless
@@ -74,16 +76,20 @@ class SonicLocoManipEnv(BaseDualSim):
             return self.last_reward
 
     def _get_obs(self):
-        qpos = np.asarray(list(self.mujoco.get_robot_qpos().values()), dtype=np.float32)
+        named_qpos = self.mujoco.get_robot_qpos()
+        joint_names = tuple(named_qpos)
+        qpos = np.asarray(list(named_qpos.values()), dtype=np.float32)
         if self.isaac:
             isaacsim_joint_indices = []
-            for jname, _ in self.mujoco.get_robot_qpos().items():
+            for jname in joint_names:
                 isaac_jname = self.task.robot.jname_mujoco_to_isaac(jname)
                 isaacsim_joint_indices.append(self.isaac.robot.get_dof_index(isaac_jname))
             qpos = self.isaac.robot.get_joint_positions(joint_indices=isaacsim_joint_indices)
 
         return {
             "joint_qpos": qpos,
+            "joint_names": joint_names,
+            "sim_time_s": float(self.mujoco.mjData.time),
             ** self._render_frame()
         }
     

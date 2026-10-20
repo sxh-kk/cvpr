@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from importlib.resources import as_file
 from json import JSONEncoder
+from pathlib import Path
 
 import numpy as np
 from huggingface_hub import snapshot_download
@@ -37,6 +38,9 @@ def get_res_dir() -> str:
 
 
 def get_data_dir() -> str:
+    data_dir = os.getenv("SIMPLE_DATA_DIR", "").strip()
+    if data_dir:
+        return Path(data_dir).expanduser().resolve()
     return res.files("simple").parent.parent / "data"  # type: ignore
 
 

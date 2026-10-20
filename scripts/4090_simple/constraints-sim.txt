@@ -1,0 +1,14 @@
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
+numpy==1.26.4
+mujoco==3.3.6
+scipy==1.15.3
+opencv-python==4.11.0.86
+pin==2.7.0
+cmeel-boost==1.83.0
+eigenpy==3.5.1
+hpp-fcl==2.4.4
+cmeel-urdfdom==3.1.1.1
+onnxruntime==1.23.2
+warp-lang==1.7.0
+setuptools<81

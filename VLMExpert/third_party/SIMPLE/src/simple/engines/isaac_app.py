@@ -4,6 +4,8 @@ Shared Isaac SimulationApp creation helpers.
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import os
 from simple.utils import env_flag
 
@@ -51,6 +53,11 @@ def create_simulation_app(
     })
     if extra_args:
         sim_cfg["extra_args"] = extra_args
+
+    # Opt in with the CuRobo-only experience: Pinocchio and Kit's optional Lula
+    # extensions require incompatible URDF/Assimp ABIs. Preserve generic defaults.
+    if env_flag("SIMPLE_ISAAC_PRELOAD_PINOCCHIO", default=False) and importlib.util.find_spec("pinocchio") is not None:
+        importlib.import_module("pinocchio")
 
     app = SimulationApp(sim_cfg)
 

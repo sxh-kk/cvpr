@@ -1,0 +1,12 @@
+torch==2.7.0+cu126
+torchvision==0.22.0+cu126
+numpy==1.26.4
+pillow==11.3.0
+safetensors==0.6.2
+transformers==4.57.1
+accelerate==1.7.0
+einops==0.8.1
+omegaconf==2.3.0
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+setuptools<81

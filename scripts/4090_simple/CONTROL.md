@@ -268,6 +268,19 @@ agent／controller／HTTP history 随后清空，继续实际物理与策略控�
 CPU MJB／ORT 的 1.5 秒物理检查支持它修复首秒失稳，实际 RTX／学习策略效果仍须单独验证。
 它也不自动弥补训练首窗口已开始开手／伸手、而部署仍在站立的状态分布差异。
 
+`--body-token-projection fsq_v1_1` 是独立、显式的 consumer 选项，默认 `none` 保留连续输出。
+它仅将 HTTP 已反归一化的 body64 四舍五入到 `1/16` 网格（ties-to-even），并限制到
+固定官方 v1.1 encoder 的32个 level：`[-1, 15/16]`。此范围来自已核 ONNX 的 Round／16，
+不能用旧 production client 的 `±0.625` 硬编码代替。hands、padding、标签、统计、教师与物理不变，
+预热时官方 encoder 产生的 token 不经此 student projection。
+`body_token_projection` receipt 保存 mode／step／range、encoder 与 consumer 源码 SHA、
+实际交给 controller 的命令采样数、改变元素数、范围限制数和平均／最大改变量；每个 episode reset 清零。
+量化恢复了 encoder 输出网格，但是否改善真实任务仍须独立对照，不能把该选项追记到旧 paired 结果。
+`compare_liftbox_eval.py` 会校验两侧投影模式、网格、encoder／consumer 源码身份相同，
+`none` 与 `fsq_v1_1` 必须作为独立接口消融，不能称为同协议的权重前后配对。
+原四条均未提供投影选项的连续运行保留为 legacy-none 配对；新显式 receipt 不会静默替代旧缺失记录。
+改变量计数属于运行结果，不要求不同策略产生相同计数；recipe 与参数必须一致。
+
 CPU契约检查：
 
 ```bash

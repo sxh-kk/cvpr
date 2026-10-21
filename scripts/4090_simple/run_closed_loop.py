@@ -124,6 +124,8 @@ def parse_args():
                         help="Restore only row 0 of a same-task/same-seed run's complete physical state once, after exact model checks")
     parser.add_argument("--warmup-control", choices=("measured_pose_pd", "live_pose_sonic_v1_1"),
                         default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
+    parser.add_argument("--body-token-projection", choices=("none", "fsq_v1_1"), default="none",
+                        help="Optional denormalized body64 projection to the fixed SONIC v1.1 32-level FSQ grid")
     parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(TASKS))
     parser.add_argument("--episodes-per-task", type=int, default=1)
     parser.add_argument("--episode-start", type=int, default=0)
@@ -279,7 +281,9 @@ def run_worker(args):
             from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
             warmup_control = LivePoseSonicWarmup(args.sonic_resources)
         agent = DualSourcePsi0Agent(raw.task.robot, client=client, controller=controller,
-                                   execute_steps=args.execute_steps, warmup_control=warmup_control)
+                                   execute_steps=args.execute_steps, warmup_control=warmup_control,
+                                   body_token_projection=args.body_token_projection)
+        result["body_token_projection"] = deepcopy(agent.projection_receipt)
         for episode_index in range(args.episode_start, args.episode_start + args.episodes_per_task):
             seed = args.seed + episode_index - args.episode_start if carrybox else args.seed
             if carrybox:
@@ -455,6 +459,7 @@ def run_worker(args):
                 episode["warmup_control"] = (deepcopy(warmup_control.receipt) if warmup_control is not None
                     else {"kind":"measured_pose_pd", "balance_decoder_during_history":False})
                 episode["warmup_control"]["actual_warmup_decoder_calls"] = episode.get("warmup_decoder_calls", controller.decoder_calls)
+                episode["body_token_projection"] = deepcopy(agent.projection_receipt)
                 episode["strategy_quality_assessment"] = (
                     "ineligible: robot already unstable before first learned action" if episode["fell_before_first_policy_command"]
                     else "ineligible: bounded integration smoke with explicit controller compatibility boundary")

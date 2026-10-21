@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+import hashlib
 import math
+from pathlib import Path
 import uuid
 from typing import Protocol
 
@@ -49,6 +51,33 @@ SIMPLE_HAND_JOINT_NAMES = tuple(
     for joint in range(count)
 )
 ACTION_FPS = 30.0
+V11_ENCODER_SHA256 = "fb97de22819b2057b41459802128d91723d91a25f0ad73e7bfc41a9cf8365bae"
+V11_FSQ_STEP, V11_FSQ_MIN, V11_FSQ_MAX = 1 / 16, -1.0, 15 / 16
+
+
+def project_body_token(token, mode="none") -> np.ndarray:
+    """Project denormalized policy body64 onto the fixed v1.1 FSQ levels.
+
+    The official encoder has 32 scalar levels, Round(...)/16, so the legal
+    normalized codes are -16..15 divided by 16. np.rint uses ties-to-even like
+    ONNX Round. This does not apply the encoder's pre-quantizer tanh twice.
+    """
+    if mode not in ("none", "fsq_v1_1"):
+        raise ValueError("Unknown body token projection mode")
+    value = np.asarray(token)
+    if (value.shape != (64,) or not np.issubdtype(value.dtype, np.number) or
+            np.iscomplexobj(value) or not np.isfinite(value).all()):
+        raise ValueError("Projection requires 64 finite real denormalized body tokens")
+    with np.errstate(over="ignore"):
+        value = np.asarray(value, dtype=np.float32)
+    if not np.isfinite(value).all():
+        raise ValueError("Body tokens exceed finite float32 range")
+    if mode == "none":
+        return value.copy()
+    # Clip before multiplication to avoid overflow for extreme finite inputs;
+    # on this aligned grid it equals round-to-grid followed by endpoint clip.
+    return (np.rint(np.clip(value, V11_FSQ_MIN, V11_FSQ_MAX) / V11_FSQ_STEP)
+            * V11_FSQ_STEP).astype(np.float32)
 
 
 def state43_to45(joint_qpos, joint_names: Sequence[str]) -> np.ndarray:
@@ -175,7 +204,8 @@ class DualSourcePsi0Agent:
     image or wall-clock timestamp is used to fill missing history.
     """
     def __init__(self, robot, host="127.0.0.1", port=22085, *, controller=None,
-                 client=None, execute_steps=30, session_id=None, warmup_control=None):
+                 client=None, execute_steps=30, session_id=None, warmup_control=None,
+                 body_token_projection="none"):
         if controller is None:
             raise ValueError("Supply a verified body_token_v1_1 SONIC controller; legacy WBC is incompatible")
         identity = getattr(controller, "identity", {})
@@ -188,6 +218,9 @@ class DualSourcePsi0Agent:
             raise ValueError("execute_steps must be an integer in [1, 30]")
         self.robot, self.controller = robot, controller
         self.warmup_control = warmup_control
+        if body_token_projection not in ("none", "fsq_v1_1"):
+            raise ValueError("Unknown body token projection mode")
+        self.body_token_projection = body_token_projection
         self.client = client or DualSourceHttpActionClient(host, port)
         self.execute_steps = execute_steps
         self.session_id = session_id or f"dual-source-{uuid.uuid4().hex}"
@@ -200,6 +233,16 @@ class DualSourcePsi0Agent:
         self._last_time = None
         self.warming_up = True
         self.warmup_phase = "warmup_measured_pose_pd"
+        self.projection_receipt = {"mode":self.body_token_projection,
+            "consumer_source_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "step":V11_FSQ_STEP if self.body_token_projection=="fsq_v1_1" else None,
+            "range":[V11_FSQ_MIN,V11_FSQ_MAX] if self.body_token_projection=="fsq_v1_1" else None,
+            "levels":32 if self.body_token_projection=="fsq_v1_1" else None,
+            "encoder_sha256":V11_ENCODER_SHA256 if self.body_token_projection=="fsq_v1_1" else None,
+            "rounding":"nearest ties-to-even" if self.body_token_projection=="fsq_v1_1" else None,
+            "scope":"denormalized learned body64 immediately before controller.step; hands/padding/stats/labels and warmup unchanged",
+            "command_samples":0,"elements_compared":0,"changed_elements":0,"range_clipped_elements":0,
+            "absolute_change_sum":0.0,"mean_absolute_change":0.0,"maximum_absolute_change":0.0}
 
     def reset(self, *, episode_id=None, **kwargs):
         self._clear_local()
@@ -247,7 +290,18 @@ class DualSourcePsi0Agent:
             self._chunk, self._chunk_time, idx = chunk.copy(), float(t), 0
             self.warming_up = False
         latent, hands = split_action80(self._chunk[idx])
-        command = self.controller.step(latent, hands, observation)
+        projected = project_body_token(latent, self.body_token_projection)
+        command = self.controller.step(projected, hands, observation)
         if not isinstance(command, ActionCmd):
             raise TypeError("SONIC controller must return a SIMPLE ActionCmd")
+        delta = np.abs(projected.astype(np.float64) - latent)
+        receipt = self.projection_receipt
+        receipt["command_samples"] += 1
+        receipt["elements_compared"] += 64
+        receipt["changed_elements"] += int(np.count_nonzero(delta))
+        receipt["range_clipped_elements"] += (int(np.count_nonzero((latent < V11_FSQ_MIN) | (latent > V11_FSQ_MAX)))
+            if self.body_token_projection=="fsq_v1_1" else 0)
+        receipt["absolute_change_sum"] += float(delta.sum())
+        receipt["mean_absolute_change"] = receipt["absolute_change_sum"] / receipt["elements_compared"]
+        receipt["maximum_absolute_change"] = max(receipt["maximum_absolute_change"], float(delta.max()))
         return command

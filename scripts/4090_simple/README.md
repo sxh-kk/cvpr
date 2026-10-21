@@ -3,7 +3,7 @@
 遵守 [交接文档](../../docs/4090_SIMPLE_HANDOFF.md)。本目录提供双Conda环境约束、
 本机路径、资源核验、真实历史／联合模型／HTTP检查及有界SIMPLE控制闭环工具。
 实际结果与未通过的边界见[GPU验收记录](../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)。
-后续最新28k权重的CarryBox独立适配、训练/保留测试划分与实际结果见
+已独立固定的28k权重的CarryBox适配、训练/保留测试划分与实际结果见
 [本地任务适配](../../docs/4090_SIMPLE_CARRYBOX_FINETUNE.md)。
 实际安装／验证记录在本机仓库外 `~/CVPR_Evaluation_runtime/reports/`。
 
@@ -37,7 +37,8 @@ psi 和 serve dependency-groups**。pip 新版本可用 `--group /绝对路径/p
   `09929d8057b044b53aecaf5c6d7eb71f99e8beb9`（本机源码在仓库外 runtime/lerobot）。
 - FlashAttention 2.7.4.post1 的官方 Python3.11／Torch2.7／CUDA12／C++11 ABI TRUE wheel；
   先查询 `torch._C._GLIBCXX_USE_CXX11_ABI`，不能跨环境照搬扩展。
-  不启用 DeepSpeed 预编译训练算子；单卡本地适配使用普通 AdamW。
+  不启用 DeepSpeed 预编译训练算子；Action-only本地适配使用普通 AdamW，
+  联合适配的独立入口使用CPU FP32 master和原生CPU AdamW，保留生产梯度检查与逐组裁剪。
   CarryBox 的 CPU v1.1 重编码另需 `onnxruntime==1.23.2`，仿真侧读取示范需
   `pyarrow==20.0.0`，均已加入对应环境约束。
 
@@ -188,3 +189,40 @@ CPU回归：模型环境运行 `python -m unittest discover -s VLMExpert/tests -
 及 `-p test_smoke_reporting.py`。CPU测试覆盖契约与报告，不代替上述GPU／物理检查。
 
 独立的举箱保持任务、RTX同域成功示范和本地微调流程见 [LiftBoxHold记录](../../docs/4090_SIMPLE_LIFTBOX_FINETUNE.md)。旧CarryBox派生包不能用于训练。
+
+`compare_liftbox_eval.py` 在训练和source4/8前后四次物理运行完成后汇总实际证据：核对完整初态、
+预热/控制/渲染、checkpoint及逐次采样RNG，独立重算保存的原始/归一化动作误差与50Hz日志中的
+连续保持条件。它只读取本机文件，不加载模型、不启动仿真；完成运行、站稳和任务成功分别报告。
+命令及本地pilot边界见上述记录，不能把两例结果写成官方SIMPLE成功率。
+
+`check_liftbox_joint_gpu.py`用于独立两次联合更新资格检查：读取已验收准备目录，核对实际数据和
+DINO文件身份，对齐A100五组参数及峰值LR，使用生产反传/安全检查与CPU原生AdamW状态，
+不保存模型或optimizer。实际两步结果见LiftBoxHold记录；短检查不等于完整联合微调通过。
+
+```bash
+source scripts/4090_simple/local.env.example.sh
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+python scripts/4090_simple/check_liftbox_joint_gpu.py \
+  --prepared-run "$CVPR_SIMPLE_RUNTIME/finetune/lift_box_hold_28000_action300_rtx_v1" \
+  --alignment "$CVPR_SIMPLE_RUNTIME/reports/a100_unifolm_actual_training_alignment.json" \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/liftbox-joint-check-new" --run-gpu
+```
+
+这里的alignment报告为本机SSH只读核对结果，不包含认证信息；无需挂载或调用A100运行模型。
+
+本地完整联合pilot使用独立入口，保持五组峰值LR和生产安全检查。`--base-run`可显式选择
+已保存完成、SHA核验及Motion提取通过的更新快照；新旧模型结构、数据、统计与DINO契约必须相同。
+成功示范的原28k质量锚点继续单独保留，不改写为新权重来源。只保存最终模型，不能恢复optimizer续训。
+
+```bash
+python scripts/4090_simple/finetune_lift_box_hold_joint.py \
+  --prepared-run "$CVPR_SIMPLE_RUNTIME/finetune/lift_box_hold_28000_action300_rtx_v1" \
+  --base-run "$CVPR_SIMPLE_RUNTIME/resources/latest31000/run" \
+  --alignment "$CVPR_SIMPLE_RUNTIME/reports/a100_unifolm_actual_training_alignment.json" \
+  --output "$CVPR_SIMPLE_RUNTIME/finetune/lift_box_hold_31000_joint300_rtx_new" \
+  --batch-size 4 --grad-accum 4 --max-steps 300 --warmup-steps 20 --train
+```
+
+需先完成新快照迁移和`prepare_joint_snapshot.py`，并使用已source本机配置的模型Conda环境。
+可在另一新输出目录以`--prepare-only`检查真实JSON/argv及资源身份；准备完成不代表GPU训练或物理成功。
+300步、有效batch16是本地小包适配预算，不等于A100有效batch256、40k更新的完整日程。

@@ -50,6 +50,15 @@ while the one-second RGB history fills. Its reference and source identities
 are recorded. The default measured-pose PD warmup remains available; neither
 option changes the frozen demonstration producer or task criteria.
 
+Optional `--body-token-projection fsq_v1_1` projects only denormalized learned
+body64 onto the verified v1.1 32-level grid (step `1/16`, range `[-1, 15/16]`,
+ties-to-even). The default `none` preserves continuous actions. Hands, padding,
+statistics, labels, warmup and physical controls are unchanged; each episode
+records the projection identity and actual command change summary.
+Paired weight comparisons require the same projection recipe on both sides;
+continuous-versus-FSQ runs are a separate interface ablation. The comparison
+tool rejects mismatched projection modes, grids or recorded consumer identities.
+
 See [control commands and contracts](../../../scripts/4090_simple/CONTROL.md)
 and the [4090 GPU acceptance record](../../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)
 for verified stages, real observations, latency, and remaining limitations.

@@ -374,3 +374,64 @@ DINO为冻结的5×1024、float16，与原权重/预处理合同一致；首当�
 先前运行封装缺main guard导致spawn重入，0更新失败；v3实际两步完成后封装还误判了生产状态名称，
 已保留原日志、执行源码和恢复收据，只修正收尾检查，没有重复已通过的GPU更新。
 这些检查仍不能代替完整batch4×累积4联合微调及真实模型举箱验收。
+
+
+## 真实前缀v2的31k联合300步训练
+
+从同一独立保护、完整SHA核验的A100 31k原模型初始化，未继承上一轮本地联合300权重。
+实际TRAIN0/1/6保留1341窗，90条历史专用行不进入动作监督；单4090 batch4×累积4、有效batch16，
+300更新、20 warmup、cosine、种子20261021，五组峰值LR及参数数量对齐实际A100记录。
+五组均可训练，DINO保持冻结，使用全新CPU FP32 AdamW状态，不导入A100优化器、调度器或RNG。
+
+完整运行已完成300次实际同步更新，耗时3126.865秒；五组clip前梯度始终有限且非零，
+五组最终参数SHA均变化，DINO源文件未变。CUDA峰值allocated29,978,000,896B、
+reserved31,455,182,848B，统计覆盖prepare后固定TEST与训练，不含冷构造；不作A100吞吐比较。
+最终模型仍为12,066,487,572字节，SHA256：
+`387e39f87b881ec88ea6dfe890ebc1068b59b2f469235437dc9c439152523667`。
+本地目录为`prefix_v2/finetune/joint300_prefix_v2`；只保存最终模型，不含可恢复的optimizer状态。
+
+独立CPU审计`prefix_v2/reports/joint300-prefix-v2-final-cpu-audit.json`已通过：
+实际源/最终1944个stored tensor键、shape、dtype一致且全部有限，VLM/Motion/Action分别
+有569/819/257个tensor数值变化；该计数包含实际存储的buffer等，不代替五个optimizer组证据。
+继承统计和归一化bounds未改。固定20窗来自新TEST9、无增强、同一实际输入/标签/私有采样种子，
+训练前后body raw L1为0.0936139→0.0390093，hand raw L1为0.1556405→0.0298143rad；
+normalized分别0.1599599→0.0670159、0.1622109→0.0306504，FM为3.5923547→0.9379273。
+CPU从保存预测/标签复算raw及normalized误差；FM仅核对已保存逐窗值，没有重跑forward。
+新旧轮次使用不同TEST，不能据这两组离线均值宣称跨数据集质量或物理提升。
+物理验收与视频须另行记录，完成训练和离线误差下降都不代表举箱成功。
+
+## 真实前缀v2联合模型的物理结果与视频
+
+实际三初态前后汇总为`prefix_v2/reports/joint300_prefix_v2_paired_results.json`。
+原固定source4/8的31k基线复用已接受的实际运行与完整文件身份，新执行before9及after4/8/9。
+原4/8结果从0/2变为2/2：source4在15.50仿真秒成功终止，箱底最高0.138173米，
+连续有效保持1.000000秒，最大手部法向力总和57.4304N；source8在14.58秒成功终止，
+箱底最高0.131809米，连续保持1.000000秒，最大法向力总和49.1731N。两例均未跌倒。
+新增成功专家TEST9上的模型前后均运行25.02秒，仍无手箱承重接触、有效保持0秒，未完成任务。
+因此实际总计before0/3、after2/3；保留原两例和新增例的分组，不能写成全部通过或总体泛化成功率。
+
+六次运行均数值有限、未跌倒。三对548维完整初态、40个live-pose/open事件、控制/渲染合同及
+startup RNG一致，成功请求公共前缀分别15/14/25次配对；提前成功终止后的缺失请求不补造。
+首策略前RTX图像MAE约source4=0.1242、source8=0.0793、source9=0.0870（0–255），
+保留真实重渲染的小像素差异，不声称严格逐像素单变量对照。未独立消融重采数据、首段监督覆盖及
+本地训练随机性各自的贡献。模型指令、在线DINO历史和localhost请求来自本次episode，
+仿真只从源第一条完整积分状态初始化一次，没有回放teacher动作或注入未来状态。
+
+独立CPU物理审计恢复报告为
+`prefix_v2/reports/joint300-prefix-v2-physical-independent-audit-recovery.json`，已通过。
+它首次复算新before9、after4/8/9的完整50Hz时钟/终态/接触/连续保持/RNG，
+旧before4/8仅绑定原接受报告及实际文件SHA，未重复已通过的数值验收。
+首轮独审在进入物理数值循环前，误将含bytes的serialization artifact与只含path/SHA的字典整体比较，
+错误报告`Final training bytes differ`。实际文件一致；已改为逐path/SHA/bytes检查，原failed报告、
+执行脚本和恢复收据保留，未重训、重仿真或重扫已通过的新权重。
+
+该结果覆盖50Hz任务测量，未证明200Hz所有子步连续接触；保留原始UnifoLM token生产者追溯边界，
+继续使用`--diagnostic-unverified-sonic`。实际`formal_evaluation_eligible`与
+`task_success_attributed_to_policy`仍为false，不改写成官方SIMPLE分数或完整兼容性证明。
+上面的2/3指真实本机物理谓词达成，不等于整套测评全部通过。
+
+完整原片和三组原速对照位于
+`/home/zxc/Videos/CVPR_SIMPLE/2026-10-21_joint31000_prefix_v2/`，
+`manifest.json`保留模型/运行原始绑定，`comparison_manifest.json`封存新解码、SHA和首/中/末视觉QA。
+六原片保留，三组对照全帧输出；source4/8右侧早成功终止后明确标注`LAST FRAME HELD`，
+停帧不是额外保持时间。source9失败片同样完整保留。

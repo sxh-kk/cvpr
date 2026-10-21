@@ -254,5 +254,6 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 ```
 
 使用全新输出目录保存每次尝试。v2从已核验的A100 31k初始化，五组联合更新，DINO冻结，
-不继承前一次本地300步模型或optimizer。实际两步GPU资格通过；完整300步及新物理结果须另验收。
+不继承前一次本地300步模型或optimizer。实际两步GPU资格、完整300步及独立CPU审计通过；
+三初态物理结果为原source4/8成功、新source9失败，总计2/3，细节与追溯限制见LiftBoxHold记录。
 `compare_liftbox_eval.py`按准备记录核对TEST9，并要求source4/8/9前后结果齐全，不能只报告成功初态。

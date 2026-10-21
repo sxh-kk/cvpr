@@ -30,8 +30,9 @@ class Controller:
         return ActionCmd("latent")
 
 
-def warmup_fixture():
+def warmup_fixture(hand_policy="measured"):
     warmup=object.__new__(LivePoseSonicWarmup)
+    warmup.hand_policy=hand_policy
     warmup.session=Session();warmup.input_name="obs_dict";warmup.output_name="tokens"
     warmup.reset()
     return warmup

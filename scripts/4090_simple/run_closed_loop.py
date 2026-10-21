@@ -124,6 +124,8 @@ def parse_args():
                         help="Restore only row 0 of a same-task/same-seed run's complete physical state once, after exact model checks")
     parser.add_argument("--warmup-control", choices=("measured_pose_pd", "live_pose_sonic_v1_1"),
                         default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
+    parser.add_argument("--warmup-hand-policy", choices=("measured", "open"), default="measured",
+                        help="Optional neutral zero hand targets during live-pose SONIC warmup only")
     parser.add_argument("--body-token-projection", choices=("none", "fsq_v1_1"), default="none",
                         help="Optional denormalized body64 projection to the fixed SONIC v1.1 32-level FSQ grid")
     parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(TASKS))
@@ -152,6 +154,8 @@ def parse_args():
         parser.error("--isaac-observation-only requires --sync-observations and Isaac render mode")
     if args.warmup_control == "live_pose_sonic_v1_1" and not args.sync_observations:
         parser.error("--warmup-control live_pose_sonic_v1_1 requires --sync-observations")
+    if args.warmup_hand_policy == "open" and args.warmup_control != "live_pose_sonic_v1_1":
+        parser.error("--warmup-hand-policy open requires --warmup-control live_pose_sonic_v1_1")
     if args.initial_physics_run is not None:
         if (not args.initial_physics_run.is_absolute() or not args.sync_observations or
                 args.episodes_per_task != 1 or len(args.tasks) != 1 or
@@ -279,7 +283,7 @@ def run_worker(args):
         warmup_control = None
         if args.warmup_control == "live_pose_sonic_v1_1":
             from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
-            warmup_control = LivePoseSonicWarmup(args.sonic_resources)
+            warmup_control = LivePoseSonicWarmup(args.sonic_resources, hand_policy=args.warmup_hand_policy)
         agent = DualSourcePsi0Agent(raw.task.robot, client=client, controller=controller,
                                    execute_steps=args.execute_steps, warmup_control=warmup_control,
                                    body_token_projection=args.body_token_projection)

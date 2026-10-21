@@ -266,7 +266,13 @@ agent／controller／HTTP history 随后清空，继续实际物理与策略控�
 报告区分前十帧 PD 与随后 SONIC 预热，保存 helper／encoder SHA、首次 live reference SHA、
 实际预热 decoder 次数及每次 token；交接策略时保留真实 SONIC 历史。
 CPU MJB／ORT 的 1.5 秒物理检查支持它修复首秒失稳，实际 RTX／学习策略效果仍须单独验证。
-它也不自动弥补训练首窗口已开始开手／伸手、而部署仍在站立的状态分布差异。
+默认 `--warmup-hand-policy measured` 保持首次实测手部目标。可与上述 live-pose 选项显式组合
+`--warmup-hand-policy open`：前十帧真实 proprioception 的 PD hold 不变，随后 SONIC 预热阶段
+仅将十四个具名手关节目标设为合法范围内的零位，作为通用张手参考；身体／根朝向参考仍来自首次 live 测量。
+它不读取 teacher 后续动作，也不覆盖观测中的实际手形、RGB 或历史。receipt 记录手部策略、
+首次真实手形、目标及每次 encoder 命令对应的实际手形；配对权重测评必须使用相同的手部预热策略。
+`open` 与其他 warmup-control 组合会被拒绝。它用于缩小训练首窗口与部署闭手启动的手形差异，
+不能据此宣称任务成功，或已经消除身体／伸手阶段等其余分布差异。
 
 `--body-token-projection fsq_v1_1` 是独立、显式的 consumer 选项，默认 `none` 保留连续输出。
 它仅将 HTTP 已反归一化的 body64 四舍五入到 `1/16` 网格（ties-to-even），并限制到

@@ -49,6 +49,13 @@ official encoder to hold the first live pose with the unchanged SONIC decoder
 while the one-second RGB history fills. Its reference and source identities
 are recorded. The default measured-pose PD warmup remains available; neither
 option changes the frozen demonstration producer or task criteria.
+With this live-pose warmup only, optional `--warmup-hand-policy open` sets the
+14 named hand targets to neutral zero after the ten real PD/history samples;
+the default `measured` retains the first measured hand targets. Body/root
+references and actual state/RGB history remain unchanged. Receipts preserve
+the first measured hands, target policy and per-command actual hands. This
+consumer option addresses the closed-hand cold start; physical task success
+still requires a separate measured rollout, and paired runs must match it.
 
 Optional `--body-token-projection fsq_v1_1` projects only denormalized learned
 body64 onto the verified v1.1 32-level grid (step `1/16`, range `[-1, 15/16]`,

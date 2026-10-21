@@ -43,7 +43,10 @@ def reference_input(body_q, reference_wxyz, actual_wxyz):
 
 
 class LivePoseSonicWarmup:
-    def __init__(self, resource_dir):
+    def __init__(self, resource_dir, hand_policy="measured"):
+        if hand_policy not in ("measured", "open"):
+            raise ValueError("Warmup hand policy must be measured or open")
+        self.hand_policy = hand_policy
         import onnxruntime as ort
         root = Path(resource_dir).resolve(strict=True)
         path = root / "model_encoder.onnx"
@@ -64,6 +67,9 @@ class LivePoseSonicWarmup:
         self.phase = "warmup_measured_pose_pd"
         self.receipt = {"kind":"live_initial_pose_sonic_v1_1", "encoder_sha256":ENCODER_SHA256,
             "helper_source_sha256":_sha(__file__),
+            "hand_policy":self.hand_policy, "hand_target_joint_names":list(SIMPLE_HAND_JOINT_NAMES),
+            "hand_policy_scope":"after ten real proprioception samples; initial PD hold is unchanged",
+            "state_forcing":False, "history_injection":False,
             "encoder_mode":0, "reference":"frozen first live absolute joint pose and world root orientation; zero desired joint velocity",
             "heading":"reference world orientation minus current actual robot yaw",
             "initialization_count":0, "encoder_calls":0, "events":[],
@@ -77,12 +83,16 @@ class LivePoseSonicWarmup:
         if self.body_q is None:
             self.body_q = np.array([named[name] for name in BODY_JOINT_NAMES], dtype=float)
             self.root_wxyz = actual_root.copy()
-            self.hands = {name:float(named[name]) for name in SIMPLE_HAND_JOINT_NAMES}
+            measured_hands = {name:float(named[name]) for name in SIMPLE_HAND_JOINT_NAMES}
+            self.hands = (dict(measured_hands) if self.hand_policy == "measured" else
+                          {name:0. for name in SIMPLE_HAND_JOINT_NAMES})
             self.receipt.update(initialization_count=1, reference_body_q29=self.body_q.tolist(),
-                reference_root_wxyz=self.root_wxyz.tolist(), reference_hands=dict(self.hands),
+                reference_root_wxyz=self.root_wxyz.tolist(), reference_hands=measured_hands,
+                first_actual_measured_hands14=list(measured_hands.values()),
+                hand_targets14=list(self.hands.values()),
                 first_sim_time_s=float(observation["sim_time_s"]))
             reference = {"body_joint_names":BODY_JOINT_NAMES,"body_q29":self.body_q.tolist(),
-                "root_wxyz":self.root_wxyz.tolist(),"hands":self.hands}
+                "root_wxyz":self.root_wxyz.tolist(),"hands":measured_hands}
             self.receipt["initial_live_reference_sha256"] = hashlib.sha256(json.dumps(
                 reference,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()
         if len(controller._history) < 10:
@@ -95,5 +105,8 @@ class LivePoseSonicWarmup:
         self.phase = "warmup_live_pose_sonic_v1_1"
         self.receipt["encoder_calls"] += 1
         self.receipt["events"].append({"sim_time_s":float(observation["sim_time_s"]),
-            "actual_root_wxyz":actual_root.tolist(), "token64":token[0].tolist()})
+            "actual_root_wxyz":actual_root.tolist(), "token64":token[0].tolist(),
+            "actual_hand_qpos14":[float(named[name]) for name in SIMPLE_HAND_JOINT_NAMES],
+            "hand_policy":self.hand_policy, "hand_targets14":list(self.hands.values()),
+            "state_forcing":False, "history_injection":False})
         return controller.step(token[0], self.hands, observation)

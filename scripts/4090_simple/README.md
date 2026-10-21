@@ -226,3 +226,33 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 需先完成新快照迁移和`prepare_joint_snapshot.py`，并使用已source本机配置的模型Conda环境。
 可在另一新输出目录以`--prepare-only`检查真实JSON/argv及资源身份；准备完成不代表GPU训练或物理成功。
 300步、有效batch16是本地小包适配预算，不等于A100有效batch256、40k更新的完整日程。
+
+真实热身前缀v2另用`collect_liftbox_prefix_v2.py`重新采集完整轨迹，再由
+`prepare_liftbox_prefix_v2.py`验收和打包；不能向旧视频或DINO缓存拼接历史。
+前30行只有真实图像/状态，`action_valid=false`，不参与动作统计和监督；首个teacher当前帧30
+可读取完整六帧真实历史。已通过的原始数值验收只重绑封存证据和文件身份，缺证据即拒绝。
+本机v2成功专家包为TRAIN0/1/6、VAL3、TEST9，失败2/4/5及候选顺序另行保留；
+这是有记录的成功示范筛选，不是盲测。原source4/8仍须物理对照，另加TEST9。
+
+v2数据、特征和训练产物放在`$CVPR_SIMPLE_RUNTIME/prefix_v2`，该本机路径链接到容量充足的
+`/var/tmp/cvpr-evaluation-zxc-prefix-v2`。以下命令在模型Conda环境运行；DINO已按原提取命令
+对三个split的全部新图像重新提取，并在准备阶段核对逐集SHA和实际历史索引。
+
+```bash
+python scripts/4090_simple/prepare_liftbox_prefix_training_v2.py \
+  --base-run "$CVPR_SIMPLE_RUNTIME/resources/latest31000/run" \
+  --dataset-root "$CVPR_SIMPLE_RUNTIME/prefix_v2/resources/liftbox_prefix_v2_train016_val3_test9" \
+  --dino-cache-root "$CVPR_SIMPLE_RUNTIME/prefix_v2/dino/liftbox_prefix_v2_train016_val3_test9" \
+  --output "$CVPR_SIMPLE_RUNTIME/prefix_v2/finetune/prepared_prefix_v2" \
+  --batch-size 4 --grad-accum 4 --max-steps 300 --warmup-steps 20 --prepare-only
+python scripts/4090_simple/finetune_lift_box_hold_joint.py \
+  --prepared-run "$CVPR_SIMPLE_RUNTIME/prefix_v2/finetune/prepared_prefix_v2" \
+  --base-run "$CVPR_SIMPLE_RUNTIME/resources/latest31000/run" \
+  --alignment "$CVPR_SIMPLE_RUNTIME/reports/a100_unifolm_actual_training_alignment.json" \
+  --output "$CVPR_SIMPLE_RUNTIME/prefix_v2/finetune/joint300_prefix_v2" \
+  --batch-size 4 --grad-accum 4 --max-steps 300 --warmup-steps 20 --train
+```
+
+使用全新输出目录保存每次尝试。v2从已核验的A100 31k初始化，五组联合更新，DINO冻结，
+不继承前一次本地300步模型或optimizer。实际两步GPU资格通过；完整300步及新物理结果须另验收。
+`compare_liftbox_eval.py`按准备记录核对TEST9，并要求source4/8/9前后结果齐全，不能只报告成功初态。

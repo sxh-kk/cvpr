@@ -120,12 +120,32 @@ def uniform_windows(candidates, count=20, expected_episodes=5):
     return selected
 
 
-def future_is_complete(current, stop, frames, timestamps, source_frames, source_episodes, horizon=30, *, source_frame_rule="floor"):
+def training_source_contract(preparation):
+    """Keep v1 TRAIN fixed; v2 may bind its explicit, audited demo curation."""
+    gate = preparation.get("quality_gate", {})
+    if gate.get("dataset_contract") != "cvpr-simple-lift-real-warmup-prefix-v2":
+        return [0, 1, 2]
+    sources = gate.get("training_source_episodes")
+    if (not isinstance(sources, list) or len(sources) != 3
+            or any(type(source) is not int for source in sources)
+            or sources[:2] != [0, 1] or sources[2] not in (2, 5, 6, 7)
+            or gate.get("split_episode_counts") != {"train": 3, "val": 1, "test": 1}):
+        raise ValueError("Prefix v2 requires the explicitly audited TRAIN0/1 plus first successful candidate2/5/6/7; heldouts stay excluded")
+    return sources
+
+
+def future_is_complete(current, stop, frames, timestamps, source_frames, source_episodes, horizon=30, *, source_frame_rule="floor", label_valid=None):
     """Reject LeRobot's repeated tail padding and every gap in future labels."""
     import numpy as np
     if current + horizon > stop:
         return False
     window = slice(current, current + horizon)
+    if label_valid is not None:
+        label_valid = np.asarray(label_valid)
+        if label_valid.shape != frames.shape or label_valid.dtype != np.dtype(bool):
+            raise ValueError("Action validity must be an explicit bool for every observation row")
+        if not label_valid[window].all():
+            return False
     expected_time = frames[window] / 30
     # Converted timestamps are float32. Adjacent subtraction doubles their
     # quantization error; compare absolute 30Hz times with one float32 ULP.
@@ -458,12 +478,19 @@ def eligible_dataset_rows(dataset, expected_episodes, *, source_frame_rule="floo
     metadata = raw.base_dataset.hf_dataset.with_format("numpy")
     columns = {name: np.asarray(metadata[name]).reshape(-1) for name in
                ("frame_index", "timestamp", "source_frame_index", "source_episode_index")}
+    label_valid = None
+    if "action_valid" in metadata.column_names:
+        label_valid = np.asarray(metadata["action_valid"]).reshape(-1)
+        if label_valid.shape != columns["frame_index"].shape or label_valid.dtype != np.dtype(bool):
+            raise ValueError("History-only observation rows require explicit bool action_valid metadata")
+        columns["action_valid"] = label_valid
     candidates = {episode: [] for episode in history.source_episode_ranges[0]}
     for filtered, original in enumerate(history.original_indices):
         episode = int(history.episode_ids[filtered])
         _, stop = history.source_episode_ranges[0][episode]
         if future_is_complete(int(original), stop, columns["frame_index"], columns["timestamp"],
-                              columns["source_frame_index"], columns["source_episode_index"], source_frame_rule=source_frame_rule):
+                              columns["source_frame_index"], columns["source_episode_index"], source_frame_rule=source_frame_rule,
+                              label_valid=label_valid):
             candidates[episode].append(filtered)
     if not all(candidates.values()):
         raise ValueError("Every source episode must retain real complete history/future windows")

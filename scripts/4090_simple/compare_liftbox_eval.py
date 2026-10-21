@@ -1,7 +1,8 @@
 """Read-only paired local LiftBox pilot summary; this is not a benchmark score.
 
 Run after the fit and both after episodes finish. Each --before/--after takes
-SOURCE_EPISODE RUN_DIRECTORY SERVICE_AUDIT_DIRECTORY (repeat for sources 4, 8).
+SOURCE_EPISODE RUN_DIRECTORY SERVICE_AUDIT_DIRECTORY (repeat for sources 4, 8
+and the additional declared v2 expert TEST source, when applicable).
 No model, simulator, training library or CUDA runtime is imported.
 """
 from __future__ import annotations
@@ -364,6 +365,29 @@ def joint_update_witness(training, preparation, expected_updates):
             "routed_parameter_scope":"parameter_step_min may be below global updates; each group must reach final step"}
 
 
+def offline_test_source(preparation, mode):
+    """A v2 curated expert reference never replaces the original physical cases."""
+    gate = preparation.get("quality_gate", {})
+    if gate.get("dataset_contract") != "cvpr-simple-lift-real-warmup-prefix-v2":
+        return 4
+    sources, curation = gate.get("test_source_episodes"), gate.get("test_demo_curation")
+    require(mode == "joint_vlm_motion_action" and isinstance(sources, list) and len(sources) == 1
+            and type(sources[0]) is int and sources[0] in (4, 9, 10, 11)
+            and isinstance(curation, dict) and curation.get("selected_test_source") == sources[0]
+            and curation.get("candidate_order") == [4, 9, 10, 11],
+            "Prefix v2 requires its explicit, audited expert TEST source/curation identity")
+    return sources[0]
+
+
+def physical_case_ids(offline):
+    source = offline["source_episode"]
+    if offline.get("dataset_contract") == "cvpr-simple-lift-real-warmup-prefix-v2":
+        require(type(source) is int and source in (4, 9, 10, 11), "Invalid prefix v2 physical TEST source")
+        return [4, 8] if source == 4 else [4, 8, source]
+    require(source == 4, "Original pilot must retain TEST4 and physical cases4/8")
+    return [4, 8]
+
+
 def offline_comparison(fit, expected_updates=300):
     fit = Path(fit)
     training = read_json(fit / "training_result.json")
@@ -373,6 +397,7 @@ def offline_comparison(fit, expected_updates=300):
     preparation = read_json(fit / "preparation.json")
     mode = training.get("training_mode", "action_only")
     require(mode in ("action_only", "joint_vlm_motion_action"), "Unknown training mode; no comparison witness fallback")
+    test_source = offline_test_source(preparation, mode)
     config = read_json(fit / "run_config.json")
     if mode == "action_only":
         require(training.get("frozen_unchanged") is True and training.get("action_changed") is True and
@@ -410,7 +435,7 @@ def offline_comparison(fit, expected_updates=300):
     manifest = read_json(fit / "test_windows.json")
     windows = manifest["windows"]
     require(manifest["split"] == "test" and manifest["no_aug"] is True and len(windows) == 20 and
-            {w["source_episode"] for w in windows} == {4}, "Expected the same 20 clean TEST4 windows")
+            {w["source_episode"] for w in windows} == {test_source}, "Expected the same 20 clean windows from the declared expert TEST source")
     require([w["ordinal"] for w in windows] == list(range(len(windows))) and
             all(valid_sha(w["input_sha256"]) and w["fm_seed"] == preparation["launcher_arguments"]["seed"] + 10000 + w["ordinal"] * 2
                 and w["inference_seed"] == w["fm_seed"] + 1
@@ -445,7 +470,8 @@ def offline_comparison(fit, expected_updates=300):
         for suffix in ("json", "npz"):
             name = f"test_{stage}.json" if suffix == "json" else f"test_{stage}_actions.npz"
             artifacts[name] = artifact(fit / name)
-    return training, {"windows": windows, "window_count": len(windows), "source_episode": 4,
+    return training, {"windows": windows, "window_count": len(windows), "source_episode": test_source,
+        "dataset_contract": preparation.get("quality_gate", {}).get("dataset_contract"),
         "training_mode":mode, "source_step":source_step, "source_joint_sha256":source_sha, "update_witness":witness,
         "fixed_input_manifest_shared_by_both_stages": True, "normalized_and_raw_targets_bitwise_equal": True,
         "input_identity_scope": "shared immutable window/seed/input-SHA manifest; training producer rehashes each actual batch before both evaluations; summary independently compares saved targets and recalculates action errors",
@@ -458,13 +484,15 @@ def offline_comparison(fit, expected_updates=300):
 
 def compare(fit, before_specs, after_specs, horizon_s=25):
     training, offline = offline_comparison(fit)
+    expected_cases = physical_case_ids(offline)
     def specifications(items):
         result = {int(case): (run, service) for case, run, service in items}
-        require(len(items) == 2 and set(result) == {4, 8}, "Provide exactly sources 4 and 8 for each stage")
+        require(len(items) == len(expected_cases) and set(result) == set(expected_cases),
+                f"Provide exactly physical sources {expected_cases} for each stage; original4/8 cannot be removed")
         return result
     before, after = specifications(before_specs), specifications(after_specs)
     cases = []
-    for case_id in (4, 8):
+    for case_id in expected_cases:
         left = load_case(case_id, *before[case_id], offline["source_joint_sha256"], offline["source_step"], horizon_s)
         right = load_case(case_id, *after[case_id], training["final_checkpoint_sha256"], 300, horizon_s)
         cases.append(pair_cases(case_id, left, right))
@@ -473,8 +501,9 @@ def compare(fit, before_specs, after_specs, horizon_s=25):
             "weights": {"before_step": offline["source_step"], "before_sha256": offline["source_joint_sha256"], "after_fresh_updates": 300,
                         "after_checkpoint": training["final_checkpoint"], "after_sha256": training["final_checkpoint_sha256"],
                         "verification": "each audited server startup hashes its actual model.safetensors file; startup digests must equal the verified preparation source/final training digests, with matching /info checkpoint steps; summary does not reread the model weights"},
-            "offline_test": offline, "physical_cases": cases, "physical_case_count": 2,
-            "limitations": ["Two prespecified local physical cases, not an official SIMPLE benchmark or success-rate estimate.",
+            "offline_test": offline, "physical_cases": cases, "physical_case_count": len(cases),
+            "original_physical_cases": [4, 8], "additional_physical_cases": [c for c in expected_cases if c not in (4, 8)],
+            "limitations": ["Fixed local physical cases, not an official SIMPLE benchmark or success-rate estimate; original4/8 remain mandatory even when expert TEST references are curated.",
                 "Logged task/force measurements are 50 Hz, not evidence of uninterrupted contact at all 200 Hz physics substeps.",
                 "Run completion, exit code zero, bounded_smoke_finished and no fall do not establish task success.",
                 "Controller compatibility/producer policy attribution boundaries are retained; physical predicate success is reported separately.",
@@ -498,7 +527,7 @@ def main():
     report = compare(args.fit_dir, args.before, args.after, args.horizon_s)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    print(json.dumps({"status": report["status"], "output": str(args.output), "physical_case_count": 2}))
+    print(json.dumps({"status": report["status"], "output": str(args.output), "physical_case_count": report["physical_case_count"]}))
 
 
 if __name__ == "__main__":

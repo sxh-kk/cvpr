@@ -170,6 +170,23 @@ def write_joint_fit(root, source_step=31000):
 
 
 class PairedReportingTests(unittest.TestCase):
+    def test_prefix_v2_curated_offline_test_keeps_original_physical_failures(self):
+        gate = {"dataset_contract": "cvpr-simple-lift-real-warmup-prefix-v2",
+                "test_source_episodes": [9],
+                "test_demo_curation": {"selected_test_source": 9, "candidate_order": [4, 9, 10, 11]}}
+        self.assertEqual(compare.offline_test_source({"quality_gate": gate}, "joint_vlm_motion_action"), 9)
+        self.assertEqual(compare.physical_case_ids({"dataset_contract": gate["dataset_contract"], "source_episode": 9}), [4, 8, 9])
+        self.assertEqual(compare.physical_case_ids({"source_episode": 4}), [4, 8])
+        self.assertEqual(compare.offline_test_source({"quality_gate": {"test_source_episodes": [9]}}, "joint_vlm_motion_action"), 4)
+        for change in ({"test_source_episodes": [3]}, {"test_demo_curation": {}},
+                       {"test_source_episodes": [True]}, {"test_source_episodes": [9, 10]}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "explicit, audited"):
+                compare.offline_test_source({"quality_gate": {**gate, **change}}, "joint_vlm_motion_action")
+        with self.assertRaises(ValueError):
+            compare.offline_test_source({"quality_gate": gate}, "action_only")
+        with self.assertRaises(ValueError):
+            compare.physical_case_ids({"source_episode": 9})
+
     def test_completed_nofall_smoke_is_not_task_success(self):
         episode, rows = physical_fixture()
         metrics = compare.physics_metrics(episode, rows, .06)

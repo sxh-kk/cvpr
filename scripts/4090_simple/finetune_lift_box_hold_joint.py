@@ -233,11 +233,14 @@ def train_joint(config, argv, args, preparation):
             candidates, columns, history = shared.eligible_dataset_rows(train, 3, source_frame_rule="ceil")
             indices = [i for episode in sorted(candidates) for i in candidates[episode]]
             sources = [int(columns["source_episode_index"][history.source_episode_ranges[0][ep][0]]) for ep in sorted(candidates)]
-            if sources != [0, 1, 2]:
-                raise ValueError("Only fixed TRAIN source0/1/2 may supply gradients")
+            if sources != shared.training_source_contract(preparation):
+                raise ValueError("Only the explicitly accepted TRAIN source episodes may supply gradients")
             windows = {"source_rows_after_real_history": len(train), "retained_windows": len(indices),
                        "retained_per_episode": {str(ep): len(rows) for ep, rows in candidates.items()}, "source_episode_ids": sources,
                        "policy": "Production six real 5 Hz history frames plus thirty real 30 Hz future labels; ceil source clock, no padded future"}
+            if "action_valid" in columns:
+                windows["history_only_rows"] = int((~columns["action_valid"]).sum())
+                windows["label_policy"] = "History-only rows may supply real DINO history; all current/future thirty labels must have action_valid=true"
             shared.write_json(args.output / "train_window_filter.json", windows)
             result["train_window_filter"] = windows
             result["budget_windows_per_filtered_epoch"] = len(indices)

@@ -291,8 +291,9 @@ def run_gpu(config, argv, args, preparation):
                 "retained_per_episode": {str(ep): len(rows) for ep, rows in candidates.items()},
                 "source_frame_rule": "ceil", "history": "production six real 5 Hz frames", "future": "30 real 30 Hz labels; no tail copies",
             }
-            if result["train_complete_window_filter"]["sources"] != [0, 1, 2]:
-                raise ValueError("Joint check may only train on the fixed TRAIN0/1/2 pilot")
+            accepted = json.loads((args.prepared_run / "preparation.json").read_text())
+            if result["train_complete_window_filter"]["sources"] != shared.training_source_contract(accepted):
+                raise ValueError("Joint check may only train on the explicitly accepted TRAIN source episodes")
             self.train_dataset = torch.utils.data.Subset(train, indices)
             return self.train_dataset, val
 

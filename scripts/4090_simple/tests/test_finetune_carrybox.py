@@ -99,6 +99,37 @@ class LauncherContracts(unittest.TestCase):
         timestamps[615] += .001
         self.assertFalse(launcher.future_is_complete(600, 1800, frames, timestamps, source_frames, source_episodes))
 
+    def test_real_prefix_is_history_only_and_first_teacher_window_is_kept(self):
+        frames = np.arange(100)
+        clocks = frames / 30
+        native = (frames * 50 + 29) // 30
+        source = np.repeat(0, len(frames))
+        valid = frames >= 30
+        args = (100, frames, clocks, native, source)
+        self.assertFalse(launcher.future_is_complete(29, *args, source_frame_rule="ceil", label_valid=valid))
+        self.assertTrue(launcher.future_is_complete(30, *args, source_frame_rule="ceil", label_valid=valid))
+        # Every future label must be real even when both endpoints are valid.
+        valid[45] = False
+        self.assertFalse(launcher.future_is_complete(30, *args, source_frame_rule="ceil", label_valid=valid))
+
+    def test_only_explicit_prefix_v2_curation_can_change_training_source_ids(self):
+        legacy = {"quality_gate": {"training_source_episodes": [0, 1, 5]}}
+        self.assertEqual(launcher.training_source_contract(legacy), [0, 1, 2])
+        gate = {"dataset_contract": "cvpr-simple-lift-real-warmup-prefix-v2",
+                "split_episode_counts": {"train": 3, "val": 1, "test": 1},
+                "training_source_episodes": [0, 1, 5]}
+        self.assertEqual(launcher.training_source_contract({"quality_gate": gate}), [0, 1, 5])
+        for sources in (None, [0, 1, 3], [0, 1, 4], [0, 1, 8], [0, 1, True], [0, 5, 6], [0, 1]):
+            with self.subTest(sources=sources), self.assertRaisesRegex(ValueError, "explicitly audited"):
+                launcher.training_source_contract({"quality_gate": {**gate, "training_source_episodes": sources}})
+
+    def test_action_validity_rejects_numeric_flags_or_truncated_metadata(self):
+        frames = np.arange(100)
+        args = (30, 100, frames, frames / 30, (frames * 50 + 29) // 30, np.repeat(0, 100))
+        for invalid in (np.ones(100, dtype=np.int64), np.ones(99, dtype=bool)):
+            with self.subTest(dtype=invalid.dtype, shape=invalid.shape), self.assertRaisesRegex(ValueError, "explicit bool"):
+                launcher.future_is_complete(*args, source_frame_rule="ceil", label_valid=invalid)
+
     def test_denormalized_metric_uses_original_unclipped_label(self):
         prediction = np.ones((30, 80))
         normalized = np.ones((30, 80))

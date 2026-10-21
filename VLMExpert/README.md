@@ -82,9 +82,18 @@ UnifoLM 的 LeRobot wrapper 在配置 `dino_cache_root` 后，会从原生缓存
 新模式拒绝 layerwise VLM、旧 DiT／CLIP／FiLM／traj2ds 条件。
 state dropout 大于零时需启用 `state_null_token=True`，缺失 state 使用专门的 null token。
 新 head 的 tensor 架构签名可随 safetensors 保存；旧 joint head、缺参数或配置不匹配的权重会被拒绝，
-包括 `strict=False`。新任务从头训练新 head，不恢复旧 optimizer。
+包括 `strict=False`。默认 posttrain 仍从头训练新 head，不恢复旧 optimizer。
 完整 checkpoint 包含联合更新后的 Motion 网络权重；恢复时仍需显式原 Motion checkpoint 来重建其配置和统计协议。
 从本目录直接运行需 `PYTHONPATH=src:..`，或在专用环境安装仓库根目录的 MotionExpert 包。
+
+从已后训练的联合模型开始一个独立任务适配时，显式设置
+`model.pretrained_joint_checkpoint=/绝对路径/run/checkpoints/ckpt_28000/model.safetensors`。
+PosttrainTrainer 此时严格加载已有 VLM、MotionExpert 和 ActionExpert，保留其架构签名和共享权重；
+Qwen 目录只需本机 config／processor，Motion checkpoint 提供构造与统计协议。
+优化器、scheduler、RNG 与任务步数重新初始化，不能同时设置 `train.resume_from_checkpoint`、
+单独的 action-header 路径或 LoRA。未设置该字段的现有 A100 配方行为保持不变。
+冻结 VLM 时沿用 BF16；训练 VLM 时直接载入 FP32 master，避免先经 BF16 舍入。
+本机 CarryBox 流程与独立保留测试见 [4090 环境工具](../scripts/4090_simple/README.md)。
 
 ### UnifoLM 下载、DINO 提取与读取
 

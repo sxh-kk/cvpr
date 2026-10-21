@@ -15,7 +15,7 @@ from typing import Any
 
 from simple.core.task import Task
 from simple.envs.base_dual_env import BaseDualSim
-from simple.envs.observation_contract import named_sim_observation_space
+from simple.envs.observation_contract import named_sim_observation_space, refresh_mujoco_observation
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 class SonicLocoManipEnv(BaseDualSim):
@@ -30,10 +30,16 @@ class SonicLocoManipEnv(BaseDualSim):
         sim_mode="mujoco_isaac",  # =SIM_MODE.MUJOCO_ISAAC
         headless=True, 
         enable_image_publish=False,
+        sync_mujoco_observations=False,
+        isaac_observation_only=False,
         
         *args, 
         **kwargs
     ) -> None:
+        self.sync_mujoco_observations = bool(sync_mujoco_observations)
+        self.isaac_observation_only = bool(isaac_observation_only)
+        if self.isaac_observation_only and (not self.sync_mujoco_observations or "isaac" not in sim_mode):
+            raise ValueError("Observation-only Isaac requires synchronized observations and an Isaac render mode")
         super().__init__(task, sim_mode, headless, sonic_config=sonic_config, *args, **kwargs)
         self.observation_space = named_sim_observation_space(self.observation_space, self.task.robot.joint_names)
         self.sonic_config = sonic_config
@@ -76,10 +82,17 @@ class SonicLocoManipEnv(BaseDualSim):
             return self.last_reward
 
     def _get_obs(self):
+        if self.sync_mujoco_observations:
+            refresh_mujoco_observation(self.mujoco.mjModel, self.mujoco.mjData)
+            if self.isaac:
+                if getattr(self,"isaac_observation_only",False):
+                    self.isaac.refresh_from_mujoco(self.mujoco,update_kinematics=True)
+                else:
+                    self.isaac.refresh_from_mujoco(self.mujoco)
         named_qpos = self.mujoco.get_robot_qpos()
         joint_names = tuple(named_qpos)
         qpos = np.asarray(list(named_qpos.values()), dtype=np.float32)
-        if self.isaac:
+        if self.isaac and not self.sync_mujoco_observations:
             isaacsim_joint_indices = []
             for jname in joint_names:
                 isaac_jname = self.task.robot.jname_mujoco_to_isaac(jname)
@@ -148,7 +161,7 @@ class SonicLocoManipEnv(BaseDualSim):
         if self.isaac is not None:
             self.isaac.reset()
             self.isaac.update_layout()
-            self.isaac.step(self.mujoco)
+            self.isaac.step(self.mujoco, observation_only=self.isaac_observation_only)
 
         self.control_decimal = int((1/self.mujoco.physics_dt) / self.task.render_hz)
         self.step_count = 0
@@ -166,7 +179,7 @@ class SonicLocoManipEnv(BaseDualSim):
 
             # with self._telemetry.timer("mujoco.step"):
             self.mujoco.step(render=False) # FIXME  # only render on last step
-            if self.isaac:
+            if self.isaac and not self.isaac_observation_only:
                 self.isaac.step(self.mujoco)
         
         self.step_count += 1

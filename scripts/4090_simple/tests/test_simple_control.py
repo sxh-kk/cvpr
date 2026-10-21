@@ -217,6 +217,8 @@ int main() {{ std::cout << std::setprecision(17); emit(mujoco_to_isaaclab); emit
         mujoco.mj_forward(model, data)
         controller = SonicV11OnnxController.__new__(SonicV11OnnxController)
         controller.body_kp, controller.body_kd = BODY_KP.copy(), BODY_KD.copy()
+        controller.hand_torque_profile = "mjcf_limits"
+        controller.sync_mujoco_observations = False
         controller.reset()
         inputs = []
         class Session:
@@ -244,6 +246,15 @@ int main() {{ std::cout << std::setprecision(17); emit(mujoco_to_isaaclab); emit
         for name, target, kp in zip(BODY_JOINT_NAMES, expected, BODY_KP):
             aid = next(i for i in range(model.nu) if model.joint(int(model.actuator_trnid[i, 0])).name == name)
             self.assertAlmostEqual(data.ctrl[aid], kp * (target - data.joint(name).qpos[0]), places=5)
+        body_before = {name: data.ctrl[next(i for i in range(model.nu) if model.joint(int(model.actuator_trnid[i, 0])).name == name)] for name in BODY_JOINT_NAMES}
+        controller.hand_torque_profile = "recording_0p7_nm"
+        controller.apply_physics(robot, None, dict.fromkeys(SIMPLE_HAND_JOINT_NAMES, 100.0))
+        for name in SIMPLE_HAND_JOINT_NAMES:
+            aid = next(i for i in range(model.nu) if model.joint(int(model.actuator_trnid[i, 0])).name == name)
+            self.assertAlmostEqual(data.ctrl[aid], 2.45 if "thumb_0" in name else .7)
+        for name, value in body_before.items():
+            aid = next(i for i in range(model.nu) if model.joint(int(model.actuator_trnid[i, 0])).name == name)
+            self.assertEqual(data.ctrl[aid], value)
         controller.reset()
         self.assertEqual(len(controller._history), 0)
         with self.assertRaisesRegex(ValueError, "ten real"):

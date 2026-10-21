@@ -1,4 +1,4 @@
-"""Strict local 20k GPU loading and optional inference on a captured real history.
+"""Strict local joint-checkpoint GPU loading and real-history inference.
 
 This is a model probe, never an episode-success or closed-loop evaluation.
 """
@@ -14,6 +14,8 @@ EXPECTED_SHA = "a000c559a0de0a3be477933aa31ac5c681a5a79fe380c344adb89dde399d535a
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resources", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, help="Prepared newer local snapshot; default is the protected 20k bundle")
+    parser.add_argument("--checkpoint-step", type=int, default=20000)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history", type=Path, help="NPZ: rgb, sim_time_s, state43; genuine single-episode observations")
     parser.add_argument("--instruction", default="pick up the object")
@@ -31,18 +33,29 @@ def main():
 
     save()
     try:
-        from export_bundle import verify_bundle
-        verified = verify_bundle(args.resources)
-        manifest = json.loads((args.resources / "manifest.json").read_text())
-        assert manifest["step"] == 20000 and manifest["joint_sha256"] == EXPECTED_SHA
-        report.update(bundle_verification=verified, checkpoint_sha256=EXPECTED_SHA)
+        from export_bundle import verify_bundle, sha256
+        if args.run_dir is None:
+            assert args.checkpoint_step == 20000, "Use --run-dir for a newer prepared snapshot"
+            verified = verify_bundle(args.resources)
+            manifest = json.loads((args.resources / "manifest.json").read_text())
+            assert manifest["step"] == 20000 and manifest["joint_sha256"] == EXPECTED_SHA
+            run, expected_sha = args.resources / "joint20k", EXPECTED_SHA
+        else:
+            run = args.run_dir.resolve(strict=True)
+            ready = json.loads((run / "LOCAL_RUN_READY.json").read_text())
+            assert ready["status"] == "local_joint_run_prepared" and ready["step"] == args.checkpoint_step
+            expected_sha = ready["joint_sha256"]
+            weights = run / "checkpoints" / f"ckpt_{args.checkpoint_step}" / "model.safetensors"
+            assert sha256(weights) == expected_sha
+            verified = {"state": "prepared_snapshot_byte_verification_passed", "step": args.checkpoint_step}
+        report.update(bundle_verification=verified, checkpoint_sha256=expected_sha,
+                      checkpoint_step=args.checkpoint_step, run_dir=str(run))
         print("Bundle verified; loading original config and full checkpoint", flush=True)
         import numpy as np
         import torch
         from psi.models.psi0 import Psi0Model
         from psi.utils import parse_args_to_tyro_config, apply_legacy_model_config_defaults
 
-        run = args.resources / "joint20k"
         schema = parse_args_to_tyro_config(run / "argv.txt")
         config = schema.model_validate(apply_legacy_model_config_defaults(json.loads((run / "run_config.json").read_text())))
         assert config.model.action_architecture == "dual_source_v1"
@@ -53,7 +66,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         start = time.perf_counter()
-        model = Psi0Model.from_pretrained(run, 20000, config, "cuda:0").to("cuda:0").eval()
+        model = Psi0Model.from_pretrained(run, args.checkpoint_step, config, "cuda:0").to("cuda:0").eval()
         torch.cuda.synchronize()
         assert all(not m.training for m in model.modules())
         report.update(strict_gpu_load="passed", load_seconds=time.perf_counter() - start,

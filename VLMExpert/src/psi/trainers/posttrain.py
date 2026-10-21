@@ -9,6 +9,7 @@ import numpy as np
 from tqdm import tqdm
 from copy import copy, deepcopy
 import contextlib
+from pathlib import Path
 import torch.nn.functional as F
 from typing import Dict, Optional, List, Union, Any, TYPE_CHECKING
 from torch.utils.data import DataLoader
@@ -183,14 +184,30 @@ class PosttrainTrainer(Trainer):
         return vlm_model
 
     def init_models(self):
-        # init pretrained vlm
-        vlm_model = self.init_qwen3vl_models()
-
-        self.model = Psi0Model(
-            model_cfg=self.model_cfg,
-            vlm_model=vlm_model,
-            # dtype=self.dtype
-        )
+        joint_checkpoint = getattr(self.model_cfg, "pretrained_joint_checkpoint", None)
+        if joint_checkpoint is not None:
+            checkpoint = self._joint_initialization_source(joint_checkpoint)
+            checkpoint_step = int(checkpoint.parent.name.removeprefix("ckpt_"))
+            # Construct Qwen from local CONFIG ONLY, then strictly load all
+            # three saved components and proven shared Motion aliases. The
+            # portable Qwen directory deliberately need not hold large weights.
+            self.model = Psi0Model.from_pretrained(
+                checkpoint.parents[2], checkpoint_step, self.cfg, device="cpu",
+                vlm_dtype=self.vlm_param_dtype(),
+            )
+            vlm_model = self.model.vlm_model
+            self.vlm_processor = self.model.vlm_processor
+            self.tokenizer = self.vlm_processor.tokenizer
+            overwatch.info(f"Weight-only joint initialization from {checkpoint}; "
+                           "optimizer, scheduler, RNG and global step are new")
+        else:
+            # Default post-training retains its historical NEW action head.
+            vlm_model = self.init_qwen3vl_models()
+            self.model = Psi0Model(
+                model_cfg=self.model_cfg,
+                vlm_model=vlm_model,
+                # dtype=self.dtype
+            )
         # print("L129", self.model.action_header.time_ins_embed.out_net[0].weight.dtype) # debug
         
         if self.train_cfg.data_parallel == "deepspeed":
@@ -198,12 +215,39 @@ class PosttrainTrainer(Trainer):
             self.model.config = vlm_model.config
             self.model.config.hidden_size = vlm_model.config.text_config.hidden_size
 
-        # The action header is ALWAYS trained from scratch here -- unlike
-        # FinetuneTrainer, this trainer never loads pretrained_action_header_path.
+        # Only the explicit joint-initialization branch loads the old action
+        # head. Legacy pretrained_action_header_path remains unused here.
         self.apply_vlm_trainability()
 
         num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         overwatch.info(f"Model has {num_parameters:,} trainable parameters")
+
+    def _joint_initialization_source(self, source: str) -> Path:
+        """Reject ambiguous resume/partial initialization before allocating models."""
+        if self.train_cfg.resume_from_checkpoint is not None:
+            raise ValueError("Weight-only joint initialization and exact resume are mutually exclusive; "
+                             "unset model.pretrained_joint_checkpoint when resuming an adaptation run")
+        if self.model_cfg.pretrained_action_header_path is not None:
+            raise ValueError("Joint initialization cannot be combined with a separate action-header checkpoint")
+        if self.train_cfg.lora:
+            raise ValueError("PosttrainTrainer joint initialization does not support LoRA")
+        if self.model_cfg.action_architecture != "dual_source_v1":
+            raise ValueError("Joint initialization requires dual_source_v1")
+        checkpoint = Path(source).expanduser()
+        if not checkpoint.is_absolute() or not checkpoint.is_file():
+            raise ValueError("pretrained_joint_checkpoint must be an existing absolute local file")
+        step = checkpoint.parent.name.removeprefix("ckpt_")
+        if (checkpoint.name != "model.safetensors" or not step.isdigit()
+                or checkpoint.parent.name != f"ckpt_{int(step)}"
+                or checkpoint.parent.parent.name != "checkpoints"):
+            raise ValueError("Joint checkpoint must use <run>/checkpoints/ckpt_<step>/model.safetensors")
+        vlm_path = Path(self.model_cfg.model_name_or_path)
+        motion_path = Path(self.model_cfg.motion_checkpoint or "")
+        if not vlm_path.is_absolute() or not (vlm_path / "config.json").is_file():
+            raise ValueError("Joint initialization requires an absolute local Qwen config/processor directory")
+        if not motion_path.is_absolute() or not motion_path.is_file():
+            raise ValueError("Joint initialization requires the local Motion construction/statistics checkpoint")
+        return checkpoint
 
 
     def apply_vlm_trainability(self) -> set[str]:

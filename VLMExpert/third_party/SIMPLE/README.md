@@ -249,6 +249,10 @@ We also support building and running SIMPLE in docker. Please refer to the docum
 
 ## 📊 Simulation Benchmarking Results
 
+本机新增 CarryBox 兼容任务的物理条件、独立初态与本地成功指标见
+[CarryBox 本机适配说明](docs/CARRYBOX_LOCAL.md)。它沿用具名 43 维状态和 SONIC v1.1
+控制接口，结果应标为本地适配任务。
+
 > This is a preliminary benchmark with 6 tasks accompanying the [Psi-0](https://github.com/physical-superintelligence-lab/Psi0) project. Please also checkout Psi-0 for more details of intergrating Psi-0 with SIMPLE.
 
 ![Quick Preview](assets/video/tasks.gif)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -21,16 +22,64 @@ import traceback
 import uuid
 
 from capture_simple import load_fixed_episode
+from video_capture import RawVideoRecorder
 
 
 TASKS = ("G1WholebodyXMovePickTeleop-v0", "G1WholebodyXMoveBendPickTeleop-v0",
          "G1WholebodyHandoverTeleop-v0")
+CARRYBOX_TASK = "G1WholebodyXMoveBendCarryBoxSonic-v0"
+LIFTBOX_TASK = "G1WholebodyLiftBoxHoldSonic-v0"
+SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK)
+
+
+def simulation_render_contract(raw, args):
+    """Bind actual render path separately from the authoritative physical loop."""
+    import inspect
+    isaac = raw.isaac is not None
+    only = bool(getattr(raw,"isaac_observation_only",False))
+    def source_hash(cls):
+        return hashlib.sha256(Path(inspect.getsourcefile(cls)).read_bytes()).hexdigest()
+    return {"sim_mode":"mujoco_isaac" if isaac else "mujoco",
+        "render_engine":"Isaac RTX" if isaac else "MuJoCo EGL",
+        "isaac_observation_only":only, "authoritative_physics":"MuJoCo",
+        "sync_no_time_advance":bool(isaac and only and raw.sync_mujoco_observations),
+        "measurement_hz":float(raw.task.render_hz),"render_hz":float(raw.task.render_hz),
+        "geometry_precision":"full authoritative MuJoCo robot q/root, no decimal rounding; engine representation precision applies",
+        "bridge_source_sha256":source_hash(type(raw.isaac)) if isaac else None,
+        "environment_source_sha256":source_hash(type(raw))}
+
+
+def _json_value(value):
+    # Task state_dict includes NumPy table extents, light transforms and scalars.
+    # Preserve their values without allowing NaN/Inf or arbitrary repr strings.
+    if isinstance(value, Path):
+        return str(value)
+    import numpy as np
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Unsupported report value: {type(value).__name__}")
 
 
 def write_json(path: Path, data):
     temporary = path.with_suffix(path.suffix + ".partial")
-    temporary.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
+    temporary.write_text(json.dumps(data, indent=2, allow_nan=False, default=_json_value) + "\n")
     temporary.replace(path)
+
+
+def write_report_and_close(path: Path, result, close):
+    """Keep failure evidence and release simulation resources even on JSON errors."""
+    try:
+        try:
+            write_json(path, result)
+        except Exception as error:
+            write_json(path, {"status": "error", "report_serialization_error": repr(error),
+                              "previous_status": str(result.get("status")),
+                              "boundary": "report failed; existing trace/video are diagnostic artifacts only"})
+            raise
+    finally:
+        close()
 
 
 def worker_result_errors(result, expected_episodes: int):
@@ -65,7 +114,13 @@ def parse_args():
     parser.add_argument("--sonic-resources", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=21074)
-    parser.add_argument("--tasks", nargs="+", choices=TASKS, default=list(TASKS))
+    parser.add_argument("--expected-checkpoint-step", type=int, default=20000)
+    parser.add_argument("--video", action="store_true", help="Record every genuine camera frame to a checked ffmpeg MP4")
+    parser.add_argument("--sync-observations", action="store_true",
+                        help="Opt in to synchronized integrated MuJoCo qpos/derived state/render observations")
+    parser.add_argument("--isaac-observation-only", action="store_true",
+                        help="Render Isaac only at each synchronized observation; keep all physics in MuJoCo")
+    parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(TASKS))
     parser.add_argument("--episodes-per-task", type=int, default=1)
     parser.add_argument("--episode-start", type=int, default=0)
     parser.add_argument("--dr-level", type=int, choices=(0, 1, 2), default=0)
@@ -83,8 +138,12 @@ def parse_args():
                         help="Explicitly allow official v1.1 with unverified training-encoder binding; no formal score")
     parser.add_argument("--pd-profile", choices=("fixed_cpp_baseline", "official_v1_1_ankle_pitch_1_5"),
                         default="fixed_cpp_baseline")
-    parser.add_argument("--worker-task", choices=TASKS, help=argparse.SUPPRESS)
+    parser.add_argument("--hand-torque-profile", choices=("mjcf_limits", "recording_0p7_nm"),
+                        default="mjcf_limits")
+    parser.add_argument("--worker-task", choices=SUPPORTED_TASKS, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.isaac_observation_only and (not args.sync_observations or args.sim_mode == "mujoco"):
+        parser.error("--isaac-observation-only requires --sync-observations and Isaac render mode")
     args.data_root = args.data_root.resolve(strict=True)
     args.sonic_resources = args.sonic_resources.resolve(strict=True)
     if not args.output.is_absolute() or args.output.resolve().is_relative_to(Path(__file__).resolve().parents[2]):
@@ -150,12 +209,15 @@ def run_worker(args):
               "boundary": "bounded integration smoke; not a formal success-rate benchmark",
               "synchronization": "paused simulation while synchronous localhost HTTP waits",
               "requested_sim_mode": args.sim_mode}
+    result["observation_phase"] = ("post_step_mj_forward_same_qpos" if args.sync_observations
+                                     else "legacy_mj_step_derived_phase")
     write_json(path, result)
     env, client = None, None
     try:
         controller = SonicV11OnnxController(args.sonic_resources,
             compatibility_evidence=args.compatibility_evidence,
-            allow_unverified_compatibility=args.diagnostic_unverified_sonic, pd_profile=args.pd_profile)
+            allow_unverified_compatibility=args.diagnostic_unverified_sonic, pd_profile=args.pd_profile,
+            sync_mujoco_observations=args.sync_observations, hand_torque_profile=args.hand_torque_profile)
         result["controller_identity"] = controller.identity
         result["formal_evaluation_eligible"] = False
         client = MeasuredClient(server_ip="127.0.0.1", server_port=args.port, timeout_s=args.http_timeout)
@@ -167,39 +229,58 @@ def run_worker(args):
         server_info = server_info.json()
         result["server_info"] = server_info
         action_contract = server_info.get("action", {})
-        if (server_info.get("ckpt_step") != 20000 or
+        if (server_info.get("ckpt_step") != args.expected_checkpoint_step or
                 action_contract.get("action_dim") != 80 or
                 action_contract.get("action_chunk_size") != 30 or
                 action_contract.get("action_exec_horizon") != 30 or
                 server_info.get("online_history", {}).get("frames") != 6):
-            raise ValueError("Smoke requires the 20k dual-source server with 6-frame history and 30x80 response")
+            raise ValueError("Smoke requires the requested checkpoint step, 6-frame history and 30x80 response")
         if server_info.get("rtc_enabled") is not False:
             raise ValueError("Bounded synchronous smoke requires RTC disabled; restart the service with RTC off")
         result["initial_metadata_get_requests"] = 2
         metadata = args.data_root / "eval" / args.worker_task / f"dr-level-{args.dr_level}" / "meta/episodes.jsonl"
-        first_config, _ = load_fixed_episode(metadata, args.episode_start, args.data_root)
+        carrybox = args.worker_task in (CARRYBOX_TASK, LIFTBOX_TASK)
+        if carrybox:
+            if args.dr_level != 0:
+                raise ValueError("CarryBox local v1 supports DR level 0 only")
+            first_config = {"metadata": {"physics_dt": .005}}
+        else:
+            first_config, _ = load_fixed_episode(metadata, args.episode_start, args.data_root)
         config = SimLoopConfig().load_wbc_yaml()
         config["ENV_NAME"] = "simple"
         config["SIMULATE_DT"] = float(first_config["metadata"]["physics_dt"])
         mode = "mujoco_isaac" if args.sim_mode == "isaacsim" else args.sim_mode
         env = gym.make("simple/" + args.worker_task, sonic_config=config, sim_mode=mode,
-                       headless=True, dr_level=args.dr_level)
+                       headless=True, dr_level=args.dr_level,
+                       sync_mujoco_observations=args.sync_observations,
+                       isaac_observation_only=args.isaac_observation_only)
         raw = env.unwrapped
+        result["render_contract"] = simulation_render_contract(raw,args)
+        if args.sync_observations and raw.isaac is not None:
+            result["isaac_observation_bridge"] = {"time_delta_s":0,
+                "robot_pose_precision":"full authoritative MuJoCo values; no decimal rounding; Isaac/USD representation precision still applies"}
         client.sim_clock = lambda: float(raw.mujoco.mjData.time)
         agent = DualSourcePsi0Agent(raw.task.robot, client=client, controller=controller,
                                    execute_steps=args.execute_steps)
         for episode_index in range(args.episode_start, args.episode_start + args.episodes_per_task):
-            env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
-            obs, info = env.reset(seed=args.seed, options={"state_dict": env_config, "dr_level": args.dr_level})
+            seed = args.seed + episode_index - args.episode_start if carrybox else args.seed
+            if carrybox:
+                obs, info = env.reset(seed=seed)
+                env_config = deepcopy(raw.task.state_dict())
+                source_episode = {"kind": "independent_local_seed", "seed": seed,
+                                  "task_adapter": raw.task.metadata["task_adapter"]}
+            else:
+                env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
+                obs, info = env.reset(seed=seed, options={"state_dict": env_config, "dr_level": args.dr_level})
             episode_id = f"{args.worker_task}:dr{args.dr_level}:episode{episode_index}:{uuid.uuid4().hex}"
             episode_dir = task_dir / f"episode-{episode_index}"
             episode_dir.mkdir(exist_ok=True)
             event_start = len(client.events)
             agent.reset(episode_id=episode_id)
-            episode = {"episode_id": episode_id, "episode_index": episode_index, "seed": args.seed,
+            episode = {"episode_id": episode_id, "episode_index": episode_index, "seed": seed,
                 "dr_level": args.dr_level, "source_episode": source_episode,
                 "local_environment_config": env_config,
-                "source_metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
+                "source_metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest() if not carrybox else None,
                 "physics_dt_s": float(raw.mujoco.mjModel.opt.timestep),
                 "render_hz": float(raw.task.render_hz), "action_fps": ACTION_FPS,
                 "sonic_decoder_hz": 50, "execute_steps": args.execute_steps,
@@ -218,10 +299,16 @@ def run_worker(args):
             start = time.perf_counter()
             last_png_second, last_obs = -1, obs
             trace_path = episode_dir / "trace.jsonl"
+            video = None
             try:
+                if args.video:
+                    video = RawVideoRecorder(episode_dir / "rollout.mp4", fps=raw.task.render_hz,
+                                             shape=np.asarray(obs["head_stereo_left"]).shape)
                 with trace_path.open("w", buffering=1) as trace:
                     while True:
                         sim_time = float(obs["sim_time_s"])
+                        if video:
+                            video.write(obs["head_stereo_left"], sim_time_s=sim_time)
                         data = raw.mujoco.mjData
                         finite = all(np.isfinite(value).all() for value in (
                             data.qpos, data.qvel, data.qacc, data.ctrl, data.xpos, data.xmat))
@@ -272,6 +359,8 @@ def run_worker(args):
                         record.update(next_sim_time_s=float(obs["sim_time_s"]),
                                       decoder_calls_after_step=controller.decoder_calls,
                                       terminated=bool(terminated), truncated=bool(truncated), reward=float(reward))
+                        if "carry_box_progress" in info or "lift_box_hold_progress" in info:
+                            record["task_progress"] = info.get("lift_box_hold_progress", info.get("carry_box_progress"))
                         trace.write(json.dumps(record, allow_nan=False) + "\n")
                         if terminated or truncated:
                             episode["task_success_observed"] = bool(terminated)
@@ -283,6 +372,16 @@ def run_worker(args):
                 episode.update(status="error", error=repr(error), traceback=traceback.format_exc())
                 raise
             finally:
+                if video:
+                    try:
+                        video.write(last_obs["head_stereo_left"], sim_time_s=float(last_obs["sim_time_s"]))
+                        episode["video"] = video.close()
+                    except Exception as error:
+                        episode.update(status="error", video_error=repr(error))
+                        try:
+                            video.close()
+                        finally:
+                            raise
                 elapsed = float(last_obs["sim_time_s"]) - first_time
                 final_data = raw.mujoco.mjData
                 final_finite = all(np.isfinite(value).all() for value in (
@@ -319,6 +418,8 @@ def run_worker(args):
                         controller.identity["compatibility_status"] == "verified"),
                     diagnostic_loop_executed=bool(controller.decoder_calls > 0 and episode["policy_frames"] > 0),
                     formal_evaluation_eligible=False)
+                if carrybox:
+                    episode["final_task_progress"] = dict(raw.task.progress)
                 episode["strategy_quality_assessment"] = (
                     "ineligible: robot already unstable before first learned action" if episode["fell_before_first_policy_command"]
                     else "ineligible: bounded integration smoke with explicit controller compatibility boundary")
@@ -334,11 +435,14 @@ def run_worker(args):
         raise
     finally:
         result["http_request_count"] = len(client.events) if client else 0
-        write_json(path, result)
-        if client:
-            client.close()
-        if env is not None:
-            env.close()
+        def close_resources():
+            try:
+                if client:
+                    client.close()
+            finally:
+                if env is not None:
+                    env.close()
+        write_report_and_close(path, result, close_resources)
 
 
 def supervise(args):

@@ -73,6 +73,172 @@ observation, reward, terminated, truncated, info = env.step(action)
 每个episode同时reset环境和agent，清空图像、chunk、RTC和SONIC proprioception历史。
 是否站稳、能否操作、任务成功率、GPU峰值与延迟，都必须由真实执行另行验收。
 
+## CarryBox teacher 回放与独立模型评估
+
+新增任务的箱体、场景、初态与本地成功指标见
+[SIMPLE CarryBox 说明](../../VLMExpert/third_party/SIMPLE/docs/CARRYBOX_LOCAL.md)。
+训练示范先从真实 50 Hz q/root 重新编码为官方 v1.1，再构造独立的 30 Hz 数据。
+旧 `action.body_token` 不可重命名后使用。先运行 teacher 物理回放检查标签与控制器：
+
+```bash
+source scripts/4090_simple/local.env.example.sh
+PYTHONNOUSERSITE=1 conda run --no-capture-output -n cvpr-simple-sim310 \
+  python scripts/4090_simple/replay_carrybox_v11.py \
+  --dataset-root "$CVPR_SIMPLE_RUNTIME/resources/carrybox_v11_smoke/train" \
+  --conversion-provenance "$CVPR_SIMPLE_RUNTIME/resources/carrybox_v11_smoke/train/meta/conversion_provenance.json" \
+  --state-action-contract "$CVPR_SIMPLE_RUNTIME/resources/carrybox_v11_smoke/STATE_ACTION_CONTRACT.json" \
+  --data-root "$SIMPLE_DATA_DIR" --sonic-resources "$CVPR_SONIC_DIR" \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/carrybox-teacher-v11" \
+  --episode 0 --seconds 20 --sim-mode mujoco --video
+```
+
+仿真 Conda 环境需要 `pyarrow` 读取 Parquet；视频需要本机 `ffmpeg`。
+脚本核对具名 state43、action14、body qvel29、encoder SHA、独立 token 复算记录和合同快照 SHA。
+仅在开始时设置一次示范的真实 q/root/object 与已记录/推导的速度，随后全程真实物理；
+手速度和箱体速度因源数据未记录而初始置零，并留痕。先以实测姿态 PD 采集至少 0.2 秒真实
+proprioception，再从 source clock 0 开始按 30 Hz 取 teacher token，decoder 50 Hz、PD 200 Hz。
+这不是模型的一秒相机历史温启，也不是模型效果。到示范有效尾部立即停止，不补未来运动。
+报告包含 source episode/frame/time、关节 RMSE、根/箱体姿态误差、跌倒、任务进度、
+`trajectory.npz`、实际接触、CPU 重新载入验证的物理模型 MJB、PNG 和完整 MP4。
+MJB 包含编译后的网格和物理参数；时变状态保存在 NPZ。
+附带 XML 是 MjSpec 诊断 dump，当前 MuJoCo 3.3 attach 导出的 XML 可能丢失 meshdir/默认类，
+不能直接作为可复现模型使用。训练归档没有场景/光照/材质状态，回放该部分采用本地官方任务配方，
+这个 domain 差异也记录在初始化报告。回放脚本完成不自动代表标签已通过控制质量验收。
+可用 `audit_carrybox_replay.py --trajectory <外部trajectory.npz> --robot-mjcf
+<SIMPLE_DATA_DIR>/robots/g1_sonic/g1_29dof_with_hand.xml --output <外部audit目录>`
+在 CPU 重建两条 q/root 的手掌 FK，分别检查根位姿与关节误差贡献。
+重建接触是同一几何下的一致性证据，不能当成源记录的接触力或独立 FK 真值。
+该 MJCF 将 palm 网格融合在 wrist_yaw body 中，接触统计必须包含它。
+
+原生 50 Hz 控制诊断使用 `replay_carrybox_native50.py` 直接读取锁定的原始 Parquet，
+不经过旧 30 Hz 转换包。`recorded-legacy` 只诊断身份未知的原 `action.body_token`，
+必须显式 `--acknowledge-unverified-legacy`，不得当作 v1.1 标签。
+`reencoded-v11` 用记录的当前航向离线编码；`feedback-heading-v11` 每次新命令以真实
+MuJoCo pelvis yaw 消去未来参考 world root 的航向，仅改变官方 encoder 输入 584:644。
+q、dq、未来采样偏移和 world reference 全部保持原记录，参考 anchor A=I；这不是空间重定向。
+离线 actual-q 复算不自动等价于原遥操作 reference command，也不自动通过控制质量验收。
+独立 `feedback-vr-fk-v11` 使用官方 mode 1：以真实 source q/root 的独立 MuJoCo FK
+构造固定 world 腕部与 torso 派生头部参考，再变换到当前真实 pelvis 的完整局部坐标系；
+保留源未来 12 腿关节参考。这是显式构造的新 world-FK reference expert，
+不是从归档恢复原遥操作 head/wrist command；同样必须完整物理回放后才能接受为新示范。
+另一个独立变体 `feedback-wrist-ik-v11` 保持 mode 0，用实际／source root 的当前
+SE(3) 偏差预测本次 0.9 秒参考窗的 root，仅对两臂 14 个参考关节做 world-wrist DLS IK。
+目标为原 source 固定 world 腕 pose；每腕目标位置修正最多 6 cm、旋转最多 10°，
+每关节修正最多 0.20 rad。腿／waist 的 q 和 dq 原值保留；arm dq 加入同一修正曲线的差分。
+报告包含目标、修正、残差与饱和。此变体没有实际箱体反馈或 phase gate，不改 gains/caps；
+它是显式新 reference expert，FK 误差下降不能代替完整抓持／放置验收。
+
+```bash
+PYTHONNOUSERSITE=1 conda run --no-capture-output -n cvpr-simple-sim310 \
+  python scripts/4090_simple/replay_carrybox_native50.py \
+  --source "$CVPR_SIMPLE_RUNTIME/resources/simple_finetune_sources/G1WholebodyXMoveBendCarryBoxSonic-v0" \
+  --contract "$CVPR_SIMPLE_RUNTIME/resources/simple_finetune_sources/CARRYBOX_STATE_ACTION_CONTRACT.json" \
+  --data-root "$SIMPLE_DATA_DIR" --sonic-resources "$CVPR_SONIC_DIR" \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/carrybox-native30-feedback-source0" \
+  --token-mode feedback-heading-v11 --command-hz 30 \
+  --sync-observations \
+  --episode 0 --seconds 60 --warmup-seconds .2 --sim-mode mujoco \
+  --pd-profile official_v1_1_ankle_pitch_1_5 --video
+```
+
+`--command-hz` 默认 50；选择 30 时，只有 `floor(source_elapsed*30)` 变化才更新
+encoder token 与手目标，其余 50 Hz tick 零阶保持，decoder 仍为 50 Hz、PD 200 Hz。
+事件 n 在第 `(n*50+29)//30` 个实际相机 tick 执行，间隔为 40/40/20 ms，不能宣称
+是均匀 30 Hz 物理观测。`command_events.jsonl` 与 `command_rgb/event_*.png` 保存同一
+step 前的真实 RGB/state43/base/object、实际 token/hand14、源帧与真实时间。
+RGB SHA 绑定原始 uint8 像素；MP4 只作预览，不能替代 lossless 训练图像。
+可选 `--record-commands <新外部目录>` 接入独立 lossless recorder，关闭归档不自动授予数据验收。
+完整回放不因首次成功提前结束，保留所有失败阶段与示范有效尾部；验收需另核任务 predicate。
+
+`--sync-observations` 显式刷新 MuJoCo 积分后 qpos 对应的派生 transforms、接触和速度；
+不改变 qpos/qvel 或仿真时钟。Isaac 随后重新同步 bridge，以 Replicator `delta_time=0.0`
+重新渲染，不额外将 root/joint 做十进制 round，Isaac/USD 内部表示精度仍适用；
+state43 始终从具名 MuJoCo 关节读取。controller 在真实 50 Hz proprioception
+采样边界同样刷新后读取 gravity/angular velocity。报告 phase 为
+`post_step_mj_forward_same_qpos`；旧默认保留 `legacy_mj_step_derived_phase`，
+其 qpos 与 xpos/渲染可能相差一个 5 ms 物理步，旧成功回放不能替代新相位验收。
+`run_closed_loop.py` 支持同名选项，后续模型配对评估须与数据采集保持一致。
+
+`--hand-torque-profile recording_0p7_nm` 是独立诊断变量，按固定官方 model12 YAML 与
+deploy MJCF 的静态限矩对照将两侧 thumb0 限制为 2.45 Nm，其余手关节限制为 0.7 Nm。
+归档缺少逐集采集运行配置 stamp，这个兼容参数名不能证明原采集必经某条 body PD 路径。
+默认 `mjcf_limits` 保持现有模型限制，
+不得把这个选项与航向或命令节奏实验同时改动后归因。手指 KP/KD、body gains 和模型均不随该选项改变。
+`run_closed_loop.py` 接受同名 profile 参数，模型配对测试应显式匹配获验收数据的实际设置。
+
+同一组独立初态比较微调前后模型，保留服务 `/info` 身份并明确检查真实 checkpoint step，例如：
+
+```bash
+PYTHONNOUSERSITE=1 conda run --no-capture-output -n cvpr-simple-sim310 \
+  python scripts/4090_simple/run_closed_loop.py \
+  --data-root "$SIMPLE_DATA_DIR" --sonic-resources "$CVPR_SONIC_DIR" \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/carrybox-model-before" \
+  --tasks G1WholebodyXMoveBendCarryBoxSonic-v0 \
+  --seed 10001 --episodes-per-task 5 --seconds 60 \
+  --expected-checkpoint-step 28000 --port 21074 \
+  --sim-mode mujoco --pd-profile official_v1_1_ankle_pitch_1_5 \
+  --diagnostic-unverified-sonic --video
+```
+
+示例 step 28000 必须与所启动服务的真实身份一致；微调后更换对应 step 和独立输出目录。
+CarryBox 每集 seed 依次递增，保存完整 reset config；默认三个旧任务列表和 20k 检查不变。
+`--video` 以每个实际 50 Hz 相机帧写入 ffmpeg rawvideo stdin，包含温启与终止帧，
+不抽帧或复制缺失帧。MP4 编码/收尾错误、非零退出、空视频都会导致结果失败。
+推理慢于仿真时暂停仿真等待 localhost HTTP，视频显示仿真时间；wall time 单独记录，不能据视频宣称实时运行。
+
+## 独立 LiftBoxHold 任务
+
+`simple/G1WholebodyLiftBoxHoldSonic-v0` / `g1_wholebody_lift_box_hold_sonic` 复用 CarryBox 的
+场景、箱体和控制，单独使用 `lift_box_airborne_hand_contact_v1`：旋转后箱体几何最低点
+至少高于固定地板 10 cm，至少一个真实 hand／融合 wrist 掌接触的 normal force >0.01 N，
+无 floor/table 接触，在 50 Hz 真实物理观测中连续保持 1 秒。重复查询不计时，漏采间隔或
+条件中断重置计时。允许膝部等机器人部位辅助，不要求双手或静止悬停，不要求放桌。
+完整 episode 无跌倒和有限状态仍是数据／评估验收的独立条件，任务 predicate 本身不替代它们。
+原 CarryBox 的放桌标准、指令与默认入口不变。
+
+新任务统一指令为：
+“Lift the box so its lowest point is at least 10 cm above the floor, and maintain hand contact without floor or table support for 1 second.”
+
+```bash
+PYTHONNOUSERSITE=1 conda run --no-capture-output -n cvpr-simple-sim310 \
+  python scripts/4090_simple/replay_carrybox_native50.py \
+  --source "$CVPR_SIMPLE_RUNTIME/resources/simple_finetune_sources/G1WholebodyXMoveBendCarryBoxSonic-v0" \
+  --contract "$CVPR_SIMPLE_RUNTIME/resources/simple_finetune_sources/CARRYBOX_STATE_ACTION_CONTRACT.json" \
+  --data-root "$SIMPLE_DATA_DIR" --sonic-resources "$CVPR_SONIC_DIR" \
+  --task G1WholebodyLiftBoxHoldSonic-v0 --episode 0 --seed 10001 \
+  --token-mode feedback-heading-v11 --command-hz 30 --sync-observations \
+  --sim-mode isaacsim --isaac-observation-only \
+  --pd-profile official_v1_1_ankle_pitch_1_5 --hand-torque-profile mjcf_limits \
+  --seconds 60 --video \
+  --output "$CVPR_SIMPLE_RUNTIME/reports/liftbox-source0-rtx" \
+  --record-commands "$CVPR_SIMPLE_RUNTIME/resources/liftbox_candidates/source0-rtx"
+```
+
+`--isaac-observation-only` 是显式可选 RTX 路径：MuJoCo 保持 200 Hz 物理和 50 Hz decoder，
+Isaac 只在 50 Hz observation 边界同步并渲染，不调用其物理 step。
+按本机 Isaac API 刷新 articulation kinematics、PhysX→USD transformations、无物理积分的
+`World.render()` 后以 Replicator `delta_time=0.0` 采集。实际 USD XformCache links／camera、
+sensor pose 与 MuJoCo FK 随 trace/events 留痕，不能仅凭非静态 RGB SHA 证明刷新有效。
+是否更快、相机是否正确随动，须用实际 GPU 回放比较；旧默认仍保留每物理子步 Isaac step。
+固定 G1 USD／MJCF 存在既有 attachment 差：USD 腰链到 torso 为 44 mm，MJCF 为
+35+19=54 mm；shoulder 相对 torso 又分别为 247.78／237.78 mm。
+因此 torso／相机约差 10 mm，腕部差随腰部旋转变化，不能直接称为时间相位错误。
+真实 USD pose 与该静态关节帧差的预测残差已另存运行报告；本任务保留原资产和镜头校准。
+
+EGL 仅作快速物理资格检查。正式新训练采集统一 RTX renderer 合同；不能混用两种渲染域宣称同域效果。
+基础设施／渲染检查须在启动前显式 `--qualification-only`，例如 `--seconds 2`，
+其结果与正式 `pilot_collection` 尝试分别记录，短检查不能转成训练示范。
+Lift 成功后正常 `task_terminated`，原 source 剩余长度与真实 future 边界不改短；
+所有实际命令、lossless PNG、完整 video、NPZ 和终止状态保存。NPZ 的
+`physics_state_integration`／`physics_state_spec` 保存每个真实观测及 `task_terminal`，
+用于独立重建接触力与成功条件。capture 在 Isaac `env.close()` 前封存。
+
+报告绑定新任务指令、task/controller/render 冻结声明 SHA 和 append-only attempt ledger。
+`physical_outcome_status` 在清理前固化，录像／封存出错不能把已发生的物理失败改称基础设施失败。
+同冻结合同的基础设施重试保留全部失败记录；真实失败不得通过择优重跑或调整标准隐藏。
+`run_closed_loop.py --tasks G1WholebodyLiftBoxHoldSonic-v0` 可作微调前后配对，
+controller／renderer／任务合同与独立初态必须一致。
+
 CPU契约检查：
 
 ```bash

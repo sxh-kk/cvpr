@@ -460,5 +460,15 @@ register(
 
 # task_register()
 from .base_dual_env import BaseDualSim
+register(
+    id="simple/G1WholebodyXMoveBendCarryBoxSonic-v0",
+    entry_point="simple.envs.sonic_loco_manip:SonicLocoManipEnv",
+    kwargs={"task": "g1_wholebody_xmove_bend_carry_box_sonic"},
+)
+register(
+    id="simple/G1WholebodyLiftBoxHoldSonic-v0",
+    entry_point="simple.envs.sonic_loco_manip:SonicLocoManipEnv",
+    kwargs={"task":"g1_wholebody_lift_box_hold_sonic"},
+)
 from .tabletop_grasp import TabletopGraspEnv
 from .loco_manipulation import LocoManipulationEnv

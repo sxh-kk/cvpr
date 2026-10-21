@@ -1842,7 +1842,14 @@ class Psi0Model(nn.Module):
 
     # load pretrained vlm+action head, and all the modules needed for predict_action
     @classmethod
-    def from_pretrained(cls, run_dir, ckpt_step, launch_config:LaunchConfig, device):
+    def from_pretrained(cls, run_dir, ckpt_step, launch_config:LaunchConfig, device,
+                        vlm_dtype: torch.dtype | None = None):
+        # Inference keeps its historical BF16 VLM. A trainable weight-only
+        # warm start may request FP32 masters so loading does not first round
+        # a saved FP32 joint checkpoint through BF16.
+        vlm_dtype = torch.bfloat16 if vlm_dtype is None else vlm_dtype
+        if vlm_dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("Joint checkpoint VLM loading supports BF16 or FP32")
         if not os.path.exists(run_dir):
             raise ValueError(f"Pretrained model path {run_dir} does not exist.")
 
@@ -1865,11 +1872,11 @@ class Psi0Model(nn.Module):
             vlm_config._attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
         except Exception:
             vlm_config._attn_implementation = "sdpa"
-        vlm_config.dtype = torch.bfloat16
-        vlm_config.vision_config.dtype = torch.bfloat16
-        vlm_config.text_config.dtype = torch.bfloat16
+        vlm_config.dtype = vlm_dtype
+        vlm_config.vision_config.dtype = vlm_dtype
+        vlm_config.text_config.dtype = vlm_dtype
         vlm_model = Qwen3VLForConditionalGeneration(vlm_config)
-        vlm_model = vlm_model.to(dtype=torch.bfloat16) # type: ignore
+        vlm_model = vlm_model.to(dtype=vlm_dtype) # type: ignore
 
         vlm_state_dict = {}
         for k, v in state_dict.items():

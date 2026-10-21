@@ -3,6 +3,8 @@
 遵守 [交接文档](../../docs/4090_SIMPLE_HANDOFF.md)。本目录提供双Conda环境约束、
 本机路径、资源核验、真实历史／联合模型／HTTP检查及有界SIMPLE控制闭环工具。
 实际结果与未通过的边界见[GPU验收记录](../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)。
+后续最新28k权重的CarryBox独立适配、训练/保留测试划分与实际结果见
+[本地任务适配](../../docs/4090_SIMPLE_CARRYBOX_FINETUNE.md)。
 实际安装／验证记录在本机仓库外 `~/CVPR_Evaluation_runtime/reports/`。
 
 A100已提供CPU导出与保存完成等待工具`export_bundle.py`，4090可通过SSH／rsync拉取资源。
@@ -35,7 +37,9 @@ psi 和 serve dependency-groups**。pip 新版本可用 `--group /绝对路径/p
   `09929d8057b044b53aecaf5c6d7eb71f99e8beb9`（本机源码在仓库外 runtime/lerobot）。
 - FlashAttention 2.7.4.post1 的官方 Python3.11／Torch2.7／CUDA12／C++11 ABI TRUE wheel；
   先查询 `torch._C._GLIBCXX_USE_CXX11_ABI`，不能跨环境照搬扩展。
-  不启用 DeepSpeed 预编译训练算子；本任务不启动训练。
+  不启用 DeepSpeed 预编译训练算子；单卡本地适配使用普通 AdamW。
+  CarryBox 的 CPU v1.1 重编码另需 `onnxruntime==1.23.2`，仿真侧读取示范需
+  `pyarrow==20.0.0`，均已加入对应环境约束。
 
 仿真侧先从 `https://download.pytorch.org/whl/cu128` 安装同版本 Torch／Torchvision，再安装：
 
@@ -173,10 +177,14 @@ OMNI_KIT_ACCEPT_EULA=YES python scripts/4090_simple/run_closed_loop.py \
 50Hz真实本体历史和30Hz高层动作均用仿真时钟；同步HTTP期间仿真暂停，不能据此声称实时。
 正式任务得分还需完整episode、成功判定、视频与足够样本；有界5秒通过仅表示集成链路可执行。
 
-`--diagnostic-unverified-sonic`明确记录SONIC官方v1.1与训练token精确权重绑定仍缺独立证据。
+SONIC 官方 v1.1 版本已经通过固定发布身份与官方 Psi0 训练脚本确认；
+`--diagnostic-unverified-sonic`记录原 UnifoLM token 未逐值复算这一追溯边界。
 不设置该选项时，须提供真实可追溯的 `--compatibility-evidence`，不得自行把未验证项置真。
-不得以默认官方Psi0权重、旧SONIC或额外SIMPLE微调替代UnifoLM-20k测评。
+原 UnifoLM-20k 基线保留；用户后续授权的本地 SIMPLE 适配使用独立训练目录，
+与未适配的 A100 权重分别记录，不能混合报告。
 
 CPU回归：模型环境运行 `python -m unittest discover -s VLMExpert/tests -p test_dual_source_serving.py -v`；
 仿真环境运行 `python -m unittest discover -s scripts/4090_simple/tests -p 'test_*control.py' -v`
 及 `-p test_smoke_reporting.py`。CPU测试覆盖契约与报告，不代替上述GPU／物理检查。
+
+独立的举箱保持任务、RTX同域成功示范和本地微调流程见 [LiftBoxHold记录](../../docs/4090_SIMPLE_LIFTBOX_FINETUNE.md)。旧CarryBox派生包不能用于训练。

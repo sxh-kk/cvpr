@@ -19,6 +19,11 @@ class Psi0ModelConfig(ModelConfig):
     # pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-3-medium-diffusers"
     resnet_store_path: str | None = None # = "cache/checkpoints/resnet18/IN_1M_resnet18.pth"
     pretrained_action_header_path: str | None = None
+    # Weight-only initialization for a NEW dual-source post-training run.
+    # Standard layout: <run>/checkpoints/ckpt_<step>/model.safetensors.
+    # Optimizer/scheduler/RNG remain new; use train.resume_from_checkpoint for
+    # an exact continuation instead, without this initialization override.
+    pretrained_joint_checkpoint: str | None = None
     # precomputed_text_encodings: str = "cache/precomputed_text_encodings.pkl"
     # ckpt_step: Optional[int] = None
 
@@ -164,6 +169,8 @@ class Psi0ModelConfig(ModelConfig):
 
     @model_validator(mode="after")
     def _validate_action_architecture(self) -> "Psi0ModelConfig":
+        if self.pretrained_joint_checkpoint is not None and self.action_architecture != "dual_source_v1":
+            raise ValueError("pretrained_joint_checkpoint requires action_architecture=dual_source_v1")
         if self.vlm_skip_unused_logits and self.action_architecture != "dual_source_v1":
             raise ValueError("vlm_skip_unused_logits requires action_architecture=dual_source_v1")
         if self.action_architecture != "dual_source_v1":
@@ -199,6 +206,7 @@ class Psi0ModelConfig(ModelConfig):
             return str(candidate) if candidate.exists() else p
         self.model_name_or_path = _resolve(self.model_name_or_path)
         self.pretrained_action_header_path = _resolve(self.pretrained_action_header_path)
+        self.pretrained_joint_checkpoint = _resolve(self.pretrained_joint_checkpoint)
         self.resnet_store_path = _resolve(self.resnet_store_path)
         self.motion_checkpoint = _resolve(self.motion_checkpoint)
         return self

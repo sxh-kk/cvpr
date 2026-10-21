@@ -588,7 +588,7 @@ class IsaacSimSimulator(Simulator):
             for key in ['reflection_roughness_constant', 'metallic_constant', 'specular_level']:
                 shader.CreateInput(key, Sdf.ValueTypeNames.Float).Set(obj_info.material[key]) # type:ignore object_shader_param[key]
 
-    def step(self, mujoco_env = None):
+    def step(self, mujoco_env = None, *, observation_only=False):
         if not self.is_isaac_reset:
             self.world.reset()
             # self.__update_object()
@@ -674,6 +674,12 @@ class IsaacSimSimulator(Simulator):
                     zero = np.zeros(num_dofs_articulated, dtype=np.float32)
                     self.articulated_objects[obj_name]._articulation_view.set_joint_velocities(zero)
 
+        if observation_only:
+            if mujoco_env is None:
+                raise ValueError("Observation-only Isaac requires its authoritative MuJoCo state")
+            self.refresh_from_mujoco(mujoco_env,update_kinematics=True)
+            return
+
         if mujoco_env is not None:
             self.sync_states(mujoco_env)
 
@@ -736,12 +742,15 @@ class IsaacSimSimulator(Simulator):
                 self.spheres[si].set_world_pose(position=np.ravel(s.position))
                 self.spheres[si].set_radius(float(s.radius))
 
-    def sync_states(self, mujoco_env):
+    def sync_states(self, mujoco_env, *, exact_mujoco_state=False):
         states = mujoco_env.get_states()
         if self.articulated_objects:
             step_id, joint_state, obj_names, obj_positions, obj_orientations, robot_position, articulated_joints_state, articulate_object_position = states[:]
         else:
             step_id, joint_state, obj_names, obj_positions, obj_orientations, robot_position = states[:]
+        if exact_mujoco_state:
+            joint_state = mujoco_env.get_robot_qpos()
+            robot_position = mujoco_env.mjData.qpos[:7].copy()
         
         for obj_name, obj_pos, obj_ori in zip(obj_names, obj_positions, obj_orientations):
             obj = self.objects[obj_name]
@@ -754,7 +763,7 @@ class IsaacSimSimulator(Simulator):
         for jname, jpos in joint_state.items():
             isaac_jname = self.task.robot.jname_mujoco_to_isaac(jname)
             joint_indices.append(self.robot.get_dof_index(isaac_jname))
-            qpos.append(round(jpos,6))
+            qpos.append(float(jpos) if exact_mujoco_state else round(jpos,6))
         self.robot.set_joint_positions(qpos, joint_indices=joint_indices)
 
         if self.articulated_objects:
@@ -764,7 +773,7 @@ class IsaacSimSimulator(Simulator):
                 articulate_joint_pos = []
                 for articulate_joint, articulate_jpos in articulated_joints_state.items():
                     articulate_joint_indices.append(articulated_object.get_dof_index(articulate_joint))
-                    articulate_joint_pos.append(round(articulate_jpos,6))
+                    articulate_joint_pos.append(float(articulate_jpos) if exact_mujoco_state else round(articulate_jpos,6))
                 articulated_object.set_joint_positions(articulate_joint_pos, joint_indices=articulate_joint_indices)
 
         if self.need_gravity:
@@ -945,6 +954,60 @@ class IsaacSimSimulator(Simulator):
                     [l[3] for l in lines]  # line widths
                 )
 
+
+    def refresh_from_mujoco(self, mujoco_env, *, update_kinematics=False):
+        """Render the refreshed authoritative MuJoCo state without advancing time."""
+        self.sync_states(mujoco_env, exact_mujoco_state=True)
+        if update_kinematics:
+            # Installed Isaac Sim4.5 tensor API requires this after setting joint
+            # states to update link transforms without a physical integration.
+            self.world.physics_sim_view.update_articulations_kinematic()
+            from omni.physx import get_physx_interface
+            get_physx_interface().update_transformations(updateToFastCache=True,updateToUsd=True,
+                updateVelocitiesToUsd=False,outputVelocitiesLocalSpace=False)
+            # Public render() performs Fabric force_update/app.update with
+            # /app/player/playSimulations=False, never world.step().
+            self.world.render()
+        self.update_visuals()
+        # Installed Replicator 1.11.35 explicitly defines delta_time=0 as no
+        # timeline advance. Do not call world.step() for this observation.
+        rep.orchestrator.step(rt_subframes=1, pause_timeline=True, delta_time=0.0)
+        if update_kinematics:
+            self.last_observation_pose_diagnostics=self.observation_pose_diagnostics(mujoco_env)
+
+    def observation_pose_diagnostics(self,mujoco_env):
+        """Actual USD/Fabric camera/link evidence, separate from commanded q."""
+        from pxr import Gf,Usd,UsdGeom
+        stage=omni.usd.get_context().get_stage()
+        cache=UsdGeom.XformCache(Usd.TimeCode.Default())
+        def usd_pose(path):
+            prim=stage.GetPrimAtPath(path)
+            if not prim.IsValid():return {"path":path,"valid":False}
+            transform=Gf.Transform(cache.GetLocalToWorldTransform(prim))
+            quaternion=transform.GetRotation().GetQuat()
+            return {"path":path,"valid":True,"position_m":list(transform.GetTranslation()),
+                    "quaternion_wxyz":[quaternion.GetReal(),*quaternion.GetImaginary()]}
+        prefix=f"{self.workspace_prim_path}/Robot/{self.task.robot.robot_ns}"
+        model,data=mujoco_env.mjModel,mujoco_env.mjData
+        links={}
+        for name in ("pelvis","torso_link","left_wrist_yaw_link","right_wrist_yaw_link"):
+            body=model.body(name).id
+            links[name]={"usd":usd_pose(prefix+"/"+name),"mujoco_position_m":data.xpos[body].tolist(),
+                         "mujoco_quaternion_wxyz":data.xquat[body].tolist()}
+        links[self.task.robot.head_cam_link]={"usd":usd_pose(prefix+"/"+self.task.robot.head_cam_link)}
+        cameras={}
+        for name,camera in self.cameras.items():
+            position,quaternion=camera.get_world_pose(camera_axes="usd")
+            entry={"usd":usd_pose(camera.prim_path),"sensor_position_m":np.asarray(position).tolist(),
+                   "sensor_quaternion_wxyz_usd_axes":np.asarray(quaternion).tolist()}
+            try:
+                cid=model.camera(name).id
+                entry.update(mujoco_position_m=data.cam_xpos[cid].tolist(),mujoco_rotation_usd_axes=data.cam_xmat[cid].tolist())
+            except KeyError:
+                entry["mujoco_camera_missing"]=True
+            cameras[name]=entry
+        return {"mujoco_sim_time_s":float(data.time),"isaac_world_time_s":float(self.world.current_time),
+                "links":links,"cameras":cameras,"scope":"actual USD XformCache and sensor pose after zero-time render; not inferred from RGB hashes"}
 
     def render(self, *args, **kwargs) -> dict[str, np.ndarray]:
         render_products = {}

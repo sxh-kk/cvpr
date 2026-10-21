@@ -3,6 +3,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+import json
+import tempfile
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -12,6 +15,20 @@ spec.loader.exec_module(smoke)
 
 
 class SmokeReportingTests(unittest.TestCase):
+    def test_numpy_state_serialization_and_cleanup_even_if_report_is_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            report = {"status": "finished", "table_size": np.array([1.25, .79, .1]),
+                      "progress": {"success": np.bool_(False), "time": np.float64(.2)}}
+            closed = []
+            smoke.write_report_and_close(path, report, lambda: closed.append(True))
+            self.assertEqual(json.loads(path.read_text())["table_size"], [1.25, .79, .1])
+            self.assertEqual(closed, [True])
+            with self.assertRaises(ValueError):
+                smoke.write_report_and_close(path, {"status": "running", "invalid": np.array([np.nan])}, lambda: closed.append(True))
+            self.assertEqual(len(closed), 2)
+            self.assertEqual(json.loads(path.read_text())["status"], "error")
+
     def test_error_running_or_empty_worker_never_passes(self):
         for status in ("error", "running", "bounded_smoke_finished"):
             self.assertTrue(smoke.worker_result_errors({"status": status, "episodes": []}, 1))

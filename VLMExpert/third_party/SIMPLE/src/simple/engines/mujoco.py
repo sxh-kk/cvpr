@@ -282,6 +282,10 @@ class MujocoSimulator(Simulator):
         self.render_step = 0
 
     def _build_object(self, mjSpec, mjWorld, actor: ObjectActor):
+        from simple.assets.carry_box import CarryBoxAsset
+
+        if isinstance(actor.asset, CarryBoxAsset):
+            return actor.asset.build_mujoco(mjWorld, actor.pose)
         # asset_id = actor.asset.uid
 
         # TODO primitive types

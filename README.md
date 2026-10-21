@@ -122,4 +122,8 @@ DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即
 A100等待20k完整保存后的保护／导出、4090 SSH拉取及SHA核验见[资源交接](docs/4090_SIMPLE_TRANSFER.md)。
 资源到达后的严格GPU模型、真实历史／DINO、本机HTTP与SIMPLE闭环实际边界见
 [4090 GPU验收记录](docs/4090_SIMPLE_GPU_ACCEPTANCE.md)。
+用户后续授权的最新完整28k权重迁移、SONIC v1.1重编码与独立CarryBox适配见
+[4090本地任务适配](docs/4090_SIMPLE_CARRYBOX_FINETUNE.md)；适配结果与原20k基线分别记录。
+
+[4090独立举箱保持任务与真实v1.1数据](docs/4090_SIMPLE_LIFTBOX_FINETUNE.md)：原CarryBox标准保留，真实成功示范验收后再适配。
 第三方代码沿用各目录原许可与版权。

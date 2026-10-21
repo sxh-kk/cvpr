@@ -102,7 +102,8 @@ class SonicV11OnnxController:
     """
     def __init__(self, resource_dir, *, compatibility_evidence=None,
                  allow_unverified_compatibility=False, providers=None,
-                 pd_profile="fixed_cpp_baseline"):
+                 pd_profile="fixed_cpp_baseline", hand_torque_profile="mjcf_limits",
+                 sync_mujoco_observations=False):
         root = Path(resource_dir).resolve(strict=True)
         decoder_path = root / "model_decoder.onnx"
         if _file_sha256(decoder_path) != OFFICIAL_DECODER_SHA256:
@@ -141,6 +142,16 @@ class SonicV11OnnxController:
         elif pd_profile != "fixed_cpp_baseline":
             raise ValueError("Unknown SONIC PD profile")
         self.identity.update(pd_profile=pd_profile, body_kp=self.body_kp.tolist(), body_kd=self.body_kd.tolist())
+        self.sync_mujoco_observations = bool(sync_mujoco_observations)
+        self.identity["observation_phase"] = ("post_step_mj_forward_same_qpos" if self.sync_mujoco_observations
+                                               else "legacy_mj_step_derived_phase")
+        if hand_torque_profile not in ("mjcf_limits", "recording_0p7_nm"):
+            raise ValueError("Unknown hand torque profile")
+        self.hand_torque_profile = hand_torque_profile
+        self.identity["hand_torque_profile"] = hand_torque_profile
+        if hand_torque_profile == "recording_0p7_nm":
+            self.identity["hand_torque_limit_nm"] = {name: 2.45 if "thumb_0" in name else .7 for name in SIMPLE_HAND_JOINT_NAMES}
+            self.identity["hand_torque_source"] = "static fixed SONIC model12 YAML/deploy MJCF cap comparison; original per-episode teleop runtime profile is not stamped; diagnostic opt-in only"
         import onnxruntime as ort
         options = ort.SessionOptions()
         options.intra_op_num_threads = 1
@@ -188,6 +199,11 @@ class SonicV11OnnxController:
         if self._last_time is not None and t < self._last_time - 1e-8:
             raise ValueError("Physics time moved backwards; reset the SONIC controller")
         self._last_time = t
+        if (self.sync_mujoco_observations and
+                (self._last_tick is None or t - self._last_tick >= .02 - 1e-8)):
+            # Body orientation/angular velocity must describe the same integrated
+            # qpos/qvel as joint proprioception at each real 50 Hz control tick.
+            mujoco.mj_forward(model, data)
         body_q = np.asarray([data.joint(name).qpos[0] for name in BODY_JOINT_NAMES])
         body_dq = np.asarray([data.joint(name).qvel[0] for name in BODY_JOINT_NAMES])
         if self._body_target is None:
@@ -240,8 +256,12 @@ class SonicV11OnnxController:
             torque = kp * (target - joint.qpos[0]) - kd * joint.qvel[0]
             if not np.isfinite(torque):
                 raise ValueError("Nonfinite SONIC PD torque")
-            if model.actuator_ctrllimited[aid]:
-                bounded = np.clip(torque, *model.actuator_ctrlrange[aid])
+            lower, upper = model.actuator_ctrlrange[aid] if model.actuator_ctrllimited[aid] else (-np.inf, np.inf)
+            if self.hand_torque_profile == "recording_0p7_nm" and name in SIMPLE_HAND_JOINT_NAMES:
+                cap = 2.45 if "thumb_0" in name else .7
+                lower, upper = max(lower, -cap), min(upper, cap)
+            if np.isfinite(lower) or np.isfinite(upper):
+                bounded = np.clip(torque, lower, upper)
                 self.clipped_torque_elements += int(bounded != torque)
                 torque = bounded
             data.ctrl[aid] = torque

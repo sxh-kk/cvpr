@@ -5,6 +5,12 @@ from gymnasium import spaces
 import numpy as np
 
 
+def refresh_mujoco_observation(model, data):
+    """Refresh derived transforms/contacts at the integrated qpos without stepping."""
+    import mujoco
+    mujoco.mj_forward(model, data)
+
+
 def named_sim_observation_space(original, joint_names):
     if not isinstance(original, spaces.Dict):
         raise TypeError("Named simulation observations require a Dict observation space")

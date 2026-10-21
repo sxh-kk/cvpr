@@ -120,6 +120,10 @@ def parse_args():
                         help="Opt in to synchronized integrated MuJoCo qpos/derived state/render observations")
     parser.add_argument("--isaac-observation-only", action="store_true",
                         help="Render Isaac only at each synchronized observation; keep all physics in MuJoCo")
+    parser.add_argument("--initial-physics-run", type=Path,
+                        help="Restore only row 0 of a same-task/same-seed run's complete physical state once, after exact model checks")
+    parser.add_argument("--warmup-control", choices=("measured_pose_pd", "live_pose_sonic_v1_1"),
+                        default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
     parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(TASKS))
     parser.add_argument("--episodes-per-task", type=int, default=1)
     parser.add_argument("--episode-start", type=int, default=0)
@@ -144,6 +148,14 @@ def parse_args():
     args = parser.parse_args()
     if args.isaac_observation_only and (not args.sync_observations or args.sim_mode == "mujoco"):
         parser.error("--isaac-observation-only requires --sync-observations and Isaac render mode")
+    if args.warmup_control == "live_pose_sonic_v1_1" and not args.sync_observations:
+        parser.error("--warmup-control live_pose_sonic_v1_1 requires --sync-observations")
+    if args.initial_physics_run is not None:
+        if (not args.initial_physics_run.is_absolute() or not args.sync_observations or
+                args.episodes_per_task != 1 or len(args.tasks) != 1 or
+                args.tasks[0] not in (CARRYBOX_TASK, LIFTBOX_TASK) or args.dr_level != 0):
+            parser.error("--initial-physics-run needs an absolute source, synchronized observations, one local DR0 task and one episode")
+        args.initial_physics_run = args.initial_physics_run.resolve(strict=True)
     args.data_root = args.data_root.resolve(strict=True)
     args.sonic_resources = args.sonic_resources.resolve(strict=True)
     if not args.output.is_absolute() or args.output.resolve().is_relative_to(Path(__file__).resolve().parents[2]):
@@ -211,6 +223,8 @@ def run_worker(args):
               "requested_sim_mode": args.sim_mode}
     result["observation_phase"] = ("post_step_mj_forward_same_qpos" if args.sync_observations
                                      else "legacy_mj_step_derived_phase")
+    if args.initial_physics_run is not None:
+        result["initial_physics_run"] = str(args.initial_physics_run)
     write_json(path, result)
     env, client = None, None
     try:
@@ -260,8 +274,12 @@ def run_worker(args):
             result["isaac_observation_bridge"] = {"time_delta_s":0,
                 "robot_pose_precision":"full authoritative MuJoCo values; no decimal rounding; Isaac/USD representation precision still applies"}
         client.sim_clock = lambda: float(raw.mujoco.mjData.time)
+        warmup_control = None
+        if args.warmup_control == "live_pose_sonic_v1_1":
+            from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
+            warmup_control = LivePoseSonicWarmup(args.sonic_resources)
         agent = DualSourcePsi0Agent(raw.task.robot, client=client, controller=controller,
-                                   execute_steps=args.execute_steps)
+                                   execute_steps=args.execute_steps, warmup_control=warmup_control)
         for episode_index in range(args.episode_start, args.episode_start + args.episodes_per_task):
             seed = args.seed + episode_index - args.episode_start if carrybox else args.seed
             if carrybox:
@@ -272,6 +290,13 @@ def run_worker(args):
             else:
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
                 obs, info = env.reset(seed=seed, options={"state_dict": env_config, "dr_level": args.dr_level})
+            initial_physics = None
+            if args.initial_physics_run is not None:
+                from initial_physics_state import InitialPhysicsState
+                initializer = InitialPhysicsState(args.initial_physics_run,
+                    task_id="simple/" + args.worker_task, seed=seed)
+                result["initial_physics_source"] = initializer.receipt
+                obs, info, initial_physics = initializer.restore(raw)
             episode_id = f"{args.worker_task}:dr{args.dr_level}:episode{episode_index}:{uuid.uuid4().hex}"
             episode_dir = task_dir / f"episode-{episode_index}"
             episode_dir.mkdir(exist_ok=True)
@@ -290,6 +315,9 @@ def run_worker(args):
                 "warmup_frames": 0, "policy_frames": 0, "frames": 0,
                 "fell_before_first_policy_command": False,
                 "status": "running", "instruction": raw.task.instruction}
+            if initial_physics is not None:
+                episode["initial_physics"] = initial_physics
+                episode["local_environment_config_scope"] = "same-seed reset model; actual initial coordinates/velocities are in initial_physics"
             pelvis_id = raw.mujoco.mjModel.body("pelvis").id
             episode["initial_pelvis_position_m"] = raw.mujoco.mjData.xpos[pelvis_id].tolist()
             episode["initial_pelvis_quaternion_wxyz"] = raw.mujoco.mjData.xquat[pelvis_id].tolist()
@@ -341,11 +369,15 @@ def run_worker(args):
                         before_action = time.perf_counter()
                         command = agent.get_action(obs, instruction=raw.task.instruction, info=info)
                         action_wall = time.perf_counter() - before_action
-                        phase = "warmup_measured_pose_pd" if agent.warming_up else "policy_latent"
+                        phase = agent.warmup_phase if agent.warming_up else "policy_latent"
                         if not agent.warming_up and episode["policy_frames"] == 0:
                             episode["first_policy_command_sim_time_s"] = sim_time
                             episode["first_policy_command_pelvis_height_m"] = height
                             episode["first_policy_command_pelvis_tilt_degrees"] = tilt
+                            episode["warmup_decoder_calls"] = controller.decoder_calls
+                        if agent.warming_up:
+                            phase_counts = episode.setdefault("warmup_phase_counts", {})
+                            phase_counts[phase] = phase_counts.get(phase, 0) + 1
                         episode["warmup_frames" if agent.warming_up else "policy_frames"] += 1
                         index = (None if agent._chunk_time is None else
                                  int(math.floor((sim_time - agent._chunk_time) * ACTION_FPS + 1e-7)))
@@ -420,6 +452,9 @@ def run_worker(args):
                     formal_evaluation_eligible=False)
                 if carrybox:
                     episode["final_task_progress"] = dict(raw.task.progress)
+                episode["warmup_control"] = (deepcopy(warmup_control.receipt) if warmup_control is not None
+                    else {"kind":"measured_pose_pd", "balance_decoder_during_history":False})
+                episode["warmup_control"]["actual_warmup_decoder_calls"] = episode.get("warmup_decoder_calls", controller.decoder_calls)
                 episode["strategy_quality_assessment"] = (
                     "ineligible: robot already unstable before first learned action" if episode["fell_before_first_policy_command"]
                     else "ineligible: bounded integration smoke with explicit controller compatibility boundary")

@@ -43,6 +43,13 @@ the pinned C++ gains. Optional `--pd-profile official_v1_1_ankle_pitch_1_5`
 checks the official README identity and applies its extra 1.5× ankle-pitch KP/KD
 scales; actual gains and all boundaries are recorded with each run.
 
+The optional consumer flag `--warmup-control live_pose_sonic_v1_1` requires
+`--sync-observations`. After ten real proprioception samples it uses the fixed
+official encoder to hold the first live pose with the unchanged SONIC decoder
+while the one-second RGB history fills. Its reference and source identities
+are recorded. The default measured-pose PD warmup remains available; neither
+option changes the frozen demonstration producer or task criteria.
+
 See [control commands and contracts](../../../scripts/4090_simple/CONTROL.md)
 and the [4090 GPU acceptance record](../../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)
 for verified stages, real observations, latency, and remaining limitations.

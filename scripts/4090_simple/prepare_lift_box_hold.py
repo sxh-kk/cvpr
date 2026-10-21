@@ -14,7 +14,7 @@ import shutil
 import numpy as np
 
 import rollout_carrybox_dataset as common
-from prepare_carrybox_v11 import fixed_split, output_features, VIDEO_KEY, TRAIN_STATE_NAMES
+from prepare_carrybox_v11 import output_features, VIDEO_KEY, TRAIN_STATE_NAMES
 
 TASK_ID = "simple/G1WholebodyLiftBoxHoldSonic-v0"
 INSTRUCTION = "Lift the box so its lowest point is at least 10 cm above the floor, and maintain hand contact without floor or table support for 1 second."
@@ -54,7 +54,7 @@ def lift_measurement(model, data):
             "condition": bool(bottom >= .10 and hand_force > .01 and not support)}
 
 
-def reconstruct_lift(model_path, trajectory, result, active):
+def reconstruct_lift(model_path, trajectory, result, active, *, require_success=True):
     import mujoco
     model = mujoco.MjModel.from_binary_path(str(model_path))
     spec = int(mujoco.mjtState.mjSTATE_INTEGRATION)
@@ -72,7 +72,7 @@ def reconstruct_lift(model_path, trajectory, result, active):
     if tuple(trajectory["state43_joint_names"]) != TRAIN_STATE_NAMES:
         raise ValueError("Lift physical state uses a different named joint order")
     data = mujoco.MjData(model)
-    hold, previous, rows = 0., False, []
+    hold, best, previous, rows = 0., 0., False, []
     for index, (time, state) in enumerate(zip(times, states, strict=True)):
         mujoco.mj_setState(model, data, state, spec)
         mujoco.mj_forward(model, data)
@@ -89,12 +89,13 @@ def reconstruct_lift(model_path, trajectory, result, active):
         row = lift_measurement(model, data)
         delta = 0. if index == 0 else float(time - times[index-1])
         hold = hold + delta if row["condition"] and previous else 0.
+        best = max(best, hold)
         previous = row["condition"]
         rows.append({"sim_time_s": float(time), "hold_s": hold, **row})
-    if not np.isfinite(hold) or hold < 1. - 1e-7:
+    if not np.isfinite(hold) or (require_success and hold < 1. - 1e-7):
         raise ValueError(f"Real LiftBoxHold terminal prefix lacks1s airborne hand-force hold: {hold:.6f}s")
     return {"metric": METRIC, "measurement_hz": 50, "physics_hz": 200,
-            "final_reconstructed_hold_s": hold, "frames_reconstructed": len(rows),
+            "final_reconstructed_hold_s": hold, "best_reconstructed_hold_s": best, "frames_reconstructed": len(rows),
             "terminal_measurement": rows[-1], "integration_state_spec": spec,
             "scope": "Solved contact forces from exact MJB and complete integration states at50Hz; no claim about every200Hz substep"}
 
@@ -162,13 +163,11 @@ def validate_render_contracts(renderers):
         raise ValueError("All training/heldout captures must share the new actual RTX observation-only rendering contract")
 
 
-def validate_pilot(audited):
-    train_order = fixed_split()["train"]
-    if 8 not in audited or 4 not in audited or len(audited) != 5:
-        raise ValueError("Lift pilot requires3 actual TRAIN successes, locked VAL8 and TEST4")
-    train = sorted(set(audited) - {8, 4})
-    if len(train) != 3 or not set(train) <= set(train_order):
-        raise ValueError("Lift TRAIN sources must remain in the original fixed TRAIN split")
+def validate_pilot(audited, validation_source=8):
+    if validation_source not in (8, 3):
+        raise ValueError("Use default VAL8 or the explicitly requested curated offline VAL3")
+    if set(audited) != {0, 1, 2, validation_source, 4}:
+        raise ValueError("Lift pilot requires actual successful TRAIN0/1/2, explicit VAL source and unchanged TEST4")
     hashes = {row[2]["frozen_contract"]["sha256"] for row in audited.values()}
     if len(hashes) != 1:
         raise ValueError("All Lift pilot runs must use one frozen task/controller declaration")
@@ -176,10 +175,44 @@ def validate_pilot(audited):
     validate_render_contracts(renderers)
     if any(row[2].get("run_role") != "pilot_collection" for row in audited.values()):
         raise ValueError("Qualification captures are reported separately from actual pilot collection")
-    return {"train": train, "val": [8], "test": [4]}
+    return {"train": [0, 1, 2], "val": [validation_source], "test": [4]}
 
 
-def pack(runs, output, base_run):
+def validation_curation(audited, validation_source):
+    report = {"selection": "original_offline_validation" if validation_source == 8 else "offline_validation_example_curating",
+              "original_validation_source": 8, "selected_validation_source": validation_source,
+              "training_sources": [0, 1, 2], "test_source": 4,
+              "controller_threshold_hyperparameters_changed": False,
+              "official_benchmark_claim": False}
+    if validation_source == 3:
+        cases = []
+        paths = {str(row[2]["attempt_log"]["path"]) for row in audited.values()}
+        frozen = next(iter(audited.values()))[2]["frozen_contract"]["sha256"]
+        runs = {row["run_output"] for path in paths for row in common.read_jsonl(Path(path))
+                if row.get("source_episode") == 8 and row.get("phase") == "finished"
+                and row.get("frozen_contract_sha256") == frozen}
+        for path in sorted(runs):
+            root = Path(path)
+            result = json.loads((root / "result.json").read_text())
+            trajectory = np.load(root / "trajectory.npz", allow_pickle=False)
+            active = [row for row in common.read_jsonl(root / "trace.jsonl") if row["phase"] == "oracle_teacher_token"]
+            measurement = reconstruct_lift(Path(result["physics_model"]["path"]), trajectory, result, active,
+                                           require_success=False)
+            cases.append({"run_root": path, "source_episode": 8, "actual_status": result["status"],
+                          "actual_task_success_observed": result["task_success_observed"],
+                          "result_sha256": common.sha256(root / "result.json"),
+                          "trajectory_sha256": common.sha256(root / "trajectory.npz"),
+                          "independent_physics": measurement})
+        if not cases:
+            raise ValueError("Curated offline VAL3 must retain the actual original VAL8 run, not only a textual failure claim")
+        report.update(reason="Original VAL8 genuinely failed the unchanged physical task and cannot be a successful expert demonstration. Source3 is a newly executed, independently audited offline validation demonstration.",
+                      original_validation_cases_retained=cases,
+                      required_additional_physical_before_after_source_episodes=[8],
+                      interpretation="Retain and report original8 failure in physical before/after evaluation; this is supervision-example curation, not a replacement benchmark score or hidden failed episode")
+    return report
+
+
+def pack(runs, output, base_run, *, validation_source=8):
     if not output.is_absolute() or output.exists() or output.resolve().is_relative_to(common.REPO):
         raise ValueError("Use a fresh absolute Lift dataset directory outside the repository")
     audited = {}
@@ -189,7 +222,8 @@ def pack(runs, output, base_run):
         if source in audited:
             raise ValueError("Do not select duplicate variants of one source episode")
         audited[source] = item
-    splits = validate_pilot(audited)
+    splits = validate_pilot(audited, validation_source)
+    curation = validation_curation(audited, validation_source)
     base_run = base_run.resolve(strict=True)
     ready = json.loads((base_run / "LOCAL_RUN_READY.json").read_text())
     receipts = []
@@ -222,6 +256,7 @@ def pack(runs, output, base_run):
     report = {"contract": CONTRACT, "task_id": TASK_ID, "instruction": INSTRUCTION, "metric": METRIC,
               "measurement_hz": 50, "source_joint_sha256": ready["joint_sha256"], "splits": splits,
               "render_contract": next(iter(audited.values()))[2]["render_contract"],
+              "validation_source": validation_source, "offline_validation_curation": curation,
               "source_statistics_sha256": common.sha256(base_run / "dataset_statistics.json"),
               "episodes": receipts, "raw_event_selection": "actual ceil(event*50/30) command event; no future RGB",
               "termination": "new actual task_terminated success prefix, not CarryBox source_end or relabeled failure",
@@ -273,12 +308,15 @@ def verify_packed_episode(root, receipt, events):
         raise ValueError("Packed video truncates the actual Lift command events")
 
 
-def verify_pack(root):
+def verify_pack(root, *, validation_source=None):
     """Recompute raw physical/encoder/RGB evidence and bind every packed byte."""
     root = root.resolve(strict=True)
     report = json.loads((root / "LIFT_COMMANDED_ROLLOUT_READY.json").read_text())
     if report.get("contract") != CONTRACT or report.get("task_id") != TASK_ID or report.get("instruction") != INSTRUCTION:
         raise ValueError("Only the new independent Lift commanded-rollout pack is eligible")
+    selected_validation = report.get("validation_source", 8)
+    if validation_source is not None and selected_validation != validation_source:
+        raise ValueError("Explicit validation source differs from the packed declaration")
     for relative, digest in report["packed_files"].items():
         if common.sha256(common.owned_file(root, relative)) != digest:
             raise ValueError(f"Packed Lift artifact changed: {relative}")
@@ -289,8 +327,21 @@ def verify_pack(root):
             raise ValueError("Recomputed new Lift raw evidence differs from the packed provenance")
         verify_packed_episode(root, receipt, item[0])
         audited[item[2]["source_episode"]] = item
-    if validate_pilot(audited) != report["splits"]:
+    if validate_pilot(audited, selected_validation) != report["splits"]:
         raise ValueError("Lift split identities changed")
+    if (selected_validation == 3 and report.get("offline_validation_curation", {}).get(
+            "required_additional_physical_before_after_source_episodes") != [8]):
+        raise ValueError("Curated offline validation must preserve original8 as an explicit physical evaluation case")
+    if selected_validation == 3:
+        cases = report["offline_validation_curation"].get("original_validation_cases_retained", [])
+        if not cases:
+            raise ValueError("Original VAL8 physical case is missing from curated supervision provenance")
+        for case in cases:
+            run = Path(case["run_root"])
+            if (case.get("source_episode") != 8
+                    or common.sha256(run / "result.json") != case["result_sha256"]
+                    or common.sha256(run / "trajectory.npz") != case["trajectory_sha256"]):
+                raise ValueError("Retained original VAL8 result/physical-state evidence changed")
     return report
 
 
@@ -299,16 +350,18 @@ def main():
     parser.add_argument("--runs", type=Path, nargs="+")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--base-run", type=Path)
+    parser.add_argument("--validation-source", type=int, choices=(8, 3), default=None,
+                        help="Packing defaults to8; explicitly choose3 for the requested curated offline validation demonstration")
     parser.add_argument("--verify-root", type=Path, help="Recompute all raw and packed evidence without changing the dataset")
     args = parser.parse_args()
     if args.verify_root is not None:
         if any(value is not None for value in (args.runs, args.output, args.base_run)):
             parser.error("--verify-root cannot be mixed with packing arguments")
-        report = verify_pack(args.verify_root)
+        report = verify_pack(args.verify_root, validation_source=args.validation_source)
     else:
         if not all(value is not None for value in (args.runs, args.output, args.base_run)):
             parser.error("Packing requires --runs --output --base-run")
-        report = pack(args.runs, args.output, args.base_run)
+        report = pack(args.runs, args.output, args.base_run, validation_source=8 if args.validation_source is None else args.validation_source)
     print(json.dumps({"contract": report["contract"], "splits": report["splits"], "training_authorized": False}))
 
 

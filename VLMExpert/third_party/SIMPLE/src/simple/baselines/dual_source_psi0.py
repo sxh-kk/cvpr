@@ -175,7 +175,7 @@ class DualSourcePsi0Agent:
     image or wall-clock timestamp is used to fill missing history.
     """
     def __init__(self, robot, host="127.0.0.1", port=22085, *, controller=None,
-                 client=None, execute_steps=30, session_id=None):
+                 client=None, execute_steps=30, session_id=None, warmup_control=None):
         if controller is None:
             raise ValueError("Supply a verified body_token_v1_1 SONIC controller; legacy WBC is incompatible")
         identity = getattr(controller, "identity", {})
@@ -187,6 +187,7 @@ class DualSourcePsi0Agent:
         if isinstance(execute_steps, bool) or not isinstance(execute_steps, int) or not 1 <= execute_steps <= 30:
             raise ValueError("execute_steps must be an integer in [1, 30]")
         self.robot, self.controller = robot, controller
+        self.warmup_control = warmup_control
         self.client = client or DualSourceHttpActionClient(host, port)
         self.execute_steps = execute_steps
         self.session_id = session_id or f"dual-source-{uuid.uuid4().hex}"
@@ -198,12 +199,15 @@ class DualSourcePsi0Agent:
         self._chunk_time = None
         self._last_time = None
         self.warming_up = True
+        self.warmup_phase = "warmup_measured_pose_pd"
 
     def reset(self, *, episode_id=None, **kwargs):
         self._clear_local()
         self.episode_id = str(episode_id) if episode_id is not None else uuid.uuid4().hex
         self.client.reset(self.session_id, self.episode_id)
         self.controller.reset()
+        if self.warmup_control is not None:
+            self.warmup_control.reset()
 
     def get_action(self, observation, instruction=None, info=None, **kwargs):
         if self.episode_id is None:
@@ -233,6 +237,10 @@ class DualSourcePsi0Agent:
                     images, instruction or "", {"states": states}, history=history))
             except HistoryWarmingUp:
                 self.warming_up = True
+                if self.warmup_control is not None:
+                    command = self.warmup_control.command(self.robot, self.controller, observation)
+                    self.warmup_phase = self.warmup_control.phase
+                    return command
                 return self.controller.hold(observation)
             if chunk.shape != (30, 80) or not np.isfinite(chunk).all():
                 raise ValueError("Expected a finite (30, 80) denormalized policy action chunk")

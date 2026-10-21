@@ -33,6 +33,20 @@ class LiftDatasetContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"RTX"):
             packing.validate_render_contracts([simulation_render_contract(FakeEnvironment(False),types.SimpleNamespace())]*5)
 
+    def test_curated_offline_val3_requires_explicit_choice_and_fixed_train_test(self):
+        from run_closed_loop import simulation_render_contract
+        renderer = simulation_render_contract(FakeEnvironment(),types.SimpleNamespace())
+        def audited(sources):
+            return {source:([],[],{"frozen_contract":{"sha256":"same"},"render_contract":renderer,
+                                   "run_role":"pilot_collection"}) for source in sources}
+        curated = audited((0,1,2,3,4))
+        with self.assertRaisesRegex(ValueError,"explicit VAL"):
+            packing.validate_pilot(curated)
+        self.assertEqual(packing.validate_pilot(curated,3),{"train":[0,1,2],"val":[3],"test":[4]})
+        self.assertEqual(packing.validate_pilot(audited((0,1,2,8,4))),{"train":[0,1,2],"val":[8],"test":[4]})
+        with self.assertRaisesRegex(ValueError,"TRAIN0/1/2"):
+            packing.validate_pilot(audited((0,1,5,3,4)),3)
+
     def test_repeated_attempts_are_facts_without_a_one_shot_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

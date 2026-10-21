@@ -239,6 +239,35 @@ Lift 成功后正常 `task_terminated`，原 source 剩余长度与真实 future
 `run_closed_loop.py --tasks G1WholebodyLiftBoxHoldSonic-v0` 可作微调前后配对，
 controller／renderer／任务合同与独立初态必须一致。
 
+失败 source8 仍须保留，并在微调前后覆盖其真实初态。评估客户端可额外指定：
+
+```bash
+--tasks G1WholebodyLiftBoxHoldSonic-v0 --episodes-per-task 1 --seed 10009 \
+--sync-observations \
+--initial-physics-run /home/zxc/CVPR_Evaluation_runtime/reports/liftbox-source8-rtx-v1
+```
+
+此选项要求单任务、单 episode、DR0、相同 task／seed。`initial_physics_state.py` 先核对源 MJB SHA，
+再逐字段精确比较新环境与 MJB 的静态模型：名字／顺序、关节与 actuator、几何／mesh／碰撞、
+质量／惯性、相机、solver 与 timestep 等均须一致；仅排除 MJB reload 会清零的 mjSpec compilation signature。
+随后只读取 NPZ 的首个完整 `mjSTATE_INTEGRATION`，在 reset 后向原有 mjData 一次恢复位置、速度、
+ctrl、外力、warmstart 和真实时间；保留 model／data 及缓存 view，`mj_forward` 后重新获取当前真实 RGB。
+agent／controller／HTTP history 随后清空，继续实际物理与策略控制。
+报告保存源 result／MJB／NPZ SHA、首状态与恢复后 SHA、双方静态模型摘要、初始化次数 1。
+不会读取后续 teacher 动作或轨迹行，也不复用历史 RGB。未传此选项时仍为标准 reset。
+
+部署需积累一秒真实 RGB 历史。默认 `measured_pose_pd` 在这一秒锁定首帧身体关节目标，
+不运行平衡 decoder；它不保证自由浮动机器人站稳。可显式加
+`--warmup-control live_pose_sonic_v1_1 --sync-observations`：先采十帧真实 50 Hz proprioception，
+随后用固定官方 v1.1 encoder 的 mode0 编码首个 live 关节姿态／世界根朝向保持参考，
+零期望关节速度、当前实际 yaw 归一化，继续原有 50 Hz decoder／200 Hz PD，直至图像历史满。
+重复的 encoder reference 表示期望保持姿态，不能当作重复采样的相机或 proprioception。
+此 consumer 选项不读取 teacher 未来、不改模型、增益、任务标准或冻结的示范采集器；默认行为保留。
+报告区分前十帧 PD 与随后 SONIC 预热，保存 helper／encoder SHA、首次 live reference SHA、
+实际预热 decoder 次数及每次 token；交接策略时保留真实 SONIC 历史。
+CPU MJB／ORT 的 1.5 秒物理检查支持它修复首秒失稳，实际 RTX／学习策略效果仍须单独验证。
+它也不自动弥补训练首窗口已开始开手／伸手、而部署仍在站立的状态分布差异。
+
 CPU契约检查：
 
 ```bash

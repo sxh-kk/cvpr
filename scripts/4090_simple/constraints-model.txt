@@ -2,6 +2,7 @@ torch==2.7.0+cu126
 torchvision==0.22.0+cu126
 numpy==1.26.4
 pyarrow==20.0.0
+av==18.1.0
 onnxruntime==1.23.2
 pillow==11.3.0
 safetensors==0.6.2

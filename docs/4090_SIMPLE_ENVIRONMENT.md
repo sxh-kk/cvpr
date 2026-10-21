@@ -11,6 +11,14 @@
 不要据此推断后续检查结果。首次环境安装没有登录A100；后续迁移仅通过SSH读取已发布包，
 没有启动、停止或修改A100训练。
 
+2026-10-21本地举箱适配补充：两套Conda实际分别安装PyAV18.1.0（Python3.11模型）
+和PyAV16.0.1（Python3.10仿真；18.1要求Python至少3.11）。启用`PYTHONNOUSERSITE=1`
+重做两边`pip check`均通过，2248帧lossless视频跨环境解码与原始RGB逐像素一致。
+本机当前版本、解释器及模块路径见仓库外
+`reports/liftbox_finetune/environment-{model311,sim310}.json`与同目录`pip-check-*.txt`。
+本次补充不代表学习策略已通过任务，数据和模型实际结果见
+[举箱适配记录](4090_SIMPLE_LIFTBOX_FINETUNE.md)。
+
 ## 本机与环境
 
 - Ubuntu 22.04.5 LTS，x86_64，内核 `6.8.0-138-generic`；系统内存约 187 GiB。

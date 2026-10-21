@@ -11,5 +11,6 @@ hpp-fcl==2.4.4
 cmeel-urdfdom==3.1.1.1
 onnxruntime==1.23.2
 pyarrow==20.0.0
+av==16.0.1
 warp-lang==1.7.0
 setuptools<81

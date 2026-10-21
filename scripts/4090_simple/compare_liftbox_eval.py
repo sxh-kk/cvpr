@@ -354,7 +354,9 @@ def joint_update_witness(training, preparation, expected_updates):
                 "Joint five-group gradients must be finite and nonzero at every synchronized update")
         for key in ("used_group_lrs", "next_group_lrs"):
             lrs = update.get(key)
-            require(isinstance(lrs, dict) and set(lrs) == set(JOINT_GROUPS) and
+            # Trainer.group_lrs() names metrics lr_<group>; gradient/hash
+            # receipts above use the bare optimizer group names.
+            require(isinstance(lrs, dict) and set(lrs) == {f"lr_{name}" for name in JOINT_GROUPS} and
                     all(finite(v, "joint applied LR") >= 0 for v in lrs.values()), "Joint applied LR witnesses missing")
     return {"training_mode":"joint_vlm_motion_action", "before_group_sha256":before, "after_group_sha256":after,
             "all_five_groups_changed":True, "dino_files_unchanged":True, "dino_file_sha256":dino,

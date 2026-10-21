@@ -33,12 +33,12 @@ TRAIN候选按原训练集次序采集，失败保留并拒绝入包；首个pil
 因此原预选五条结果是4/5，而成功示范包是另行筛选的5条；不能把后者称为未筛选成功率。
 这只是小规模本地任务适配，不能宣称为官方SIMPLE榜单成绩或广泛泛化能力。
 
-初始化使用独立冻结的A100 `ckpt_28000`，其身份和模型GPU验收见CarryBox记录。
-已完成的300步诊断轮只更新ActionExpert，VLM/MotionExpert/DINO冻结；保留A100归一化统计，
+历史Action-only诊断轮初始化使用独立冻结的A100 `ckpt_28000`，其身份和模型GPU验收见CarryBox记录。
+该300步诊断轮只更新ActionExpert，VLM/MotionExpert/DINO冻结；保留A100归一化统计，
 不从SIMPLE或TEST重估bounds。优化器、scheduler和step从新任务0开始；
 不读取或改变A100训练optimizer/RNG。
 
-按用户后续“最新权重、与A100实际联合训练一致”的要求，正式联合pilot将改用重新核对的
+按用户后续“最新权重、与A100实际联合训练一致”的要求，本轮已完成的联合pilot实际使用重新核对的
 `ckpt_31000`；前述Action-only诊断和28k失败对照保持原始身份。31k已于2026-10-21
 14:05:29（北京时间）完成独立模型硬链接保护，确认完整model/optimizer/scheduler/8卡RNG文件和
 训练日志保存完成标记，仅迁移模型及构造小文件。联合模型12,066,487,572字节，SHA256
@@ -52,7 +52,10 @@ TRAIN候选按原训练集次序采集，失败保留并拒绝入包；首个pil
 `6733128a3d8a523b1418b06bca3cdf61c8b0987f`，encoder SHA256
 `fb97de22819b2057b41459802128d91723d91a25f0ad73e7bfc41a9cf8365bae`，
 decoder SHA256 `34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509`。
-新数据所有标签均由这份encoder实际产生并执行；原A100训练集逐行token对应的完整二进制身份记录
+新数据的body64由这份encoder实际生成并交给decoder执行；hand14来自原示范的具名手关节目标，
+state43和RGB为同一命令时刻的真实观测。encoder的1751维mode0输入按固定配方构造十个时刻的
+期望q/dq/heading参考窗口，与decoder使用的十帧真实50Hz本体历史分别记录。
+原A100训练集逐行token对应的完整二进制身份记录
 仍缺失，不能用新teacher记录替原训练记录背书。因此当前物理运行显式保留
 `--diagnostic-unverified-sonic` 边界，不报告官方榜单成绩；这不是“本机SONIC版本未知”。
 
@@ -187,7 +190,7 @@ RTX重渲像素并非完全确定：首个策略指令前截图MAE约0.122/255�
 - [旧SIMPLE脚本](https://github.com/physical-superintelligence-lab/Psi0/blob/cda3fdfafe47cb6fa75400d013de1bd36e3cea05/scripts/train/psi0/finetune-sonic-simple-psi0.sh#L65-L119)显式`no-tune-vlm`，Action78/state43，属于另一配方。
 
 原版没有本项目新增的独立MotionExpert。用户已要求本地与A100实际联合更新保持一致，
-所以后续应启用VLM+Motion+Action五组优化，而非复用Action-only诊断轮的冻结设置。
+所以本轮联合pilot已启用VLM+Motion+Action五组优化；历史Action-only诊断轮保留原冻结设置。
 保留本模型6-block双来源结构、256×320视觉协议、真实6帧历史与冻结DINO，不把官方12-block架构
 或旧字段直接覆盖进当前checkpoint。300步小包实验也不能称为复现官方40k训练日程。
 
@@ -201,7 +204,8 @@ reserved25,578,962,944B。证据为仓库外
 随后实际microbatch4、累积1的两步扩大检查也通过，五组梯度有限、完整参数哈希变化；
 CUDA峰值allocated23,564,754,944B、reserved24,989,663,232B。
 只采用`reports/liftbox-joint-b4-gpu-check-v3`的真实b4配置结果；早先stdin启动失败及b1误标尝试
-分别保留失败/范围更正记录，未纳入b4验收。正式累积4与完整300更新还须由正式job检查。
+分别保留失败/范围更正记录，未纳入b4验收。正式累积4与完整300更新现已完成，结果见下文；
+两步资格检查本身仍不代表完整训练或物理任务通过。
 
 为容纳本机显存，独立本地入口使用`CpuMasterAdamW`：模型及梯度保持FP32，沿用生产
 安全检查、逐组裁剪与scheduler，把裁剪后的梯度复制到CPU上的原生`torch.optim.AdamW`
@@ -246,7 +250,7 @@ GPU实测CPU master和moments确实在CPU，未恢复任何A100 optimizer/schedu
 真实TRAIN梯度仅来自源0/1/2的1290个完整历史/未来窗口；固定20个TEST窗口只在step0和最终
 更新后计算，使用独立RNG，不能用于训练、选步数、估计bounds或提前停止。
 
-正式本地预算为microbatch4、累积4、300更新、warmup20、cosine、seed20261021，
+正式本地实际完成microbatch4、累积4、300更新、warmup20、cosine、seed20261021，
 五组峰值LR与A100相同；不恢复A100 optimizer/scheduler/RNG。数据窗口访问预算与原Action300
 同为最多4800次，但训练组件和LR不同，不能把结果差异只归因于解冻组件。
 仅最终`model.safetensors`以staging目录保存并rename，记录配置、源码SHA和provenance；
@@ -254,13 +258,74 @@ GPU实测CPU master和moments确实在CPU，未恢复任何A100 optimizer/schedu
 
 `--base-run`只允许同源协议的已准备快照：严格核对新旧原训练model/data配置、统计字节、
 DINO契约、同一Qwen目录、保存完成记录及实际模型SHA、同step的Motion导出与实际文件SHA。
-报告将实际初始化step/SHA与原示范质量的28k权重锚点分别记录；不以改JSON方式伪造新示范验收。
-运行命令见[工具说明](../scripts/4090_simple/README.md)。联合训练完成后仍须冷加载最终模型，
-用相同31k基线初态、采样seed、真实历史、平衡预热和FSQ协议运行完整物理对照。
+报告已将实际初始化step/SHA与原示范质量的28k权重锚点分别记录；不以改JSON方式伪造新示范验收。
+运行命令见[工具说明](../scripts/4090_simple/README.md)。联合训练后已冷加载最终模型，
+用相同31k基线初态、采样seed、真实历史、平衡预热和FSQ协议完成物理对照。
 
-31k正式job已启动于仓库外`finetune/lift_box_hold_31000_joint300_rtx_v1`，
+31k正式job已在仓库外`finetune/lift_box_hold_31000_joint300_rtx_v1`完成训练、最终保存与固定TEST对比，
 阶段状态为`reports/joint31000-pipeline-v2-state.json`，训练日志为
-`reports/liftbox-joint31000-training.log`。执行过程依次完成300步、最终模型冷加载、
-source4/8各自fresh服务的31k基线与ckpt300物理对照，再汇总真实predicate和视频；
-未完成时不填写任务成功结果。更早仅等待资源的协调进程因冷启动手形修正而结束，未启动训练，
+`reports/liftbox-joint31000-training.log`。source4/8分别以fresh服务冷加载31k基线和ckpt300，
+四个物理回合均已完整结束；本轮联合模型仍未完成任务，具体结果见下。
+更早仅等待资源的协调进程因冷启动手形修正而结束，未启动训练，
 其状态及原因保留；独立迁移进程和A100训练未被中断。
+
+## 31k联合300步的训练与离线结果
+
+以下结果只对应本轮31k联合pilot，不与历史28k Action-only300合并。
+`training_result.json`确认单4090、batch4、累积4、有效batch16完整完成300次更新，
+入口墙钟3381.09秒，约56分21秒。实际CUDA峰值allocated29,951,192,064B、
+reserved31,518,097,408B；统计从prepare后开始，覆盖固定前后TEST及训练，不含冷构造模型。
+这不是A100八卡有效batch256、40k更新的全量训练预算或吞吐验收。
+
+初始global step和CPU AdamW step均为0，原生AdamW状态项为0；最终完成300次CPU-master更新，
+master及实际moments均在CPU。300次同步更新的五组clip前梯度范数全部有限且非零，
+Action、语言骨干、视觉塔、投影层、Motion五组完整参数SHA均变化，冻结DINO源文件SHA未变。
+最终仅保存12,066,487,572字节的单文件`ckpt_300/model.safetensors`，SHA256为
+`31745da5b82a4bc77c8ffdd9414325881d6e3b5bb3e4a15269a0599442201aca`。
+保留配置、源码和provenance；未保存optimizer状态，不能据此完整恢复原训练的优化器及调度状态。
+
+独立CPU审计`reports/liftbox-joint31000-final-cpu-audit.json`已通过：实际源模型/最终模型SHA匹配，
+两份文件均有1944个stored tensor，键、shape及dtype一致，所有数值有限。
+按实际模块前缀，VLM/Motion/Action分别有569/825/257个tensor数值变化；该计数包含存储的buffer等，
+不是独立可训练参数数量，也不替代trainer对五个optimizer组的具名参数检查。
+审计同时复核原归一化统计及固定TEST保存结果；未重新执行模型forward或物理仿真。
+
+相同20个TEST窗口、相同真实输入和独立固定RNG，31k初始化到联合300后的均值为：
+
+- body64反归一化L1：0.0968688 → 0.0346399；归一化L1：0.1658701 → 0.0593234。
+- hand14反归一化L1：0.1934235 → 0.0313633；归一化L1：0.2013352 → 0.0323715。
+- FM loss：3.4329155 → 0.7208178。
+
+CPU审计从保存的预测和标签独立复算raw/normalized误差，并核对前后标签逐值相同；
+FM只核对已保存逐窗有限值及均值，没有重跑forward。继承A100统计未重估，TEST未参与训练或选步。
+离线误差下降和模型文件审计通过均不等于举箱成功。
+
+## 31k联合300步的真实物理结果
+
+source4和source8的31k基线、联合300模型共四回合均实际完成25.02仿真秒，
+每条1251个50Hz任务测量，均有限、未跌倒。**前后均0/2完成任务**：
+手箱承重接触及法向力全0，箱底最高约−0.000122米，连续有效保持0秒。
+最大躯干倾角source4为8.042→25.048度、source8为14.948→23.927度；
+视频可见联合模型伸手、弯腰更明显，但手未到箱体两侧，不能将动作变化称为举箱改善。
+
+四回合统一使用1秒真实live-pose/open热身、FSQ v1.1、模型30帧输出且client执行30帧、
+RTC关闭、flow10步。两对初始548维完整积分状态和40个warmup事件逐值一致；
+25次成功请求的仿真时刻及前后采样RNG逐次配对，50次等待真实历史的425请求未消耗采样RNG。
+RTX首策略前截图仍有小像素差异，source4/8的MAE约0.11084/0.08147（0–255范围），
+因此不称在线图像逐值相同或严格只有权重一项数值差异。
+结果只覆盖50Hz任务测量，不冒充200Hz全部物理子步的连续接触证明或官方SIMPLE榜单成绩。
+
+汇总为仓库外`reports/liftbox_joint31000_paired_results.json`，独立CPU复算为
+`reports/liftbox-joint31000-physical-independent-audit.json`。
+原协调器在四回合结束后的汇总阶段失败：消费端误将`used_group_lrs`/`next_group_lrs`的键
+当作裸组名，实际生产trainer保存`lr_<group>`。已修正消费契约，16项CPU回归及独立review通过，
+只重跑汇总，不重训、不改模型或物理记录。原failed状态及日志保留，恢复记录为
+`reports/joint31000-pipeline-reporting-recovery.json`；恢复汇总不代表物理成功。
+
+完整原片与原速前后对照保存到`/home/zxc/Videos/CVPR_SIMPLE/2026-10-21_joint31000_300/`，
+标签明确两边任务未完成，不与历史Action-only300或teacher视频混用。
+
+另在VAL3以同一联合300模型独立检查client执行15帧、server仍输出30帧，保持RTC关闭及其它控制协议，
+实际完成25.02秒，仍无手箱承重接触或有效保持、未跌倒。
+结果为`reports/liftbox_joint31000_val3_after_execute15_open_fsq`。
+它是额外验证初态上的短执行诊断，不混入上述四回合，也不等于官方RTC部署配方或独立的执行长度消融对照。

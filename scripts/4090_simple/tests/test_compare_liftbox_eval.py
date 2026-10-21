@@ -163,8 +163,8 @@ def write_joint_fit(root, source_step=31000):
         five_group_peak_contract=[{"name":name,"trainable_parameters":v["trainable_parameters"],"lr":v["peak_lr"]} for name,v in expected.items()],
         initial_optimizer=optimizer(0),final_optimizer=optimizer(300),
         updates=[{"completed_step":step,"loss_last_microbatch":1.,"pre_clip_grad_norms":{name:.1 for name in compare.JOINT_GROUPS},
-                  "used_group_lrs":{name:0. if step==1 else 1e-5 for name in compare.JOINT_GROUPS},
-                  "next_group_lrs":{name:1e-5 for name in compare.JOINT_GROUPS}} for step in range(1,301)])
+                  "used_group_lrs":{f"lr_{name}":0. if step==1 else 1e-5 for name in compare.JOINT_GROUPS},
+                  "next_group_lrs":{f"lr_{name}":1e-5 for name in compare.JOINT_GROUPS}} for step in range(1,301)])
     (root / "training_result.json").write_text(json.dumps(training))
     return training,preparation
 
@@ -314,6 +314,24 @@ class PairedReportingTests(unittest.TestCase):
                 else:bad["updates"].pop()
                 with self.subTest(corruption=corruption),self.assertRaises(ValueError):
                     compare.joint_update_witness(bad,prep,300)
+
+    def test_joint_lr_receipt_requires_actual_trainer_metric_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            training, preparation = write_joint_fit(Path(directory))
+            # Captured schema of the production Trainer.group_lrs() receipt,
+            # distinct from bare group names in gradient/hash receipts.
+            actual = {"lr_action_header": 5e-6, "lr_lang_backbone": 5e-8,
+                      "lr_vision_tower": 5e-7, "lr_mm_projector": 5e-6,
+                      "lr_motion_expert": 5e-7}
+            training["updates"][0]["next_group_lrs"] = actual
+            compare.joint_update_witness(training, preparation, 300)
+            for invalid in ({key.removeprefix("lr_"): value for key, value in actual.items()},
+                            {key: value for key, value in actual.items() if key != "lr_motion_expert"},
+                            {**actual, "lr_motion_expert": float("nan")}):
+                bad = copy.deepcopy(training)
+                bad["updates"][0]["next_group_lrs"] = invalid
+                with self.subTest(keys=list(invalid)), self.assertRaisesRegex(ValueError, "LR|finite"):
+                    compare.joint_update_witness(bad, preparation, 300)
 
     def test_legacy_action_frozen_and28k_checks_are_not_relaxed(self):
         with tempfile.TemporaryDirectory() as directory:

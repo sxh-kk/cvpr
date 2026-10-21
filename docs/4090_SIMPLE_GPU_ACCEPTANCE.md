@@ -65,7 +65,8 @@ RGB几何处理一次后供DINO和VLM使用；冻结模型保留测试时RTC需�
 
 SIMPLE状态按关节名称重排43→45（末两项零填充），动作30×80拆为64 latent＋14手关节＋2 padding。
 训练手关节顺序为thumb/middle/index，SIMPLE为thumb/index/middle；明确重排，padding不驱动颈部。
-SONIC的10帧真实50Hz本体历史由每个物理子步采集，994维输入按官方term分组；
+SONIC仅在50Hz控制点追加真实本体观测，最近10帧按官方term分组，与body64 latent共同组成decoder的994维输入；
+这与encoder的1751维mode0期望参考窗口分开，物理子步执行PD但不额外追加历史帧。
 29维输出重排为具名关节目标，再以物理步长执行力矩PD，不能送入旧36维WBC接口。
 高层动作按30Hz仿真时间取样；同步HTTP等待期间仿真暂停，墙钟延迟与仿真时长分别记录。
 

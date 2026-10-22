@@ -262,4 +262,41 @@ source40的同seed无扰动新旧实现逐值一致，落箱后的篮缘偏心�
 这样不因漫长像素审核期间正常新增一条而反复失败，最终包仍保存选择时的原始registry字节与SHA。
 
 完整100条打包、全量DINO和联合GPU预检完成前不设置`final_ready`。
-已有五条VAL继续保持原划分，独立TEST祖先仍待绑定；教师筛选成功率不作为训练后模型成功率。
+已有五条VAL继续保持原划分，独立TEST初态及使用史仍待绑定；教师筛选成功率不作为训练后模型成功率。
+
+## 定向补充批次与三批次汇总
+
+仓库外`narrow-placement-research-v1`预登记12次真实CPU研究：相对已成功的17/40/68初态，
+仅将篮子一个XY坐标移动±0.5mm，保持其余对象初态、三个seed及教师命令。
+结果7次独立物理审核通过、5次失败，全部保留；17/68继续使用已声明的2秒撤手参考，
+40仍使用完整原命令。该窄范围执行结果不代表更大扰动下的鲁棒性。
+
+29/82各新增4个单变量初态（篮X或目标Y±0.5mm），相对已严格通过的原variant03/04，
+保留原命令和measured暖机，8/8通过CPU物理及独立审核。
+证据为`weak-ancestors29-82-single-axis-v1/SINGLE_AXIS_CPU_REPORT.json`，
+并保留此前16个完成诊断、其中13次失败的逐条索引；不以本次8/8掩盖此前失败。
+
+`supplemental-plan-v6/candidate_plan.json`冻结上述20个新候选及24个未执行的祖先覆盖声明。
+白名单`rtx_selection.json`只含15个CPU通过候选，不执行覆盖声明或5个失败候选。
+`run_supplemental_batch_v5.py`使用原冻结采集器，对每个白名单ID分别进行新的
+screen→真实RTX→独立准入；研究收据仅用于提议，不能充当正式数据准入。
+实际数据在`collection-queue-v5`，先补29/82，再补17/40/68。
+
+三批次进度看`formal_batch_3queue_live_summary.json`和`finalization_progress_v2.json`。
+采集器及外部driver中的热计数只用于调度；最终仍按各自冻结版本审核完整RGB、状态、动作和物理证据，
+全局去重，覆盖全部24个TRAIN祖先，每祖先最多5条，精确选择100条。
+完成包的`eligible_current_rows`另汇总为`window_distribution_quality100_v1.json`，
+报告实际训练窗口的来源占比，不能用episode配额冒充严格窗口均衡。
+
+仅负责等待数量的旧root汇总程序在仍为waiting、无child及无pack输出时交接，
+收据为`finalization_waiter_handoff_v1_to_v2.json`；既有采集器和A100作业继续使用原参数。
+新汇总全程持独占锁，拒绝旧selection、pack日志或隐藏partial，避免重复打包。
+完整包只做一次CPU prepare；联合GPU入口先完成CPU导入与SHA核对，再等待本机自然空闲。
+GPU检查范围是完整数据包的生产读入检查加首个有效batch的一次联合反向，
+不是每条示例逐一GPU反向，也不更新参数或保存模型checkpoint。
+
+官方闭环TEST可使用未参与调参的任务reset，不要求新的人类motion祖先；两种独立性分别核实。
+本机DR0的episode0、1已有调试执行记录，其余28个官方reset仍需使用史核查，暂不宣称盲TEST。
+同一scene资产不是泄漏判据；还须检查完整配置与核心对象/机器人初态近重复。
+本机旧raw100和A100发布的来源ZIP路径及SHA不同，不能只凭episode编号相同建立跨归档祖先对应。
+库存及上述限制见`independent_test_source_inventory_v1.json`。

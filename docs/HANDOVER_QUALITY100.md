@@ -1,6 +1,8 @@
 # Handover数据质量、执行差异与100条重新采集
 
 本轮按当前`G1WholebodyHandoverTeleop-v0`推进，保持A100原训练、参数及已用数据不动。
+2026-10-23本机已完成100条严格成功执行的无损打包、全量DINO、生产数据读入及一次联合GPU反向预检。
+最终路径、数量和检查范围见[最终交付](#最终100条数据与检查结果)；尚未使用新100条启动模型训练或取得策略成功率。
 目标是重新物理执行并筛出100条符合本机SONIC v1.1部署协议的TRAIN示例；
 100条示例通过验收与训练后策略达到100%成功率分别统计，不能相互替代。
 最终应以预先冻结的独立测试集100/100作为一个实测目标，不能保证所有未见场景都成功。
@@ -71,8 +73,8 @@ source39可以抬起、交接并碰篮，但16秒末仍有左手接触，完整�
 
 新计划在本机仓库外：
 `/var/tmp/cvpr-evaluation-zxc-handover-quality100-20261022/collection-plan-v2/candidate_plan.json`。
-计划保持`planned_not_collected`，正式队列已独立接受首条，批量采集继续运行；诊断和正式接受数分开记录，不因计划或CPU测试通过而标记100条数据完成。
-原五条保持VAL，独立TEST种子空间已预留，但独立祖先绑定待完成，不能把原VAL改称TEST。
+计划文件保留最初的`planned_not_collected`身份，实际执行另写正式队列；诊断和正式接受数分开记录，不因计划或CPU测试通过而标记100条数据完成。最终选择与打包结果见文末。
+原五条保持VAL，独立TEST种子空间已预留，但独立TEST初态及使用史仍待绑定，不能把原VAL改称TEST。
 
 实际执行必须使用目标30Hz命令保持、50Hz SONIC解码、200Hz权威物理，重新采集同步实际RGB、状态和下发动作。
 只在控制前设置一次物体初态，禁止控制期间复位物体、刚性附着或施加帮助成功的外力。
@@ -126,7 +128,8 @@ source31最高仅抬升约1.78mm；source45/67/68已触篮但末窗仍有手接�
 64维v1.1 body token和14维手目标，并继承38k归一化统计，不重新拟合bounds。
 真实暖机RGB/state可用于历史，但暖机动作标签为NaN、valid和全部action mask为false；
 未来监督要求30个真实完整动作，不用末帧重复填充。PNG转视频须逐帧像素无损核对。
-真实DINO特征、联合模型数据预检和独立TEST通过前，不得标记完整训练/评测准备完成。
+真实DINO特征与联合模型输入预检完成后才能标记TRAIN微调输入就绪。
+独立TEST及训练后策略物理测评分别验收，输入就绪不代表完整评测通过。
 
 ## 暖机与相机坐标诊断
 
@@ -157,7 +160,7 @@ USD和SONIC MJCF腰部及肩部joint frame也不同，不能将所有同名link�
 
 ## 本机批量入口
 
-当前正式队列为外部根目录下`collection-queue-v3`。
+首轮正式队列为外部根目录下`collection-queue-v3`，后续另有冻结版本v4、v5；最终包从三批次显式选择。
 首条source0/variant0通过完整RTX数据审核后登记接受；诊断pilot目录不混入该计数。
 `train-warmup-schedule-v1.json`预先冻结23组measured及source31的live暖机选择，
 仅用于TRAIN教师采集；source31已有measured失败/live完整成功的真实物理对照。
@@ -187,7 +190,7 @@ raw torso约10.10mm、腕/相机约5.26mm也完整记录，说明模型joint-fra
 生产`MotionHistoryIndex`和LeRobot读入真实数据并通过输出校验：首个有效current30使用[0,6,12,18,24,30]，
 末有效current390使用[360,366,372,378,384,390]，均为有限[6,5,1024]，当前RGB为[3,256,320]，
 每个有效current均有完整30步动作，单条共361个有效训练窗口。
-以上是数据读入检查；后续联合模型GPU预检结果见下节，完整100条及独立TEST仍未完成。
+以上是首条数据读入检查；其联合模型GPU预检结果见下节，最终100条结果见文末，独立TEST仍待验收。
 
 ### 首条数据的真实联合GPU预检
 
@@ -202,11 +205,11 @@ reserved为22.64GiB。原始`TrainingSafetyGuard`通过，优化器更新和chec
 也不用于判断模型效果、长程数值重复性或100条数据验收。完整数据包生成后仍须执行其全量审核、
 DINO提取和生产读入/GPU预检；当前A100作业未因本检查变动。
 
-其余variant1–4另做96条无RGB筛查，63条通过，四个来源17/40/45/68目前五个初态都未完整通过。
+首轮其余variant1–4另做96条无RGB筛查，63条通过，四个来源17/40/45/68在该轮五个初态都未完整通过。
 这些诊断不计正式示例；批量队列保持预登记物理门槛与划分，后续修复需单独执行、声明与复验。
 仓库外`run_formal_batch_v3.py`先处理120个候选，必要时分轮明确登记额外候选，当前总预算最多480，
 每祖先接受上限仍5、目标100且需24组覆盖；预算耗尽不标记完成。
-实际进度以`collection-queue-v3/queue.json`和`formal_batch_live_summary.json`为准，勿把候选数当接受数。
+首轮调度进度记录于`collection-queue-v3/queue.json`和`formal_batch_live_summary.json`；最终交付以冻结的三批次选择及实际打包收据为准，勿把候选数当接受数。
 
 ## 冷启动、撤手参考与独立批次
 
@@ -241,7 +244,7 @@ source40的同seed无扰动新旧实现逐值一致，落箱后的篮缘偏心�
 后续定向source40/variant200已找到完整物理及473次解码历史审核均通过的非零初态，
 仅确认该窄范围配置可执行，不外推其它偏移。四个来源17/68/40/45随后均已完成真实RTX独立准入；
 末秒篮子承担实际目标重量约100%，双手均无接触，已抽查最终画面。
-这些通过说明教师采集路径有效，不是模型对照或100条完成；实时计数以双队列watch为准。
+这些单独通过说明教师采集路径有效，不是模型对照或100条完成；该阶段曾使用双队列watch，最终以三批次冻结选择和逐条审核为准。
 
 `--warmup-schedule`可增加`teacher_references`，按原始TRAIN source ID指定引用JSON的本地绝对路径和SHA。
 引用、代码、原始来源及实际执行参数在队列首次运行前冻结；不得修改旧队列的recipe来接纳新控制。
@@ -261,7 +264,7 @@ source40的同seed无扰动新旧实现逐值一致，落箱后的篮缘偏心�
 审核前后允许追加候选及进行中条目推进；已接受条目、计划、recipe和旧registration均不得改写。
 这样不因漫长像素审核期间正常新增一条而反复失败，最终包仍保存选择时的原始registry字节与SHA。
 
-完整100条打包、全量DINO和联合GPU预检完成前不设置`final_ready`。
+打包时的`PACK_READY.json`保持其创建时`final_ready=false`，后续DINO和联合GPU预检写独立收据，不能回写旧收据冒充当时已完成。
 已有五条VAL继续保持原划分，独立TEST初态及使用史仍待绑定；教师筛选成功率不作为训练后模型成功率。
 
 ## 定向补充批次与三批次汇总
@@ -300,3 +303,64 @@ GPU检查范围是完整数据包的生产读入检查加首个有效batch的一
 同一scene资产不是泄漏判据；还须检查完整配置与核心对象/机器人初态近重复。
 本机旧raw100和A100发布的来源ZIP路径及SHA不同，不能只凭episode编号相同建立跨归档祖先对应。
 库存及上述限制见`independent_test_source_inventory_v1.json`。
+
+## 最终100条数据与检查结果
+
+最终冻结名单为`final-selection-quality100-v2.json`，SHA为
+`f2dc3124329254a79faed478a81011d1a3dcd797877c773ffaed810457431ef1`。
+从v3/v4/v5分别选入61/27/12条，精确100条，覆盖全部24个TRAIN动作祖先，每祖先最多5条。
+候选身份和capture内容均无重复，不含原VAL39/65/80/92/94。
+这100条均完成自己的真实物理、RTX图像和各冻结版本的独立准入审核；它们仍是24组动作祖先的衍生执行，
+不能称为100条新的人类示范，也没有证明大范围场景泛化。
+
+本机实际数据路径：
+
+- LeRobot数据：`/var/tmp/cvpr-evaluation-zxc-handover-quality100-20261022/packed-quality100-v1/train`。
+- DINO输出目录：`/var/tmp/cvpr-evaluation-zxc-handover-quality100-20261022/dino-quality100-v1`。
+- CPU打包收据：`packed-quality100-v1/PACK_READY.json`，SHA为
+  `803213bb63867fd2d461557ab97f7fee39c2472e71b8bd99a680a0d4455a1f9c`。
+
+已完成38,694帧RGB的无损视频往返核对，以及每条首末有效窗口共200次实际LeRobot CPU读取。
+其中3,000帧是真实暖机历史，不监督动作；有效教师动作35,694行，生产读取规则产生32,794个合法训练窗口。
+source0家族从旧TRAIN窗口的52.74%降至本包5.504%，本包最大来源source9占7.593%。
+这是实际窗口统计，没有改变sampler，也不是完全均匀采样。
+独立元数据复核见`pack100_metadata_independent_review_v1.json`。
+
+最终100条的归一化语义审计为`normalization_roundtrip_audit_final100_v1.json`，SHA为
+`002941175923ddb52dfa41b832af8bbd38d3391ec1d90de6ac19ebe20c2f97e7`。
+继承38k的具名状态顺序、统计及bounds，没有重新拟合；35,694行动作标签零越界、零饱和，
+归一化与反归一化最大误差约`1.98e-7`，属于float32往返误差，不能称为bitwise无损。
+审计在身份、来源和实现SHA匹配后复用90条既有证据，只对新增10条执行新的数值检查。
+独立审查为`final100_normalization_independent_review_v1.json`，SHA为
+`917f9e1be2dd8e8e6a7e28f29ae44e19899dc260fd4894beb32780c3eb16f7c5`。
+
+状态输入有13,011/32,794个current触及严格统计边界，最大裁切约`0.0007335rad`（0.042°），
+主要是source9左肩yaw及少数统计上界为0的手关节微小过零抖动。这是沿用现有输入归一化的已知限制；
+没有把它混称为动作标签损坏，也没有据此改动统计或现有训练。
+
+全量DINO已完成100条、38,694帧，保持冻结`dinov2-with-registers-large`、`256x320`、
+bf16计算和float32保存的`5x1024`特征。实际`manifest.json` SHA为
+`5671acf6ea3a64a68269d0fc364fbb3e0b355d8de9ec5d5c27e101f5eebeed16`。
+生产CPU prepare确认全部100条共32,794个完整窗口，并检查首个有效current30的因果历史
+`[0,6,12,18,24,30]`和30步完整future动作；暖机没有作为动作监督或未来可用性输入。
+
+完整包另完成本机单GPU、batch1的一次真实生产前向/反向，收据为
+`joint_gpu_preflight_100_cpu_v2/gpu_result.json`，SHA为
+`071d476ba82bb3ae751223bb6acf415b54befc99e78f1bdf7a8225a7b287f2a1`。
+加载的是本机已有、继承UnifoLM38k的task6000完整联合权重，SHA为
+`dc0ada4817acbdcf46b3489d9618e22f53d8935dfad3937fd883e332bd9aaf3e`；
+不能把它说成新100条微调权重或A100当前最新权重。
+Action、语言骨干、视觉塔、projector和Motion五组梯度均有限且非零，安全检查通过。
+峰值allocated为23,321,017,344B（21.72GiB），reserved为24,314,380,288B（22.64GiB）；
+该batch loss为1.0164694786，不用于衡量策略成功率或与A100训练loss比较。
+实际optimizer更新为0，没有保存模型/optimizer checkpoint，五组参数、来源权重、源码与DINO前后SHA不变。
+这不是100条各做一次GPU反向、八卡DDP或长程训练验收。
+
+最终输入就绪侧车为外部根目录`DATASET_RELEASE_READINESS.json`，
+绑定上述pack、DINO、冻结名单、归一化及独立审查、CPU prepare、GPU和自然空闲调度收据。
+`dataset_ready_for_task_finetuning=true`表示本机新100条训练输入已通过本轮检查；
+创建时的`PACK_READY.final_ready=false`原样保留，不回写历史收据。
+尚未准备/启动新100条的A100八卡正式作业，也没有替换原作业数据、重拟合统计或认证独立策略TEST。
+当前旧50条A100作业的只读快照在`a100_readonly_progress_final100_delivery.json`：
+2026-10-22 19:16:47 UTC记录运行至17,186/20,000步，预计结束20:44:42 UTC；这是当时快照，非实时承诺。
+最终要以独立测试场景的模型闭环检验100/100目标；本轮100条教师成功不能证明模型已达到该目标。

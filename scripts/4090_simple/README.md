@@ -54,6 +54,12 @@ trace额外保存目标/篮子姿态和具名接触，帮助区分仅碰篮、�
 [逐条证据索引](../../docs/a100_task6000_local_handover_evaluation.json)。
 五条中1条触发接触成功标志、均未跌倒；触发标志的末帧仍有左手接触，不能称为完整释放验收通过。
 
+后续[数据质量与100条重新采集](../../docs/HANDOVER_QUALITY100.md)单独审计原轨迹祖先、
+模板权重与物理时钟差异。`plan_handover_quality100.py`只生成候选计划，不能将计划算作数据。
+`replay_handover_teacher.py`是已编码教师命令的真实本机诊断/重采入口；
+`handover_contact_quality.py`和`handover_geometry_quality.py`保留源50Hz严格规则，
+包括原解算接触力、掌根、交接顺序与容器支撑，物理通过仍不自动授权数据入库。
+
 ## Conda 与依赖
 
 本机创建了两个新环境，未复用用户其他机器人环境：

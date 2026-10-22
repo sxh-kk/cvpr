@@ -66,6 +66,16 @@ Paired weight comparisons require the same projection recipe on both sides;
 continuous-versus-FSQ runs are a separate interface ablation. The comparison
 tool rejects mismatched projection modes, grids or recorded consumer identities.
 
+Head-camera calibration now composes the source-bound D435 mount with the
+actual named `head_link` mesh pose. This preserves the older G1 head origin
+(`-0.044 m`) and follows SONIC v1.1 (`-0.054 m`) without moving the real Isaac
+camera. Changed meshes, scale or conflicting visual/collision head transforms
+require a new calibration. The capture audit compares USD and MuJoCo through
+the explicit source-asset waist/shoulder frame mapping, records raw and mapped
+residuals, and checks real per-frame camera/link poses against saved physics.
+The mapping is derived from the source assets; it is not fitted to the first
+frame. See [Handover data preparation](../../../docs/HANDOVER_QUALITY100.md).
+
 See [control commands and contracts](../../../scripts/4090_simple/CONTROL.md)
 and the [4090 GPU acceptance record](../../../docs/4090_SIMPLE_GPU_ACCEPTANCE.md)
 for verified stages, real observations, latency, and remaining limitations.

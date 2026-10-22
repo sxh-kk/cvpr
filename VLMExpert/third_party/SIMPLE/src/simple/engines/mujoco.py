@@ -505,22 +505,35 @@ class MujocoSimulator(Simulator):
                     torso_body = body
                     break
             assert torso_body is not None
-            """ 
-            I know this numbers look crazy!
-            I obtain the first coordinate using isaacsim (g1_29dof_wholebody_dex3.usd)
-            and obtain the second coordinates using mujoco (g1_29dof_wholebody_dex3.xml)
-            and then i add them up by LUCK and it works! 
-            """
-            DEFAULT_HEAD_CAM_POSITION = np.array([0.05366004+0.0039635, 0.01752999 + 0, 0.4738702 + -0.044], dtype=np.float32)
-            DEFAULT_HEAD_CAM_ORIENTATION = np.array([0.91496, 0.0, 0.40355, 0.0], dtype=np.float32)
+            # Derive the mount from the actual named head mesh pose. SONIC's
+            # head origin differs from the older G1 by1cm; the Isaac sensor
+            # stays at its real source-asset mount and is never moved here.
+            import hashlib
+            from pathlib import Path
+            from simple.sensors.head_camera_mount import head_camera_mount
+            head_geometries = []
+            for geom in torso_body.find_all('geom'):
+                if geom.meshname != "head_link":
+                    continue
+                if geom.parent.name != torso_body.name or geom.alt.type != mujoco.mjtOrientation.mjORIENTATION_QUAT:
+                    raise ValueError("Head camera calibration requires explicit quaternion head geometry")
+                mesh = self.robot_mjcf.mesh(geom.meshname)
+                if (not np.array_equal(mesh.refpos, np.zeros(3))
+                        or not np.allclose(mesh.refquat, [1., 0., 0., 0.], rtol=0, atol=1e-12)):
+                    raise ValueError("Head mesh reference transform has no camera calibration")
+                mesh_path = Path(self.robot_mjcf.modelfiledir) / self.robot_mjcf.meshdir / mesh.file
+                head_geometries.append({"mesh_name": mesh.name,
+                    "mesh_sha256": hashlib.sha256(mesh_path.read_bytes()).hexdigest(),
+                    "position": geom.pos, "quaternion": geom.quat, "scale": mesh.scale})
+            mount_position, mount_orientation = head_camera_mount(head_geometries, camera.pose.position)
             q = np.asarray(camera.pose.quaternion, dtype=np.float32)
             is_identity_quat = np.allclose(q[1:], 0.0, atol=1e-6) and np.isclose(abs(float(q[0])), 1.0, atol=1e-6)
             assert is_identity_quat, f"Expected eye_in_head camera quaternion to be identity (wxyz)"
 
             torso_body.add_camera(
                 name=cname,
-                pos=DEFAULT_HEAD_CAM_POSITION + camera.pose.position,  # FIXME
-                quat=t3d.quaternions.qmult(DEFAULT_HEAD_CAM_ORIENTATION, q_isaac_mujoco),
+                pos=mount_position,
+                quat=t3d.quaternions.qmult(mount_orientation, q_isaac_mujoco),
                 fovy=fovy
             )
         else:

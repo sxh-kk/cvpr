@@ -23,6 +23,8 @@ import time
 import training_loss_curve as curve
 
 LR_KEYS = ("action_header", "lang_backbone", "vision_tower", "mm_projector", "motion_expert")
+USER_STOP_STATES = ("switched", "stopped_by_user")
+TERMINAL_STATES = ("completed", "failed", *USER_STOP_STATES)
 CSV_FIELDS = ["completed_update", "timestamp_unix_s", "train_loss", "val_loss",
               *[f"lr_{name}" for name in LR_KEYS]]
 
@@ -127,7 +129,8 @@ def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_up
     declared = state.get("state", "prepared")
     failed = declared in ("failed", "error") or state.get("returncode") not in (None, 0) or console["failure"]
     done = completed == maximum and (console["success"] or declared in ("complete", "completed"))
-    status = ("failed" if failed and not done else "completed" if done else
+    status = (declared if declared in USER_STOP_STATES else
+              "failed" if failed and not done else "completed" if done else
               "finalizing" if completed == maximum else "running" if completed else "waiting")
     stamped = [row for row in train if "timestamp_unix_s" in row]
     started = unix_time(state.get("started_utc"))
@@ -135,7 +138,7 @@ def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_up
     if started is None and stamped:
         started = stamped[0]["timestamp_unix_s"]
         elapsed_origin = "first_flushed_train_update_excludes_startup"
-    finished = unix_time(state.get("finished_utc")) if status in ("completed", "failed") else None
+    finished = unix_time(state.get("finished_utc")) if status in TERMINAL_STATES else None
     elapsed = max(0.0, (finished if finished is not None else now_s) - started) if started is not None else None
     after_warmup = [row for row in stamped if row["completed_update"] >= max(1, warmup)]
     recent = after_warmup[-(eta_window + 1):]
@@ -166,12 +169,16 @@ def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_up
                 if remaining is not None and status == "running" else None,
             "eta_scope": "Recent post-warmup TRAIN metric-row wall time (W&B may merge same-step evaluation into the row), including observed validation/checkpoint pauses; future pauses and final save may differ.",
             "eta_wait_reason": None if remaining is not None else
+                "training_switched" if status == "switched" else
+                "training_stopped_by_user" if status == "stopped_by_user" else
                 "training_failed" if status == "failed" else
                 "awaiting_training_finalization" if status == "finalizing" else
                 "training_not_started" if completed == 0 else "waiting_for_post_warmup_timestamps",
             "loss_semantics": "Production logged rank-mean loss at optimizer update; with accumulation it is the last microbatch, not an average over every accumulated sample.",
             "step_mapping": "completed_update = W&B zero-based _step + 1; console shows completed updates",
             "validation_step_semantics": "Production validation occurs after update 1, 1+validation_steps, ... and the final update.",
+            "stop_reason": state.get("stop_reason"),
+            "superseded_by_run_directory": state.get("superseded_by_run_directory"),
             "latest_group_lrs": {name: train[-1].get(f"lr_{name}") for name in LR_KEYS} if train else {},
             "cuda_visible_devices": "", "training_modified": False}
 
@@ -277,14 +284,14 @@ def main():
                 print(f"Task monitor retry: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
                 try:
                     terminal = json.loads(args.state.read_text()).get("state") in (
-                        "complete", "completed", "failed", "error")
+                        "complete", "error", *TERMINAL_STATES)
                 except (OSError, ValueError):
                     terminal = False
                 if terminal:
                     return 1  # A failed final refresh must not keep a dead run under observation.
                 time.sleep(args.poll_seconds)
                 continue
-            if args.once or progress["state"] in ("completed", "failed"):
+            if args.once or progress["state"] in TERMINAL_STATES:
                 return 0
             time.sleep(args.poll_seconds)
 

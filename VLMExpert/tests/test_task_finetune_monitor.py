@@ -90,6 +90,25 @@ def test_full_update_count_waits_for_process_finalization(tmp_path):
     assert progress["eta_wait_reason"] == "awaiting_training_finalization"
 
 
+@pytest.mark.parametrize("requested_state", ["switched", "stopped_by_user"])
+def test_user_stop_intent_takes_priority_over_signal_exit_or_traceback(tmp_path, requested_state):
+    binding = state(tmp_path, state=requested_state, returncode=-15,
+                    started_utc="2026-10-22T00:00:00+00:00",
+                    finished_utc="2026-10-22T00:05:00+00:00",
+                    stop_reason="User selected a different initialization and budget",
+                    superseded_by_run_directory="/new/task/run")
+    rows = [{"completed_update": n, "train_loss": .1, "timestamp_unix_s": 1000 + n}
+            for n in range(10, 21)]
+    progress = monitor.make_progress(binding, rows, {**CONSOLE, "failure": True}, now_s=2_000_000_000)
+    assert progress["state"] == requested_state
+    assert progress["completed_optimizer_updates"] == 20
+    assert progress["elapsed_seconds"] == 300
+    assert progress["estimated_remaining_seconds"] is None
+    assert progress["estimated_finish_utc"] is None
+    assert progress["stop_reason"] == binding["stop_reason"]
+    assert progress["superseded_by_run_directory"] == "/new/task/run"
+
+
 def test_budget_mismatch_and_invalid_time_are_rejected(tmp_path):
     with pytest.raises(ValueError, match="budget"):
         monitor.make_progress(state(tmp_path), [], {**CONSOLE, "maximum": 200})
@@ -188,3 +207,17 @@ def test_failed_final_refresh_does_not_wait_forever_after_training_exit(tmp_path
     assert process.returncode == 1
     health = json.loads((output / "monitor_health.json").read_text())
     assert health["state"] == "error" and "max_optimizer_steps" in health["last_error"]
+
+
+@pytest.mark.parametrize("requested_state", ["switched", "stopped_by_user"])
+def test_watch_user_stop_exits_successfully_and_keeps_no_eta(tmp_path, requested_state):
+    binding = tmp_path / "state.json"
+    binding.write_text(json.dumps(state(tmp_path, state=requested_state, returncode=143)))
+    output = tmp_path / "monitor"
+    process = subprocess.run([sys.executable, "-S", str(SCRIPT), "--state", str(binding),
+                              "--output-dir", str(output), "--no-plot", "--poll-seconds", "1"],
+                             capture_output=True, text=True, timeout=5)
+    assert process.returncode == 0, process.stderr
+    progress = json.loads((output / "progress.json").read_text())
+    assert progress["state"] == requested_state
+    assert progress["estimated_remaining_seconds"] is None

@@ -40,6 +40,27 @@ class TaskConfigurationTests(unittest.TestCase):
         self.assertEqual(values["model.mm_projector_lr"], 1e-5)
         self.assertEqual(values["model.motion_expert_lr"], 1e-6)
 
+    def test_source38k_task20k_saves_only_five_four_thousand_boundaries(self):
+        values = task.overrides("/source", "/data", "/dino", "/output", source_step=38000,
+            max_steps=20000, warmup=1000, checkpoint_steps=4000, validation_steps=1000,
+            early_checkpoint_steps=[])
+        self.assertEqual(values["model.pretrained_joint_checkpoint"], "/source/checkpoints/ckpt_38000/model.safetensors")
+        self.assertEqual(values["exp"], "handover_task50_joint38000")
+        self.assertEqual(values["train.max_training_steps"], 20000)
+        self.assertEqual(values["train.warmup_steps"], 1000)
+        self.assertEqual(values["train.checkpointing_steps"], 4000)
+        self.assertEqual(values["train.early_checkpoint_steps"], [])
+        self.assertEqual(values["train.validation_steps"], 1000)
+        checkpoints = [step for step in range(1, 20001) if step % values["train.checkpointing_steps"] == 0]
+        self.assertEqual(checkpoints, [4000, 8000, 12000, 16000, 20000])
+        self.assertIsNone(values["train.resume_from_checkpoint"])
+
+    def test_invalid_source_and_checkpoint_intervals_are_rejected(self):
+        for kwargs in ({"source_step": 0}, {"checkpoint_steps": 0}, {"validation_steps": -1},
+                       {"early_checkpoint_steps": [0]}, {"early_checkpoint_steps": [2001]}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                task.overrides("/source", "/data", "/dino", "/output", **kwargs)
+
     def test_preserves_accepted_split_and_no_previous_wandb_identity(self):
         values = task.overrides("/source", "/data", "/dino", "/output")
         self.assertEqual(values["data.train_repo_ids"], ["Handover-sonic11-train"])

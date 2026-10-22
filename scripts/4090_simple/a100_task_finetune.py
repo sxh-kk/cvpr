@@ -1,6 +1,6 @@
 """Prepare and supervise an eight-GPU, weight-only joint task adaptation.
 
-The original 40k run and task release are read-only. The local trainer factory
+The original joint run and task release are read-only. The local trainer factory
 adds complete-future filtering and a fixed validation subset without changing
 the shared UnifoLM trainer or its optimizer/finite-gradient checks.
 """
@@ -38,12 +38,21 @@ def read_json(path):
 
 
 def overrides(source_run, dataset_root, dino_root, output, *, max_steps=2000, warmup=100,
-              timestamp=None):
+              timestamp=None, source_step=40000, checkpoint_steps=200,
+              validation_steps=200, early_checkpoint_steps=None):
     if max_steps < 2 or not 0 < warmup < max_steps:
         raise ValueError("Use a positive warmup below the optimizer-update budget")
+    if (type(source_step) is not int or source_step <= 0
+            or type(checkpoint_steps) is not int or checkpoint_steps <= 0
+            or type(validation_steps) is not int or validation_steps <= 0):
+        raise ValueError("Source step and checkpoint/validation intervals must be positive integers")
+    early_checkpoint_steps = [20] if early_checkpoint_steps is None else list(early_checkpoint_steps)
+    if any(type(step) is not int or not 0 < step <= max_steps for step in early_checkpoint_steps):
+        raise ValueError("Early checkpoints must be positive updates within the task budget")
     source_run, dataset_root, dino_root, output = map(Path, (source_run, dataset_root, dino_root, output))
     return {
-        "seed": 20261022, "exp": "handover_task50_joint40k", "timestamp": timestamp,
+        "seed": 20261022, "exp": ("handover_task50_joint40k" if source_step == 40000
+                                    else f"handover_task50_joint{source_step}"), "timestamp": timestamp,
         "auto_tag_run": False, "eval": False, "debug": False,
         "log.report_to": "wandb", "wandb.project": "cvpr-simple-task",
         "wandb.id": None, "wandb.name": None, "wandb.group": None,
@@ -60,14 +69,14 @@ def overrides(source_run, dataset_root, dino_root, output, *, max_steps=2000, wa
         "train.max_grad_norm": 1.0, "train.max_training_steps": max_steps,
         "train.num_train_epochs": None, "train.learning_rate": PEAK_LRS["action_header"],
         "train.warmup_steps": warmup, "train.warmup_ratio": None,
-        "train.lr_scheduler_type": "cosine", "train.checkpointing_steps": 200,
-        "train.early_checkpoint_steps": [20], "train.max_checkpoints_to_keep": 12,
+        "train.lr_scheduler_type": "cosine", "train.checkpointing_steps": checkpoint_steps,
+        "train.early_checkpoint_steps": early_checkpoint_steps, "train.max_checkpoints_to_keep": 12,
         "train.preserve_checkpoint_every": None,
-        "train.validation_steps": 200, "train.val_num_batches": -1,
+        "train.validation_steps": validation_steps, "train.val_num_batches": -1,
         "data.root_dir": str(dataset_root), "data.train_repo_ids": [TRAIN_ID],
         "data.val_repo_ids": [VAL_ID], "data.dino_cache_root": str(dino_root),
         "data.transform.field.stat_path": str(source_run / "dataset_statistics.json"),
-        "model.pretrained_joint_checkpoint": str(source_run / "checkpoints/ckpt_40000/model.safetensors"),
+        "model.pretrained_joint_checkpoint": str(source_run / f"checkpoints/ckpt_{source_step}/model.safetensors"),
         "model.pretrained_action_header_path": None,
         "model.tune_vlm": True, "model.tune_motion": True,
         "model.tune_mm_llm": False, "model.tune_mm_vision": False, "model.tune_mm_mlp": False,
@@ -87,7 +96,7 @@ def check_config(config, source):
             or train.resume_from_checkpoint is not None
             or model.pretrained_action_header_path is not None
             or (train.train_batch_size, train.gradient_accumulation_steps) != (4, 1)):
-        raise ValueError("Require the 40k three-component architecture and fresh batch32 task adaptation")
+        raise ValueError("Require the three-component architecture and fresh batch32 task adaptation")
     expected_data = copy.deepcopy(source["data"])
     actual_data = data.model_dump(mode="json")
     for key in ("root_dir", "train_repo_ids", "val_repo_ids", "dino_cache_root"):
@@ -105,18 +114,20 @@ def prepare(args):
     source = read_json(source_run / "run_config.json")
     if source["model"]["action_architecture"] != "dual_source_v1":
         raise ValueError("Source must be our complete dual-source run")
-    checkpoint = source_run / "checkpoints/ckpt_40000/model.safetensors"
+    checkpoint = source_run / f"checkpoints/ckpt_{args.source_step}/model.safetensors"
     if not checkpoint.is_file():
-        raise ValueError("Complete saved 40k model is required")
+        raise ValueError(f"Complete saved source model at step {args.source_step} is required")
     audit = read_json(args.weight_audit)
     if (audit.get("status") != "passed" or audit.get("all_stored_tensors_exactly_equal") is not True
             or audit.get("strict_load_all_three_components") is not True
             or Path(audit["source_checkpoint"]).resolve() != checkpoint.resolve()
             or shared.sha256(checkpoint) != audit["source_sha256"]):
-        raise ValueError("Require real, successful strict three-component 40k tensor equality evidence")
+        raise ValueError("Require real, successful strict three-component tensor equality evidence")
     timestamp = datetime.now(timezone.utc).strftime("%y%m%d%H%M%S")
     values = overrides(source_run, args.dataset_root, args.dino_root, output,
-                       max_steps=args.max_steps, warmup=args.warmup_steps, timestamp=timestamp)
+                       max_steps=args.max_steps, warmup=args.warmup_steps, timestamp=timestamp,
+                       source_step=args.source_step, checkpoint_steps=args.checkpoint_steps,
+                       validation_steps=args.validation_steps, early_checkpoint_steps=args.early_checkpoint_steps)
     original = (source_run / "argv.txt").read_text().split()
     argv = shared.rewrite_argv(original, values)
     output.mkdir(parents=True)
@@ -131,7 +142,7 @@ def prepare(args):
     source_dino_manifest = Path(source["data"]["dino_cache_root"]) / source["data"]["train_repo_ids"][0] / "manifest.json"
     identities[str(source_dino_manifest)] = shared.sha256(source_dino_manifest)
     plan = {"status": "prepared_pending_data_and_gpu_check", "created_utc": now(),
-            "source_run": str(source_run), "source_step": 40000,
+            "source_run": str(source_run), "source_step": args.source_step,
             "source_checkpoint": str(checkpoint), "source_checkpoint_bytes": checkpoint.stat().st_size,
             "source_checkpoint_mtime_ns": checkpoint.stat().st_mtime_ns,
             "source_checkpoint_sha256": audit["source_sha256"],
@@ -142,6 +153,9 @@ def prepare(args):
             "gpu_count": 8, "per_gpu_batch": 4, "gradient_accumulation_steps": 1,
             "effective_global_batch": 32, "max_optimizer_steps": args.max_steps,
             "warmup_steps": args.warmup_steps, "peak_learning_rates": PEAK_LRS,
+            "checkpointing_steps": args.checkpoint_steps,
+            "early_checkpoint_steps": args.early_checkpoint_steps,
+            "validation_steps": args.validation_steps,
             "train_episodes": 45, "val_episodes": 5, "test_used_for_training": False,
             "normalization": shared.normalization_receipt(config.data.transform.field),
             "dataset_root": str(args.dataset_root), "dino_root": str(args.dino_root),
@@ -167,13 +181,13 @@ def load_prepared(root):
     if ((source_stat.st_size, source_stat.st_mtime_ns)
             != (plan["source_checkpoint_bytes"], plan["source_checkpoint_mtime_ns"])
             or shared.sha256(plan["weight_audit"]) != plan["weight_audit_sha256"]):
-        raise ValueError("40k model or accepted loading evidence changed")
+        raise ValueError("Source model or accepted loading evidence changed")
     config = shared.parse_training_argv(root / "argv.txt")
     if config.model_dump(mode="json") != read_json(root / "run_config.json"):
         raise ValueError("Launch argv and configuration disagree")
     check_config(config, read_json(Path(plan["source_run"]) / "run_config.json"))
     if shared.normalization_receipt(config.data.transform.field) != plan["normalization"]:
-        raise ValueError("Inherited 40k normalization changed")
+        raise ValueError("Inherited source normalization changed")
     return config, plan
 
 
@@ -238,13 +252,13 @@ def check(root):
         if (info["features"]["observation.state"]["names"] != target_state["names"]
                 or info["features"]["observation.state"]["shape"] != [43]
                 or info["features"]["action"]["names"] != target_hands):
-            raise ValueError("Task joint names/order differ from the 40k state43/hand14 contract")
+            raise ValueError("Task joint names/order differ from the source state43/hand14 contract")
         manifest_path = Path(plan["dino_root"]) / split / "manifest.json"
         manifest = read_json(manifest_path)
         if manifest.get("state") != "complete":
             raise ValueError("Frozen DINO extraction is incomplete")
         if manifest["encoder"]["local_file_sha256"] != original_encoder["local_file_sha256"]:
-            raise ValueError("Task DINO weights differ from the 40k training encoder")
+            raise ValueError("Task DINO weights differ from the source training encoder")
         for path in (manifest_path, *sorted(manifest_path.parent.glob("episodes/*/receipt.json"))):
             artifact_bindings[str(path)] = {"bytes": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns}
     processor = AutoProcessor.from_pretrained(config.model.model_name_or_path, local_files_only=True)
@@ -255,7 +269,7 @@ def check(root):
         if np.asarray(sample["motion_img_embs"]).shape != (6, 5, 1024):
             raise ValueError("Expected six genuine DINO history observations")
         if tuple(sample["actions"].shape) != (30, 80) or tuple(sample["states"].shape) != (1, 45):
-            raise ValueError("Task sample differs from the 40k model dimensions")
+            raise ValueError("Task sample differs from the source model dimensions")
     report = {"status": "cpu_data_check_passed", "checked_utc": now(), **counts,
               "effective_epoch_budget": config.train.max_training_steps * 32 / len(train),
               "adaptation_receipt_sha256": shared.sha256(dataset_root / "ADAPTATION_READY.json"),
@@ -342,7 +356,7 @@ def train(root):
                 raise ValueError("New task must start at step zero on eight GPUs")
             if accelerator.is_main_process:
                 shared.write_json(Path(self.project_dir) / "task_initialization.json", {
-                    "source_checkpoint": plan["source_checkpoint"], "source_step": 40000,
+                    "source_checkpoint": plan["source_checkpoint"], "source_step": plan["source_step"],
                     "strict_joint_loader": True, "fresh_optimizer_scheduler_rng": True,
                     "global_batch": 32, "five_peak_learning_rates": PEAK_LRS,
                     "scope": "strict production load; independent CPU tensor equality is recorded separately"})
@@ -413,7 +427,7 @@ def run(root):
         else:
             check(root)
         if shared.sha256(plan["source_checkpoint"]) != plan["source_checkpoint_sha256"]:
-            raise ValueError("40k model bytes changed before launch")
+            raise ValueError("Source model bytes changed before launch")
         shared.write_json(root / "launch_gate.json", {"data_check_sha256": shared.sha256(root / "data_check.json"),
                           "config_sha256": plan["config_sha256"], "verified_utc": now()})
         # GPU ownership is checked immediately before launch. Never evict another
@@ -429,7 +443,7 @@ def run(root):
         state = {"state": "starting", "started_utc": now(), "timestamp": plan["timestamp"],
                  "run_directory": str(root / "training/posttrain"), "log": str(root / "train.log"),
                  "max_optimizer_steps": plan["max_optimizer_steps"], "warmup_steps": plan["warmup_steps"],
-                 "source_step": 40000, "preparation": str(root / "preparation.json")}
+                 "source_step": plan["source_step"], "preparation": str(root / "preparation.json")}
         # The production name includes global world size. Obtain it using the
         # saved configuration under a short-lived eight-rank naming environment.
         naming = dict(env, WORLD_SIZE="8", RANK="0", LOCAL_RANK="0")
@@ -477,6 +491,10 @@ def main():
         p.add_argument("--" + name, type=Path, required=True)
     p.add_argument("--max-steps", type=int, default=2000)
     p.add_argument("--warmup-steps", type=int, default=100)
+    p.add_argument("--source-step", type=int, default=40000)
+    p.add_argument("--checkpoint-steps", type=int, default=200)
+    p.add_argument("--validation-steps", type=int, default=200)
+    p.add_argument("--early-checkpoint-steps", type=int, nargs="*", default=[20])
     for mode in ("check", "train", "run", "name"):
         sub.add_parser(mode).add_argument("--prepared", type=Path, required=True)
     args = parser.parse_args()

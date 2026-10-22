@@ -2,7 +2,7 @@
 
 MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert同步官方Ψ₀工程。
 
-A100任务适配见[Handover50条、40k三专家联合微调及损失/ETA记录](docs/A100_SIMPLE_TASK50_FINETUNE.md)。
+A100任务适配见[Handover50条、38k三专家初始化后微调20k步及损失/ETA记录](docs/A100_SIMPLE_TASK50_FINETUNE.md)。
 
 | 模块 | 当前用途 | 说明 |
 | --- | --- | --- |

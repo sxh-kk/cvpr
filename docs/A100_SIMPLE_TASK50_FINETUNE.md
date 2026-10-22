@@ -1,4 +1,8 @@
-# A100：继承40k三专家的Handover任务微调
+# A100：38k联合权重初始化，Handover任务微调20k步
+
+**当前配方：UnifoLM38k初始化，八卡联合微调20,000步，每4,000步保存。**
+使用`finetune-handover-task50-joint38k.sh`，完整命令见末尾“当前38k配方”。
+下方40k／2k运行是已停止的历史试跑，记录与checkpoint保留，不作为当前初始化来源。
 
 完整继承UnifoLM 40k checkpoint的ActionExpert、VLM和MotionExpert，继续联合更新，DINO冻结。
 优化器、scheduler、RNG及任务步数重新开始，不新建动作头。原运行目录和用户交付数据只读保留。
@@ -24,7 +28,7 @@ metadata描述统计仅按具名顺序投影，原统计封存溯源；TRAIN/VAL
 首秒只供真实历史，末尾不足30个真实未来动作的窗口排除，不复制首帧或末尾动作。
 VAL固定每集8窗，共40窗，八rank等分无补齐；验证使用独立固定RNG且还原训练RNG。
 
-## 八卡配方
+## 历史40k／2k试跑配方（已停止）
 
 - 八张A10080GB，DDP，每卡batch4、累积1，有效batch32。
 - FP32 master/AdamW、BF16 autocast、gradient checkpointing，DINO冻结。
@@ -107,3 +111,48 @@ TRAIN13808窗、固定VAL40窗实际读取通过。第2、20次更新五组梯�
 CSV、PNG和进度JSON绑定同一run；A100原目录持续更新。两机系统时钟实测约有159秒偏差，
 不调整运行中机器时钟，ETA时长始终使用A100自身的墙钟间隔，不把跨机复制时间混入估算。
 以上是启动和早期检查记录，2000步完成及后续物理效果仍须分别验收。
+
+## 当前38k配方：任务训练20k步
+
+2026-10-22用户将初始化来源改为UnifoLM的38,000步联合checkpoint，并要求任务微调
+20,000次optimizer更新、每4,000次保存。此前40k配方及其运行记录保留作为历史；
+35k曾被提出，但原训练滚动保存中已不存在该checkpoint，未使用其它权重冒充35k。
+当前明确使用同一原UnifoLM运行目录下的`checkpoints/ckpt_38000/model.safetensors`。
+
+40k初始化的旧任务因用户切换请求发送SIGINT停止，实际完成400次更新。
+`ckpt_20`和`ckpt_200`有生产保存完成标记及完整模型、优化器、调度器和八rank RNG；
+停止信号打断了400步checkpoint的模型保存，`ckpt_400`仅保留部分rank RNG文件，
+不是可加载模型或可续训checkpoint。全部旧文件原样保留，停止审计为旧准备目录下的
+`stop_by_user_audit.json`。这次停止来自用户切换，非loss、梯度或CUDA数值失败。
+
+新任务从38k的ActionExpert、VLM、MotionExpert完整参数重新初始化，任务更新数从0开始；
+不继承原UnifoLM或旧40k任务的optimizer、scheduler、RNG。DINO继续冻结。
+八卡batch4×累积1、全局batch32和五组峰值LR保持上述配方：Action1e-5、
+语言骨干1e-7、视觉塔1e-6、投影1e-5、Motion1e-6。新的cosine预算为20,000更新、
+1,000更新warmup；每4,000更新保存完整checkpoint，早期20步保存关闭。
+八卡第2、20更新健康探针仍保留。验证仍为固定40个真实窗口，沿用生产触发语义，
+在完成第1、1001、2001……次及最终更新后执行，不将验证步号冒认为checkpoint成绩。
+
+沿用已接受的45 TRAIN／5 VAL、30Hz派生数据和18,025帧DINO缓存，不重新采集、
+转换或提取特征。初始化与归一化来源明确绑定38k同源运行的配置和统计；
+数据metadata描述统计不替代模型原归一化。当前任务预算约为
+`20000×32/13808≈46.35`遍有效TRAIN窗口，数据窗口高度相关；
+该预算是用户指定，不代表已证明最优，必须结合独立VAL和后续真实物理表现评估。
+
+新准备根目录：
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation`。
+38k独立CPU权重审计保存为该目录下的`joint38000_cpu_audit.json`；
+新任务准备目录为`handover_joint38000_b32_s20000`，不覆盖旧40k任务。
+独立Conda prefix与原数据、DINO路径继续复用。
+
+```bash
+bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh prepare
+bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh check
+bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh run
+bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
+```
+
+新目录仍记录`train.log`、完整配置及来源、`progress/losses.csv`、`progress/loss.png`、
+`progress/progress.json`和监控自身健康状态。ETA须等待新任务warmup结束和足够真实更新间隔，
+不把旧任务的耗时或进度接到新任务上。停止的旧任务清空剩余时间估算，并保留用户切换原因。
+配置、权重加载、GPU健康、20k训练完成及模型物理成功是分别验收的阶段。

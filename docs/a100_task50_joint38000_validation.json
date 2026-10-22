@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "state_at_recording": "running",
+  "source_revision_at_launch": "196ec733615be31ea60e299b268b3bf48a77ca1b",
+  "run_timestamp": "261022080240",
+  "run_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000/training/posttrain/handover_task50_joint38000.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022080240",
+  "started_utc": "2026-10-22T08:03:31.446012+00:00",
+  "source_step": 38000,
+  "source_model_sha256": "12a71e046e221b83f0bdb0efb50f9ba82442045aca0efabef3ae337f185320b7",
+  "source_model_bytes": 12066487572,
+  "strict_cpu_loading": {
+    "stored_tensors_compared": 1944,
+    "all_equal_and_finite": true,
+    "stored_tensor_groups": {
+      "action_header": 259,
+      "vlm_model": 625,
+      "motion_conditioner": 1060
+    },
+    "restored_shared_aliases": 2,
+    "optimizer_constructed": false,
+    "model_only_hardlink_protected": true
+  },
+  "environment": {
+    "prefix": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/envs/task-finetune-py311-cu126",
+    "python": "3.11.15 | packaged by conda-forge | (main, Aug 11 2026, 10:26:29) [GCC 14.4.0]",
+    "torch": "2.7.0+cu126",
+    "torch_cuda_build": "12.6",
+    "driver_version": "535.129.03",
+    "versions": {
+      "transformers": "4.57.1",
+      "accelerate": "1.7.0",
+      "flash-attn": "2.7.4.post1",
+      "safetensors": "0.6.2",
+      "numpy": "1.26.4",
+      "pillow": "11.3.0",
+      "pyarrow": "21.0.0",
+      "av": "16.0.1",
+      "wandb": "0.25.0",
+      "matplotlib": "3.10.7"
+    },
+    "pip_check": "passed",
+    "independent_site_packages": true,
+    "existing_production_versions_changed": false
+  },
+  "dataset": {
+    "task": "G1WholebodyHandoverTeleop-v0",
+    "source_root": "/gaozt-test1/datasets/sigmma_dataset/G1WholebodyHandoverTeleop-v0",
+    "successful_teacher_episodes": 50,
+    "train_episodes": 45,
+    "val_episodes": 5,
+    "independent_test_episodes": 0,
+    "source_fps": 50,
+    "training_fps": 30,
+    "source_selection": "ceil(k*50/30)",
+    "original_state45_retained": true,
+    "original_data_modified": false,
+    "tokens_reencoded": false,
+    "new_30hz_physical_replay_claimed": false,
+    "train_rows": 16463,
+    "val_rows": 1562,
+    "train_complete_windows": 13808,
+    "fixed_validation_windows": 40,
+    "real_dino_frames": 18025,
+    "dino_shape": [
+      5,
+      1024
+    ],
+    "normalization": "inherited unchanged from the same original UnifoLM run as source38k; equal to previous40k acceptance",
+    "action_values_outside_bounds_train": 0,
+    "action_values_outside_bounds_val": 0,
+    "source_state45_reordered_by_names_to_joint_state43": true
+  },
+  "configuration": {
+    "gpu_count": 8,
+    "per_gpu_batch": 4,
+    "gradient_accumulation_steps": 1,
+    "effective_global_batch": 32,
+    "precision": "BF16 autocast with production FP32 optimizer masters",
+    "source_step": 38000,
+    "source_initialization": "strict complete VLM/MotionExpert/ActionExpert weight-only initialization; fresh optimizer/scheduler/RNG",
+    "max_optimizer_updates": 20000,
+    "warmup_updates": 1000,
+    "peak_group_lrs": {
+      "action_header": 1e-05,
+      "lang_backbone": 1e-07,
+      "vision_tower": 1e-06,
+      "mm_projector": 1e-05,
+      "motion_expert": 1e-06
+    },
+    "checkpoint_completed_updates": [
+      4000,
+      8000,
+      12000,
+      16000,
+      20000
+    ],
+    "early_checkpoint_steps": [],
+    "validation_interval": 1000,
+    "validation_completed_updates": "1,1001,2001,...,19001,20000"
+  },
+  "data_acceptance_reuse": {
+    "status": "accepted_data_identity_reuse",
+    "checked_utc": "2026-10-22T08:03:04.577192+00:00",
+    "accepted_data_check": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_40k_preparation/handover_joint40k_b32_s2000/data_check.json",
+    "accepted_data_check_sha256": "7f8452cad0243da5cac799bb0c6d5a7dfc6dcc45e2d85a2c1bb2b59029183a60",
+    "new_data_check_sha256": "9e4180ce3e98f62aa2231148b85bbfc16e7efb9b8340af06b78edb84e5b5c12f",
+    "model_contract_identical_except_joint_checkpoint": true,
+    "data_config_identical": true,
+    "normalization_identical": true,
+    "source_metadata_identical": true,
+    "accepted_artifact_identity_count": 1331,
+    "budget_only_recomputed": 46.349942062572424,
+    "numeric_data_checks_repeated": false,
+    "gpu_training_verified": false
+  },
+  "early_gpu_numerical_health": {
+    "status": "passed",
+    "verified_updates": [
+      2,
+      20
+    ],
+    "gpu_count": 8,
+    "per_gpu_batch": 4,
+    "accumulation": 1,
+    "five_gradient_groups_finite_nonzero": true,
+    "cross_rank_probe_values_per_rank": 7700,
+    "probe_scope": "four leading values per trainable tensor, not all parameter bytes",
+    "loss_update2": 11.513908386230469,
+    "loss_update20": 6.694449424743652,
+    "full_run_peak_memory_or_throughput_claimed": false
+  },
+  "gpu_resource_ownership": {
+    "status": "unresolved_extra_contexts",
+    "nvml_uses_host_pids_while_proc_uses_container_pids": true,
+    "compute_context_entries_observed": 16,
+    "device_memory_total_used_mib": [
+      75418,
+      75474,
+      75482,
+      75478,
+      75490,
+      75498,
+      75496,
+      75504
+    ],
+    "additional_context_memory_mib_per_gpu": 12960,
+    "other_processes_signalled_or_changed": false,
+    "note": "All eight trainer ranks and numerical probes are live/passed. NVML PID namespace prevents direct process ownership matching; extra contexts are under read-only investigation, not counted as additional trainer ranks.",
+    "compiler_subprocess_observation": "Each of the eight trainer ranks has an Inductor compile-worker server with inherited NVIDIA device descriptors.",
+    "unconfirmed_inference": "These forked compiler processes may explain the second NVML context; host PID ownership is not established and no separate task attribution is claimed.",
+    "corrected_pid_comparison": "Direct comparison of NVML host PIDs with container rank PIDs is invalid; GPU ownership mapping remains unknown, not a failed numerical training check."
+  },
+  "monitor_snapshot": {
+    "generated_utc": "2026-10-22T08:07:18.545866+00:00",
+    "completed_optimizer_updates": 67,
+    "latest_train_loss_update": 55,
+    "latest_train_loss": 5.589617729187012,
+    "latest_validation_loss_update": 1,
+    "latest_validation_loss": 12.501106262207031,
+    "estimated_remaining_seconds": null,
+    "eta_wait_reason": "waiting_for_post_warmup_timestamps"
+  },
+  "monitor_health": {
+    "state": "ok",
+    "generated_utc": "2026-10-22T08:07:19.414352+00:00",
+    "last_error": null
+  },
+  "monitor_scope": "Actual offline W&B and production console. ETA is deferred until this run has post-warmup intervals, then estimates remaining wall time; copied snapshot is not live.",
+  "local_snapshot": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_current",
+  "independent_review": "passed: saved argv, actual runtime config, strict initialization receipt, source hashes, normalization, data reuse, actual production checkpoint predicate",
+  "validation": {
+    "configuration_cpu_tests": 8,
+    "monitor_cpu_tests": 19,
+    "actual_saved_argv_and_runtime_configuration": "passed",
+    "shell_syntax": "passed",
+    "early_gpu_updates_verified": [
+      2,
+      20
+    ]
+  },
+  "evidence_sha256": {
+    "a100-joint38000-cpu-audit.json": "0eb080f1c9c39f879ac7fbef1a5e54114af3fb969bd7edff6e604d4d9b751db6",
+    "a100-joint38000-early-gpu.json": "efb2b6838848811a2d0355fe8629ce1c8b0a76d97a6ce7eaa7973041b4fefb85",
+    "a100-joint38000-monitor.json": "e9f09e95ac4dc547aab5d28800cd48934919036631faae34ac736fe2fdc445ab",
+    "a100-joint38000-task20k-independent-review.json": "4d7255c4ad976a6091770cb5478f3f8e6ea11bc4d9d3dffa0b10dd2bf99059de",
+    "copy_receipt.json": "cf36525986ca790709ddfe8585b711a4690f392953122bb4abd7b3541d246106",
+    "SOURCE_AT_LAUNCH.json": "ee5cddaede7faa857ce7f7851adb3ecaf0681127304c5b7348ce76d27774a32e",
+    "DATA_ACCEPTANCE_REUSE.json": "f14f4bc66a66cfae2e44c5e54d19e72bb1cb725d0d158083905bb34bf1af3062"
+  },
+  "old40k_run": {
+    "state": "switched",
+    "completed_updates": 400,
+    "complete_checkpoint_updates": [
+      20,
+      200
+    ],
+    "incomplete_checkpoint_updates": [
+      400
+    ],
+    "files_preserved": true
+  },
+  "limits": [
+    "The20000-update run is not complete; first full checkpoint is scheduled at4000.",
+    "Early losses from different batches and sampled cross-rank checks do not establish convergence.",
+    "Fine-tuned physical task success has not been measured.",
+    "Successful source50Hz teacher trajectories were identity-bound, not physically revalidated after30Hz sampling.",
+    "There is no independent TEST split; correlated50-episode data cannot establish official benchmark success.",
+    "Extra GPU contexts and container/host PID mapping remain under read-only investigation; no other process was stopped."
+  ]
+}

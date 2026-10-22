@@ -4,7 +4,8 @@
 使用`finetune-handover-task50-joint38k.sh`，完整命令见末尾“当前38k配方”。
 下方40k／2k运行是已停止的历史试跑，记录与checkpoint保留，不作为当前初始化来源。
 
-完整继承UnifoLM 40k checkpoint的ActionExpert、VLM和MotionExpert，继续联合更新，DINO冻结。
+历史试跑曾完整继承UnifoLM 40k checkpoint的ActionExpert、VLM和MotionExpert，实际完成400次任务更新后，
+按用户请求停止并切换到38k来源。当前38k配方仍完整继承三个模块，DINO冻结，
 优化器、scheduler、RNG及任务步数重新开始，不新建动作头。原运行目录和用户交付数据只读保留。
 
 ## 数据和协议
@@ -41,7 +42,7 @@ VAL固定每集8窗，共40窗，八rank等分无补齐；验证使用独立固�
 
 实际窗口数和覆盖遍数见`data_check.json`；这是一轮初始预算，不是最优参数结论。
 
-## 环境和运行
+## 共享环境与历史40k准备命令
 
 独立Conda prefix：`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/envs/task-finetune-py311-cu126`，
 不共享原venv可变site-packages。版本和CPU权重核验在仓库外
@@ -61,6 +62,7 @@ python VLMExpert/scripts/data/extract_unifolm_dino.py \
   --model-path /gaozt-test1/datasets/MixEgoMotion/weights/dinov2-with-registers-large/e4c89a4e05589de9b3e188688a303d0f3c04d0f3 \
   --device cuda:0 --batch-size 32 --storage-dtype float32 --inference-precision bf16
 
+# 以下40k命令只用于历史复现；当前任务使用末尾的joint38k命令。
 bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh prepare
 bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh check
 bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh run
@@ -74,8 +76,9 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh run
 
 ## 损失和剩余时间
 
-默认输出目录：
-`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_40k_preparation/handover_joint40k_b32_s2000`。
+当前38k配方输出目录为
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000`。
+历史40k输出保留在同级`task50_40k_preparation/handover_joint40k_b32_s2000`，两轮文件不混合。
 
 - `run_config.json`、`argv.txt`、`preparation.json`：完整配方与来源。
 - `data_check.json`：实际读取、有效窗口、bounds覆盖、文件绑定。
@@ -88,29 +91,30 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh run
 包含已观察的验证/保存暂停。未开始、失败及最终收尾时不伪造ETA。训练和监控退出码分别保存。
 
 ```bash
-bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh status
+bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
 ```
 
-40k模型12,066,487,572字节，SHA256为
+## 历史40k来源与试跑记录（已停止）
+
+历史40k模型12,066,487,572字节，SHA256为
 `ff1b6ea8c63edae671220b443ed08ae11ef8efe07cd83cdcc0f90233f3462dc9`。
 真实CPU生产加载通过：1944个stored tensor逐值/dtype/shape一致且有限，两项共享alias按实际共享关系恢复。
 该检查0更新、未建optimizer、未用GPU，不替代本任务八卡或物理验收。
 训练是否启动、实际loss和任务表现以各自运行记录为准，不因安装或loss下降宣称测评通过。
 
-## 本次实际启动记录
-
 2026-10-22已从上述40k初始化并实际启动八卡，源代码为`324fea3`；
 实际Python3.11.15、Torch2.7.0+cu126、Transformers4.57.1、FlashAttn2.7.4.post1、
 W&B0.25.0、Matplotlib3.10.7，驱动535.129.03。原生产包版本保持不变，仅补六项纯CPU绘图库。
 TRAIN13808窗、固定VAL40窗实际读取通过。第2、20次更新五组梯度有限且非零，
-每rank7700个参数探针一致；20步完整checkpoint已保存，训练继续。
+每rank7700个参数探针一致。旧任务按用户切换请求在400次更新时停止：
+`ckpt_20`和`ckpt_200`完整保存，400步保存被停止信号打断，`ckpt_400`不完整，不能加载或续训。
 瞬时显存约61.3–62.5GB/卡，不冒充全程峰值或吞吐验收。
 早期GPU与监控证据摘要见[a100_task50_joint40k_validation.json](a100_task50_joint40k_validation.json)。
 
 本机查看快照位于`/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_current`，
-CSV、PNG和进度JSON绑定同一run；A100原目录持续更新。两机系统时钟实测约有159秒偏差，
+CSV、PNG和进度JSON仅绑定历史40k run，原始训练日志和checkpoint保留。两机系统时钟实测约有159秒偏差，
 不调整运行中机器时钟，ETA时长始终使用A100自身的墙钟间隔，不把跨机复制时间混入估算。
-以上是启动和早期检查记录，2000步完成及后续物理效果仍须分别验收。
+以上是历史启动和早期检查记录；原2000步预算未跑满，不能写成训练完成或物理任务验收通过。
 
 ## 当前38k配方：任务训练20k步
 
@@ -118,6 +122,14 @@ CSV、PNG和进度JSON绑定同一run；A100原目录持续更新。两机系统
 20,000次optimizer更新、每4,000次保存。此前40k配方及其运行记录保留作为历史；
 35k曾被提出，但原训练滚动保存中已不存在该checkpoint，未使用其它权重冒充35k。
 当前明确使用同一原UnifoLM运行目录下的`checkpoints/ckpt_38000/model.safetensors`。
+38k来源的真实CPU严格加载已通过：1944个stored tensor逐值、dtype、shape一致且有限，
+Action259、VLM625、Motion1060，两个共享alias按同storage恢复。模型12,066,487,572字节，
+SHA256为`12a71e046e221b83f0bdb0efb50f9ba82442045aca0efabef3ae337f185320b7`。
+同文件系统下的`protected_source38000/model.safetensors`另有硬链接保护，未复制原optimizer或RNG。
+原38k保存完成标记、配置、argv和统计均已绑定；这次严格加载为CPU检查，不代表物理成功。
+新八卡任务已于A100时间2026-10-22 08:03:31 UTC启动，代码为`196ec73`，
+任务时间戳`261022080240`。生产初始化收据确认38k完整继承、全新优化器和任务步数从0开始。
+旧40k试跑的loss、健康检查或checkpoint不作为新38k任务的运行结果。
 
 40k初始化的旧任务因用户切换请求发送SIGINT停止，实际完成400次更新。
 `ckpt_20`和`ckpt_200`有生产保存完成标记及完整模型、优化器、调度器和八rank RNG；
@@ -134,7 +146,10 @@ CSV、PNG和进度JSON绑定同一run；A100原目录持续更新。两机系统
 在完成第1、1001、2001……次及最终更新后执行，不将验证步号冒认为checkpoint成绩。
 
 沿用已接受的45 TRAIN／5 VAL、30Hz派生数据和18,025帧DINO缓存，不重新采集、
-转换或提取特征。初始化与归一化来源明确绑定38k同源运行的配置和统计；
+转换或提取特征。新旧模型协议（除权重路径）、完整data配置、归一化和源metadata一致，
+重绑1331项已验收文件身份，复用原CPU数据检查，仅重算20k预算对应的覆盖遍数。
+证据为新准备目录的`DATA_ACCEPTANCE_REUSE.json`，未重复已通过的数值验收。
+初始化与归一化来源明确绑定38k同源运行的配置和统计；
 数据metadata描述统计不替代模型原归一化。当前任务预算约为
 `20000×32/13808≈46.35`遍有效TRAIN窗口，数据窗口高度相关；
 该预算是用户指定，不代表已证明最优，必须结合独立VAL和后续真实物理表现评估。
@@ -156,3 +171,17 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
 `progress/progress.json`和监控自身健康状态。ETA须等待新任务warmup结束和足够真实更新间隔，
 不把旧任务的耗时或进度接到新任务上。停止的旧任务清空剩余时间估算，并保留用户切换原因。
 配置、权重加载、GPU健康、20k训练完成及模型物理成功是分别验收的阶段。
+
+新38k任务第2、20次更新的八卡检查已通过：五组梯度有限且非零，每rank的7700个
+参数探针完全相同。探针取每个可训练tensor前4个值，不代表全部参数逐字节比较。
+两次TRAIN loss分别为11.513908和6.694449，使用不同batch，不能单独解释为收敛；
+首次固定VAL在完成第1次更新后记录loss12.501106。后续NVML快照每卡有一组
+62,446–62,532MiB的主要上下文，另有约12,960MiB的上下文，总设备占用75,418–75,504MiB。
+容器`/proc`与NVML的host PID不同，额外上下文归属尚未确定，未停止或修改其他进程。
+可见每rank的Inductor编译子进程持有继承的GPU设备句柄，这可能相关，但尚无直接PID映射证据。
+八个训练rank和数值检查均正常；该资源现象单独记录，不把16个NVML条目当作16个训练rank，
+不将早期显存视为全程峰值或吞吐验收。完整20k训练及微调后的物理效果尚未验收。
+本次启动摘要见[a100_task50_joint38000_validation.json](a100_task50_joint38000_validation.json)。
+当前38k的本机查看快照单独存放于
+`/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_current`；
+它是带复制时间和SHA的快照，持续更新的原始CSV、PNG和进度在A100新准备目录下。

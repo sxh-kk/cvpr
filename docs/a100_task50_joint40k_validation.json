@@ -130,10 +130,29 @@
     "python_compile": "passed"
   },
   "limits": [
-    "Training remains running; 2000 updates are not yet complete.",
+    "This historical40k task was stopped at400 updates at the user request; its2000-update budget was not completed.",
     "Early finite loss/gradient and sampled cross-rank checks do not establish convergence.",
     "Fine-tuned physical task success has not been measured.",
     "A100 and4090 wall clocks differ by about159 seconds in the copied snapshot; remaining-duration estimates use only A100 timestamps.",
     "Teacher50Hz success acceptance was reused through artifact identity binding, not rerun or relabeled as30Hz physical success."
-  ]
+  ],
+  "current_state": "switched",
+  "user_requested_switch": {
+    "source_step": 38000,
+    "task_optimizer_updates": 20000,
+    "checkpoint_interval": 4000,
+    "completed_updates_before_stop": 400,
+    "stop_reason": "用户将初始化改为UnifoLM38,000步，任务微调20,000更新，每4,000更新保存；主动停止原40k试跑，不属于loss、梯度或CUDA数值故障。",
+    "finished_utc": "2026-10-22T07:54:02.235869+00:00",
+    "raw_supervisor_returncode": 1,
+    "complete_checkpoint_updates": [
+      20,
+      200
+    ],
+    "incomplete_checkpoint_updates": [
+      400
+    ],
+    "files_preserved": true,
+    "stop_audit_sha256": "63beb287a8b1de9217492ad7daa0bb7482ccb36770a40402c6a4a427075e03d6"
+  }
 }

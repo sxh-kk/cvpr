@@ -82,6 +82,23 @@ def write_report_and_close(path: Path, result, close):
         close()
 
 
+def episode_reset_options(environment_config, dr_level, *, recorded_handover=False):
+    # SIMPLE DR0 deliberately resamples materials and distractors. A recorded
+    # heldout source used dr_level=None to restore every recorded randomizer.
+    return {"state_dict": environment_config, "dr_level": None if recorded_handover else dr_level}
+
+
+def episode_termination(episode, terminated, truncated, sim_time, *, continue_after_success=False):
+    if terminated:
+        episode["task_success_observed"] = True
+        episode.setdefault("first_task_success_sim_time_s", float(sim_time))
+        if not continue_after_success:
+            return "task_terminated"
+    if truncated:
+        return "env_truncated"
+    return None
+
+
 def worker_result_errors(result, expected_episodes: int):
     """Isaac shutdown may exit(0) after a Python failure; audit saved evidence."""
     errors = []
@@ -122,6 +139,8 @@ def parse_args():
                         help="Render Isaac only at each synchronized observation; keep all physics in MuJoCo")
     parser.add_argument("--initial-physics-run", type=Path,
                         help="Restore only row 0 of a same-task/same-seed run's complete physical state once, after exact model checks")
+    parser.add_argument("--handover-initialization", type=Path,
+                        help="Once before history: source-informed held-out Handover cold start; never teacher actions")
     parser.add_argument("--warmup-control", choices=("measured_pose_pd", "live_pose_sonic_v1_1"),
                         default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
     parser.add_argument("--warmup-hand-policy", choices=("measured", "open"), default="measured",
@@ -140,6 +159,8 @@ def parse_args():
     parser.add_argument("--fall-height", type=float, default=.35)
     parser.add_argument("--fall-tilt-degrees", type=float, default=75.)
     parser.add_argument("--stop-on-fall", action="store_true")
+    parser.add_argument("--continue-after-task-success", action="store_true",
+                        help="Handover only: retain official success flag but continue to the observation time limit")
     parser.add_argument("--sim-mode", choices=("mujoco", "mujoco_isaac", "isaacsim"), default="mujoco")
     parser.add_argument("--compatibility-evidence", type=Path)
     parser.add_argument("--diagnostic-unverified-sonic", action="store_true",
@@ -150,6 +171,8 @@ def parse_args():
                         default="mjcf_limits")
     parser.add_argument("--worker-task", choices=SUPPORTED_TASKS, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.continue_after_task_success and args.tasks != ["G1WholebodyHandoverTeleop-v0"]:
+        parser.error("Continuing after official success is only supported for Handover observation")
     if args.isaac_observation_only and (not args.sync_observations or args.sim_mode == "mujoco"):
         parser.error("--isaac-observation-only requires --sync-observations and Isaac render mode")
     if args.warmup_control == "live_pose_sonic_v1_1" and not args.sync_observations:
@@ -162,6 +185,11 @@ def parse_args():
                 args.tasks[0] not in (CARRYBOX_TASK, LIFTBOX_TASK) or args.dr_level != 0):
             parser.error("--initial-physics-run needs an absolute source, synchronized observations, one local DR0 task and one episode")
         args.initial_physics_run = args.initial_physics_run.resolve(strict=True)
+    if args.handover_initialization is not None:
+        if (not args.sync_observations or args.dr_level != 0 or
+                args.tasks != ["G1WholebodyHandoverTeleop-v0"] or args.initial_physics_run is not None):
+            parser.error("Handover initialization requires synchronized Handover DR0 only")
+        args.handover_initialization = args.handover_initialization.resolve(strict=True)
     args.data_root = args.data_root.resolve(strict=True)
     args.sonic_resources = args.sonic_resources.resolve(strict=True)
     if not args.output.is_absolute() or args.output.resolve().is_relative_to(Path(__file__).resolve().parents[2]):
@@ -297,8 +325,14 @@ def run_worker(args):
                                   "task_adapter": raw.task.metadata["task_adapter"]}
             else:
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
-                obs, info = env.reset(seed=seed, options={"state_dict": env_config, "dr_level": args.dr_level})
+                obs, info = env.reset(seed=seed, options=episode_reset_options(
+                    env_config, args.dr_level, recorded_handover=args.handover_initialization is not None))
             initial_physics = None
+            handover_initial = None
+            if args.handover_initialization is not None:
+                from handover_eval_runtime import load_initialization, initialize
+                row, receipt = load_initialization(args.handover_initialization, episode_index)
+                obs, info, handover_initial = initialize(raw, row, receipt)
             if args.initial_physics_run is not None:
                 from initial_physics_state import InitialPhysicsState
                 initializer = InitialPhysicsState(args.initial_physics_run,
@@ -323,9 +357,12 @@ def run_worker(args):
                 "warmup_frames": 0, "policy_frames": 0, "frames": 0,
                 "fell_before_first_policy_command": False,
                 "status": "running", "instruction": raw.task.instruction}
+            episode["source_scene_reset_dr_level"] = None if args.handover_initialization is not None else args.dr_level
             if initial_physics is not None:
                 episode["initial_physics"] = initial_physics
                 episode["local_environment_config_scope"] = "same-seed reset model; actual initial coordinates/velocities are in initial_physics"
+            if handover_initial is not None:
+                episode["handover_initialization"] = handover_initial
             pelvis_id = raw.mujoco.mjModel.body("pelvis").id
             episode["initial_pelvis_position_m"] = raw.mujoco.mjData.xpos[pelvis_id].tolist()
             episode["initial_pelvis_quaternion_wxyz"] = raw.mujoco.mjData.xquat[pelvis_id].tolist()
@@ -399,12 +436,16 @@ def run_worker(args):
                         record.update(next_sim_time_s=float(obs["sim_time_s"]),
                                       decoder_calls_after_step=controller.decoder_calls,
                                       terminated=bool(terminated), truncated=bool(truncated), reward=float(reward))
+                        if args.worker_task == "G1WholebodyHandoverTeleop-v0":
+                            from handover_eval_runtime import measured_task_state
+                            record["handover_measured_state"] = measured_task_state(raw)
                         if "carry_box_progress" in info or "lift_box_hold_progress" in info:
                             record["task_progress"] = info.get("lift_box_hold_progress", info.get("carry_box_progress"))
                         trace.write(json.dumps(record, allow_nan=False) + "\n")
-                        if terminated or truncated:
-                            episode["task_success_observed"] = bool(terminated)
-                            episode["status"] = "task_terminated" if terminated else "env_truncated"
+                        terminal = episode_termination(episode, terminated, truncated, obs["sim_time_s"],
+                            continue_after_success=args.continue_after_task_success)
+                        if terminal:
+                            episode["status"] = terminal
                             break
                 if episode["status"] == "running":
                     episode["status"] = "stopped"
@@ -464,6 +505,7 @@ def run_worker(args):
                     else {"kind":"measured_pose_pd", "balance_decoder_during_history":False})
                 episode["warmup_control"]["actual_warmup_decoder_calls"] = episode.get("warmup_decoder_calls", controller.decoder_calls)
                 episode["body_token_projection"] = deepcopy(agent.projection_receipt)
+                episode["continue_after_official_success"] = args.continue_after_task_success
                 episode["strategy_quality_assessment"] = (
                     "ineligible: robot already unstable before first learned action" if episode["fell_before_first_policy_command"]
                     else "ineligible: bounded integration smoke with explicit controller compatibility boundary")

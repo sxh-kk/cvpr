@@ -363,3 +363,60 @@ BF16 autocast、1280×1024张量（四张图各320token），没有加载模型c
 `isolated_rng(seed+100000+rank)`，因此不是任意重新抽噪声导致的不可比曲线。
 持续上升是可能过拟合/泛化退化的信号，不等于物理任务失败，也不能归因于融合AdamW或上述梯度差。
 按用户要求继续原20k训练，不据此暂停、重启或改变配方；模型选择需结合各正式checkpoint的固定验证和真实物理表现。
+
+### 任务6000步导出与本机Handover物理测评
+
+用户要求导出最新权重并在本机对应SIMPLE任务测评。本次将请求时最近保存完整的`ckpt_6000`固定，
+这是从UnifoLM38k三模块初始化后新增6000次任务更新，请求时训练约6480步；不是UnifoLM6000步，
+也不是测评结束时仍在变化的最新训练步数。确认生产保存完成标记和11个非空载荷后，
+在A100独立导出目录用硬链接保护模型，低优先级计算SHA，再通过SSH/rsync复制模型与小型配置。
+没有复制optimizer/RNG，没有暂停、重启或修改训练及参数。
+
+导出目录为`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/exports/handover_fused_task6000_261022095337`。
+模型为12,066,487,572字节，源端和本机SHA256均为
+`dc0ada4817acbdcf46b3489d9618e22f53d8935dfad3937fd883e332bd9aaf3e`。
+本机部署在`/var/tmp/cvpr-evaluation-zxc-task50-eval6000/deployment`，也可通过
+`/home/zxc/CVPR_Evaluation_runtime/task50_eval6000/deployment`访问。
+Action、VLM、Motion均从该完整联合checkpoint严格加载；Motion构造元信息复用既有资源，
+其1060个存储tensor则从本次联合权重重新导出，1061键严格加载及序列化逐值比较通过。
+
+任务为`simple/G1WholebodyHandoverTeleop-v0`，使用原五条VAL场景39/65/80/92/94，
+每场景一个明确采样seed、独立模型服务、串行运行16秒。这不是独立TEST，也不是官方六任务成绩。
+初态取实际reset关节、row0机器人root与目标/篮子位姿，核对独立初态记录和质量；
+不使用environment_config中残留的最终物体位置，不执行教师动作或轨迹前缀。
+缺失速度置零，先用实测姿态PD保持1秒，采集真实在线RGB历史，然后完全执行新策略动作。
+这属于source-informed cold start，缺少教师控制器/RNG等完整状态，不能声称精确教师重放。
+记录场景需传`dr_level=None`恢复所有randomizer；DR0会重采材质/干扰物。
+前期DR0两次试跑及初始化前拒绝的一次检查保留在本机，均排除在最终五条统计外。
+
+使用既有两个Conda环境：模型Python3.11.17、Torch2.7.0+cu126、Transformers4.57.1、
+FlashAttention2.7.4.post1；仿真Python3.10.22、Torch2.7.0+cu128、MuJoCo3.3.6、Isaac4.5.0。
+实际RTX4090设备报告49140MiB，驱动570.211.01。
+MuJoCo为200Hz权威物理，SONIC v1.1 ONNX为50Hz，Isaac RTX只同步渲染与提供真实RGB；
+模型通过`127.0.0.1:21106`通信，HTTP等待期间暂停仿真时间，不声称实时吞吐。
+冻结DINO在线编码6个5Hz历史时刻，每帧5×1024；RGB为256×320，动作30×80，
+30Hz、执行30步、采样10步、RTC off，body64不做额外投影。
+SONIC encoder/decoder/observation及机器人资源身份与源包一致；采集时全部PD/扭矩运行档案未完整绑定，
+仍显式使用`fixed_cpp_baseline`＋`mjcf_limits`和诊断开关，`formal_evaluation_eligible=false`。
+源任务uid到本机uid的映射也没有冒充运行时等价认证。
+
+五条均完成16秒、状态有限且没有跌倒，每条执行15个策略chunk及750次SONIC解码。
+source39在仿真7.445秒首次触发现有官方成功标志；source65/80/92/94未触发，最终目标物均在桌面。
+保持原成功判据并在首次标志后继续运行到16秒，source39末帧目标物同时接触篮子和左手。
+因此`1/5`只是本组场景观察到接触成功标志的比例，不能写成20%完整交接/释放成功率。
+末1秒51个50Hz采样中，仅1个采样同时满足碰篮且无左右手接触，不能据此确认稳定释放；
+也未重做源包完整200Hz `handover-physics-v2`验收。
+当前只能确认这组冷启动表现不稳定，单checkpoint结果不能单独归因于过拟合、数据量或融合AdamW。
+
+每条视频经ffprobe核验为H.264、640×360、50fps、801帧、16.02秒；
+结果、trace、视频和服务启动收据均有SHA绑定。
+source39视频在本机`/var/tmp/cvpr-evaluation-zxc-task50-eval6000/recorded-case0/case-0/G1WholebodyHandoverTeleop-v0/episode-0/rollout.mp4`，
+其余四条位于同根目录`full-evaluation/case-{1,2,3,4}/G1WholebodyHandoverTeleop-v0/episode-{1,2,3,4}/rollout.mp4`。
+完整本机审计为`reports/EVALUATION_SUMMARY.json`，仓库摘要见
+[checkpoint、协议、五条结果及视频索引](a100_task6000_local_handover_evaluation.json)。
+串行队列1秒间隔NVML显存采样峰值16589MiB（包括桌面及前期DR0场景），不是连续全程显存上界。
+新增路径与报告逻辑的23项CPU回归检查通过，其中5项使用小型真实MuJoCo模型；
+GPU依据为上述五条实际闭环，没有把CPU检查或安装成功当作任务通过。
+
+A100源端14:10:19 UTC进度快照为7756/20000，仍是原PID1790110及09:55:17启动记录，
+最近TRAIN为7748步0.20964、固定VAL为7001步1.59204；此处仅作未干预训练的带时间记录。

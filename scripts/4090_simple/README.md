@@ -10,6 +10,50 @@
 A100已提供CPU导出与保存完成等待工具`export_bundle.py`，4090可通过SSH／rsync拉取资源。
 具体源路径、READY判定、SHA校验及当前缺项见[资源交接](../../docs/4090_SIMPLE_TRANSFER.md)。
 
+## Handover任务微调权重的本机测评
+
+`prepare_task_snapshot.py`专用于从UnifoLM38k初始化的task50联合微调checkpoint。
+源`SNAPSHOT_READY.json`须绑定保存完成、模型SHA、source38k/task0/当前task_step及已验收30Hz数据契约，
+同时提供两份实际初始化收据；不将任务6000步误标为UnifoLM6000步。
+它严格核对架构、token、RGB、历史及原归一化，仅接受已验收任务的路径/划分/LR差异。
+新Motion权重从这次完整联合模型导出，旧本机包只提供Qwen/DINO及Motion构造元信息。
+旧`prepare_joint_snapshot.py`完整model/data相等的默认限制保持不变。
+
+```bash
+python scripts/4090_simple/prepare_task_snapshot.py \
+  --source /本机独立目录/source --resources "$CVPR_SIMPLE_RUNTIME/resources" \
+  --output /同一文件系统的新目录/deployment
+```
+
+`prepare_handover_eval.py`只准备交付包的五条原VAL场景39/65/80/92/94，不更新模型。
+输入是`heldout_reset`的meta、data、validation和provenance小文件，不需要源视频。
+它从row0及独立物体初态日志构造一次cold start，避免使用environment_config残留的最终物体姿态；
+具名43关节、root姿态/速度和目标/篮子质量均绑定来源，资产复用既有本机资源。
+记录源任务uid的显式映射，不认证两套任务/控制代码完全相同。
+
+```bash
+python scripts/4090_simple/prepare_handover_eval.py \
+  --heldout-root /本机独立目录/release/heldout_reset \
+  --asset-root "$SIMPLE_DATA_DIR" --output /本机新目录/heldout_eval_data
+```
+
+`run_closed_loop.py --handover-initialization /绝对路径/handover_initialization.json`仅适用Handover。
+它在真实历史采集前一次设置记录的初态，不使用教师动作/primer或后续状态进行控制，不在控制中重置物体。
+缺失的关节速度明确置零，MuJoCo软限位的记录穿透最多允许0.001rad且保留原值，不能据此放宽动作限制。
+该模式使用`dr_level=None`恢复所有记录randomizer；普通官方DR0会重采材质和干扰物，两者必须分开统计。
+源collection增益/扭矩档案未完全绑定时继续保留诊断边界，不伪造controller compatibility证据。
+
+`--continue-after-task-success`保留首次官方success标志并继续观察到`--seconds`上限，
+仅用于Handover；不新增reward调用或修改成功判据。测评可用16秒、每段执行30步、RTC off、
+10步采样、同步Isaac RTX观测和`--video`；每个物理episode使用独立模型服务进程和明确采样seed。
+trace额外保存目标/篮子姿态和具名接触，帮助区分仅碰篮、完整交接和释放；
+这些50Hz观测不冒充交付包完整的`handover-physics-v2`重新验收或官方独立TEST成绩。
+
+2026-10-22的任务6000步实际导出、五条16秒GPU结果及排除的前期DR0诊断见
+[测评记录](../../docs/A100_SIMPLE_TASK50_FINETUNE.md#任务6000步导出与本机handover物理测评)和
+[逐条证据索引](../../docs/a100_task6000_local_handover_evaluation.json)。
+五条中1条触发接触成功标志、均未跌倒；触发标志的末帧仍有左手接触，不能称为完整释放验收通过。
+
 ## Conda 与依赖
 
 本机创建了两个新环境，未复用用户其他机器人环境：

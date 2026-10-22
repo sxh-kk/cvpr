@@ -15,6 +15,25 @@ spec.loader.exec_module(smoke)
 
 
 class SmokeReportingTests(unittest.TestCase):
+    def test_continue_keeps_first_success_without_hiding_later_truncation(self):
+        episode = {'task_success_observed': False}
+        self.assertIsNone(smoke.episode_termination(episode, True, False, 7.4, continue_after_success=True))
+        self.assertIsNone(smoke.episode_termination(episode, False, False, 8., continue_after_success=True))
+        self.assertTrue(episode['task_success_observed'])
+        self.assertEqual(episode['first_task_success_sim_time_s'], 7.4)
+        self.assertEqual(smoke.episode_termination(episode, True, True, 8.2,
+                         continue_after_success=True), 'env_truncated')
+        self.assertEqual(episode['first_task_success_sim_time_s'], 7.4)
+        self.assertEqual(smoke.episode_termination({}, True, False, 7.4), 'task_terminated')
+        self.assertEqual(smoke.episode_termination({}, True, True, 7.4), 'task_terminated')
+
+    def test_recorded_handover_preserves_all_scene_randomizers(self):
+        state = {'dr_state_dict': {'distractors': {}, 'material': {'table': 'recorded'}}}
+        recorded = smoke.episode_reset_options(state, 0, recorded_handover=True)
+        self.assertIs(recorded['state_dict'], state)
+        self.assertIsNone(recorded['dr_level'])
+        self.assertEqual(smoke.episode_reset_options(state, 0)['dr_level'], 0)
+
     def test_numpy_state_serialization_and_cleanup_even_if_report_is_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.json"

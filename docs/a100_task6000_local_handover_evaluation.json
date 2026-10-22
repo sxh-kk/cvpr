@@ -1,0 +1,433 @@
+{
+  "contract": "cvpr-task6000-local-handover-diagnostic-v1",
+  "generated_utc": "2026-10-22T14:14:34.011756+00:00",
+  "status": "five_real_gpu_physics_rollouts_completed_with_limitations",
+  "latest_definition": "latest save-complete checkpoint at request snapshot (training approximately 6480); held fixed during export/evaluation; not latest at report completion",
+  "local_deployment": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/deployment",
+  "artifact_root": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000",
+  "model_load": "new complete task checkpoint strictly loaded by local policy; fresh Motion export from the same complete checkpoint; no replacement with the old 20k/28k action or motion weights",
+  "model_environment": {
+    "prefix": "/home/zxc/miniconda3/envs/cvpr-simple-model311",
+    "python": "3.11.17 (main, Oct  1 2026, 20:17:42) [GCC 14.3.0]",
+    "versions": {
+      "torch": "2.7.0+cu126",
+      "transformers": "4.57.1",
+      "flash-attn": "2.7.4.post1",
+      "numpy": "1.26.4",
+      "onnxruntime": "1.23.2",
+      "safetensors": "0.6.2"
+    }
+  },
+  "simulation_environment": {
+    "prefix": "/home/zxc/miniconda3/envs/cvpr-simple-sim310",
+    "python": "3.10.22 (main, Oct  1 2026, 20:14:04) [GCC 14.3.0]",
+    "versions": {
+      "torch": "2.7.0+cu128",
+      "mujoco": "3.3.6",
+      "isaacsim": "4.5.0.0",
+      "numpy": "1.26.4",
+      "onnxruntime": "1.23.2",
+      "pyarrow": "20.0.0"
+    }
+  },
+  "protocol": {
+    "task": "simple/G1WholebodyHandoverTeleop-v0",
+    "split": "the five existing validation episodes, not independent TEST",
+    "source_val_episodes": [
+      39,
+      65,
+      80,
+      92,
+      94
+    ],
+    "source_informed_cold_start": true,
+    "recorded_scene_dr_level": null,
+    "teacher_actions_used": false,
+    "teacher_trajectory_prefix_used": false,
+    "physical_state_restores_during_control": false,
+    "missing_joint_and_object_velocity": "zero where source did not record it",
+    "history_warmup": "one second measured-pose PD and genuine online RGB; no teacher primer or source video",
+    "dino": "frozen dinov2-with-registers-large, genuine six 5Hz history frames, 5x1024 per frame",
+    "rgb_profile_hw": [
+      256,
+      320
+    ],
+    "action_chunk_shape": [
+      30,
+      80
+    ],
+    "body_token_dim": 64,
+    "hand_command_dim": 14,
+    "action_fps": 30,
+    "controller_hz": 50,
+    "physics_hz": 200,
+    "render": "Isaac RTX, observation only, synchronized to authoritative MuJoCo",
+    "localhost_model_url": "http://127.0.0.1:21106",
+    "rtc": false,
+    "flow_sampling_steps": 10,
+    "execute_steps": 30,
+    "seconds": 16,
+    "inference_time": "simulation paused during synchronous HTTP; wall time is not real-time throughput",
+    "continue_after_success": true,
+    "official_success_counter_unchanged": true,
+    "controller_identity": {
+      "body_token_version": "body_token_v1_1",
+      "decoder_sha256": "34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509",
+      "provenance": "/home/zxc/CVPR_Evaluation_runtime/resources/sonic_v1_1/PROVENANCE.json",
+      "compatibility_status": "unverified_diagnostic_only",
+      "compatibility_evidence": "",
+      "pd_profile": "fixed_cpp_baseline",
+      "body_kp": [
+        99.09842777666113,
+        99.09842777666113,
+        40.17923847137318,
+        99.09842777666113,
+        28.50124619574858,
+        28.50124619574858,
+        99.09842777666113,
+        99.09842777666113,
+        40.17923847137318,
+        99.09842777666113,
+        28.50124619574858,
+        28.50124619574858,
+        40.17923847137318,
+        28.50124619574858,
+        28.50124619574858,
+        14.25062309787429,
+        14.25062309787429,
+        14.25062309787429,
+        14.25062309787429,
+        14.25062309787429,
+        16.77832748089279,
+        16.77832748089279,
+        14.25062309787429,
+        14.25062309787429,
+        14.25062309787429,
+        14.25062309787429,
+        14.25062309787429,
+        16.77832748089279,
+        16.77832748089279
+      ],
+      "body_kd": [
+        6.3088018534966395,
+        6.3088018534966395,
+        2.5578897650279457,
+        6.3088018534966395,
+        1.814445686584846,
+        1.814445686584846,
+        6.3088018534966395,
+        6.3088018534966395,
+        2.5578897650279457,
+        6.3088018534966395,
+        1.814445686584846,
+        1.814445686584846,
+        2.5578897650279457,
+        1.814445686584846,
+        1.814445686584846,
+        0.907222843292423,
+        0.907222843292423,
+        0.907222843292423,
+        0.907222843292423,
+        0.907222843292423,
+        1.06814150219,
+        1.06814150219,
+        0.907222843292423,
+        0.907222843292423,
+        0.907222843292423,
+        0.907222843292423,
+        0.907222843292423,
+        1.06814150219,
+        1.06814150219
+      ],
+      "observation_phase": "post_step_mj_forward_same_qpos",
+      "hand_torque_profile": "mjcf_limits"
+    },
+    "controller_identity_limitation": "SONIC v1.1 artifacts match released identities; original collection PD/body-gain/hand torque runtime not all stamped. Explicit fixed_cpp_baseline plus mjcf_limits remains diagnostic, compatibility not certified",
+    "scene_uid_mapping": "g1_wholebody_handover_sonic -> g1_wholebody_handover_teleop; explicit alias, runtime equivalence not certified"
+  },
+  "observed_results": {
+    "episodes": 5,
+    "official_success_flags": 1,
+    "official_flag_fraction": 0.2,
+    "falls": 0,
+    "finite_episodes": 5,
+    "strict_release_success": "not certified; final contact samples and videos do not establish complete release handover",
+    "interpretation": "one container-contact flag with final left-hand contact; four targets rest on table. This is not a 20% complete-handover benchmark or proof that the checkpoint alone caused failure"
+  },
+  "performance_scope": {
+    "successful_action_http_calls": 75,
+    "mean_action_http_latency_s": 0.24967368788085878,
+    "max_action_http_latency_s": 0.7509183860383928,
+    "gpu_memory_samples": {
+      "recorded-case0": {
+        "sample_count": 163,
+        "sampled_peak_mib": 16471,
+        "path": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/recorded-case0/gpu-samples.csv",
+        "sha256": "b2e189283a93c178c2f89fe14136fbdf116f5dea8d240faa810a3b045e9b0091",
+        "scope": "one-second NVML device memory samples; includes desktop and this serial queue"
+      },
+      "full-evaluation": {
+        "sample_count": 833,
+        "sampled_peak_mib": 16589,
+        "path": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/gpu-samples.csv",
+        "sha256": "7236468730c4ee4516cdbb93360d86cecbf4b32c11f51ca1f62826bfca40ed84",
+        "scope": "one-second NVML device memory samples; includes desktop and this serial queue"
+      }
+    }
+  },
+  "excluded_diagnostics": [
+    {
+      "path": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/case-0",
+      "reason": "initialization validation rejected small recorded soft-limit penetration before any policy command; excluded from rollout denominator"
+    },
+    {
+      "path": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/heldout-case-0",
+      "reason": "preliminary DR0 resampled scene; stopped at early success flag; excluded"
+    },
+    {
+      "path": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-0",
+      "reason": "DR0 resampled scene before recorded-scene correction; replaced by recorded-case0, excluded"
+    }
+  ],
+  "limitations": [
+    "five pre-existing VAL scenes, one sampler seed per scene, no independent TEST or confidence estimate",
+    "source-informed cold start is not exact restoration of teacher controller/RNG/velocities",
+    "local visual appearance and task UID alias are not certified identical to source collection",
+    "source control gains are not completely identified; formal_evaluation_eligible remains false",
+    "official task flag requires container contact and does not itself certify complete transfer/release",
+    "50Hz contact trace does not replace original release full handover-physics-v2 gate",
+    "single checkpoint evaluated; no causal attribution to overfitting, fused AdamW or dataset size"
+  ],
+  "cpu_regression_tests": {
+    "test_prepare_task_snapshot": 9,
+    "test_prepare_handover_eval": 4,
+    "test_handover_eval_runtime": 5,
+    "test_smoke_reporting": 5,
+    "passed": 23,
+    "scope": "CPU only including a small real MuJoCo fixture; GPU evidence comes from these five real rollouts"
+  },
+  "a100_training_read_only_snapshot": {
+    "state": "running",
+    "update": 7756,
+    "max_updates": 20000,
+    "generated_utc": "2026-10-22T14:10:19.375254+00:00",
+    "pid": 1790110,
+    "started_utc": "2026-10-22T09:55:17.563006+00:00",
+    "latest_train_loss": 0.2096410095691681,
+    "latest_train_loss_update": 7748,
+    "latest_validation_loss": 1.5920383930206299,
+    "latest_validation_loss_update": 7001,
+    "read_only": true
+  },
+  "a100_training_control_or_parameter_changes": false,
+  "code_sha256_at_final_audit": {
+    "scripts/4090_simple/prepare_task_snapshot.py": "99184d9034c8c3abb1fc02ba7799b9e47ebeab03df36530a1db32f74948137fc",
+    "scripts/4090_simple/prepare_handover_eval.py": "2f0809643db8eb82f33c0c1efdb6497045d55157a4c6ce0cebc8869f3b6fc96a",
+    "scripts/4090_simple/handover_eval_runtime.py": "849c8d15b542160dd22ced40ab00d1d9cc72c727fc4412f389b996198b98c932",
+    "scripts/4090_simple/run_closed_loop.py": "05bc75b6e2136f1e80956c68f7bd8f19187fd3685de7b1d0b395e1d6ef2b1dd9",
+    "scripts/4090_simple/serve_evaluation.py": "f19264091183f0ac203575376c51cff3bf9b895b889250ab1a63d08e5846d5df",
+    "VLMExpert/third_party/SIMPLE/src/simple/envs/sonic_loco_manip.py": "555d8352eb58c2b37fea55c59199374fabf3de685d066f5d543dbbf7093899ff"
+  },
+  "evidence_sha256": {
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/source/SNAPSHOT_READY.json": "a5596ddf0b7d2075c0858a3f92e0f052ccc7091d4d98b551949a9e7db0c1ebc4",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/deployment/LOCAL_RUN_READY.json": "eb86d02a255dc5042a1e416f725f3ec9826be42f86f540adccb90cb501f66b60",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/deployment/motion/export_validation.json": "f918cb8865c4b0659fdfbfba98911de1e8bea4b1f425a8c475f4ecbae0528df5",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/heldout_eval_data/PREPARATION.json": "df49c4914b4fd638c4fd14aec297c56165e23ab6f6fed4ab5052de6b07bbc442",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/heldout_eval_data/handover_initialization.json": "3129cc65d4abb72062e69cbe96781fa8c96209d59c171736a87657e7b3e24067",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/reports/model-environment.json": "8b88749cbdfa50f6141da3b0a970eaf6d442fc91c417b69366824da85bf822b1",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/reports/sim-environment.json": "65d2aef4625e568c3bfdb0d225aa18808d00a9f5643c835bb343d2b7e174bfde",
+    "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/reports/a100-still-running.json": "e61561e76d2722221a285059e1a915225e02773025cbc564d455ac5f9e75ac72"
+  },
+  "checkpoint": {
+    "task_step": 6000,
+    "source_unifolm_step": 38000,
+    "initial_task_step": 0,
+    "run_timestamp": "261022095337",
+    "model_bytes": 12066487572,
+    "model_sha256": "dc0ada4817acbdcf46b3489d9618e22f53d8935dfad3937fd883e332bd9aaf3e",
+    "exported_utc": "2026-10-22T13:30:51.053035+00:00",
+    "export_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/exports/handover_fused_task6000_261022095337",
+    "save_completion_marker_verified": true,
+    "optimizer_rng_exported": false
+  },
+  "cases": [
+    {
+      "case_index": 0,
+      "source_val_episode": 39,
+      "sampler_seed": 20261022,
+      "official_success_flag_observed": true,
+      "first_official_success_sim_time_s": 7.4449999999998635,
+      "fell": false,
+      "finite_states": true,
+      "simulated_seconds": 16.0000000000011,
+      "policy_chunks": 15,
+      "sonic_decoder_calls": 750,
+      "maximum_target_z_m": 0.8831908679040907,
+      "diagnostic_interpretation": "container contact, left hand still touches target at end",
+      "last_second_samples": 51,
+      "last_second_container_contact_without_either_hand_samples": 1,
+      "video": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/recorded-case0/case-0/G1WholebodyHandoverTeleop-v0/episode-0/rollout.mp4",
+      "video_sha256": "6153a3f56efdcbf4505d4c783c6fb853c7eeb2839dcf73d4bec525b5160d458d",
+      "result": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/recorded-case0/case-0/G1WholebodyHandoverTeleop-v0/result.json",
+      "result_sha256": "b402d5b33d82603f45672c8415461048ddae08243a2d3553a6d7685d6a94dd4e",
+      "trace": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/recorded-case0/case-0/G1WholebodyHandoverTeleop-v0/episode-0/trace.jsonl",
+      "trace_sha256": "cb8b9b1e76d6e7a5450427f3e1438a01a80ef658b2a0279538ce760985e7ce23",
+      "startup": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/recorded-case0/server-0/startup.json",
+      "startup_sha256": "9f1de70eb150aa0767fac88e48288bfe11aa8f5f75d842664ef41cb91b2d157e",
+      "final_contacts": [
+        {
+          "other_body": "left_hand_thumb_2_link",
+          "distance_m": -2.0284964719612176e-05
+        },
+        {
+          "other_body": "brasket",
+          "distance_m": -0.0002645395467675411
+        },
+        {
+          "other_body": "brasket",
+          "distance_m": -0.00036697731470435735
+        }
+      ]
+    },
+    {
+      "case_index": 1,
+      "source_val_episode": 65,
+      "sampler_seed": 20261023,
+      "official_success_flag_observed": false,
+      "first_official_success_sim_time_s": null,
+      "fell": false,
+      "finite_states": true,
+      "simulated_seconds": 16.0000000000011,
+      "policy_chunks": 15,
+      "sonic_decoder_calls": 750,
+      "maximum_target_z_m": 0.6661532000894108,
+      "diagnostic_interpretation": "target rests on table at end; no container success",
+      "last_second_samples": 51,
+      "last_second_container_contact_without_either_hand_samples": 0,
+      "video": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-1/G1WholebodyHandoverTeleop-v0/episode-1/rollout.mp4",
+      "video_sha256": "33e7ada1ed4666e67644b9c39db44794d402bdbcfe5443c6ff97906ea8da2c5d",
+      "result": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-1/G1WholebodyHandoverTeleop-v0/result.json",
+      "result_sha256": "f2d6ce41bad7aa0dc0993f776897d69694abeaf97044b1ec400dd366cc7b6902",
+      "trace": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-1/G1WholebodyHandoverTeleop-v0/episode-1/trace.jsonl",
+      "trace_sha256": "b97ccb30d939d81024b4eefbb305ae19c0e76fc50ee512a7da920b4fa6537381",
+      "startup": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/server-1/startup.json",
+      "startup_sha256": "07e1a4fe4e3214b5b387a0ffa7f41f4eef98069b7de66cd046fcf6df99151065",
+      "final_contacts": [
+        {
+          "other_body": "table",
+          "distance_m": -0.00023151219099526443
+        },
+        {
+          "other_body": "table",
+          "distance_m": -0.00024728467855861247
+        }
+      ]
+    },
+    {
+      "case_index": 2,
+      "source_val_episode": 80,
+      "sampler_seed": 20261024,
+      "official_success_flag_observed": false,
+      "first_official_success_sim_time_s": null,
+      "fell": false,
+      "finite_states": true,
+      "simulated_seconds": 16.0000000000011,
+      "policy_chunks": 15,
+      "sonic_decoder_calls": 750,
+      "maximum_target_z_m": 0.664414111296038,
+      "diagnostic_interpretation": "target rests on table at end; no container success",
+      "last_second_samples": 51,
+      "last_second_container_contact_without_either_hand_samples": 0,
+      "video": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-2/G1WholebodyHandoverTeleop-v0/episode-2/rollout.mp4",
+      "video_sha256": "2eb3c30deb0398bcd57a40dfa9d4f0bad4aca547d435dc4eb5a51912c22b26c4",
+      "result": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-2/G1WholebodyHandoverTeleop-v0/result.json",
+      "result_sha256": "f2d78dd5201dd394194c78ebd0c3dd1bae44655851edee07757d1866958053e2",
+      "trace": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-2/G1WholebodyHandoverTeleop-v0/episode-2/trace.jsonl",
+      "trace_sha256": "44464612a617a0fc39d1f3482ced72b927a5900d376771f8106296aca7fbdb64",
+      "startup": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/server-2/startup.json",
+      "startup_sha256": "8e28e037932d93bafd5593db38bcef5c02ec7f91bc7ca81a632e4c3129d9107d",
+      "final_contacts": [
+        {
+          "other_body": "table",
+          "distance_m": -0.00024574014274281186
+        },
+        {
+          "other_body": "table",
+          "distance_m": -0.00025248338225636324
+        }
+      ]
+    },
+    {
+      "case_index": 3,
+      "source_val_episode": 92,
+      "sampler_seed": 20261025,
+      "official_success_flag_observed": false,
+      "first_official_success_sim_time_s": null,
+      "fell": false,
+      "finite_states": true,
+      "simulated_seconds": 16.0000000000011,
+      "policy_chunks": 15,
+      "sonic_decoder_calls": 750,
+      "maximum_target_z_m": 0.665494735922304,
+      "diagnostic_interpretation": "target rests on table at end; no container success",
+      "last_second_samples": 51,
+      "last_second_container_contact_without_either_hand_samples": 0,
+      "video": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-3/G1WholebodyHandoverTeleop-v0/episode-3/rollout.mp4",
+      "video_sha256": "2db25bac3a50fc1c9036b4dfc0d79715d5cba95a6f63058fac837dbab728a166",
+      "result": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-3/G1WholebodyHandoverTeleop-v0/result.json",
+      "result_sha256": "19084b81ca8716aa52c670c95371f2d478df860c75dd892679d30bd13b990015",
+      "trace": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-3/G1WholebodyHandoverTeleop-v0/episode-3/trace.jsonl",
+      "trace_sha256": "b69512f31c0aec849b0ec9317bc69033b4d1b4d025150d0a2b156779cb4da9b6",
+      "startup": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/server-3/startup.json",
+      "startup_sha256": "ca2f22fa71398632b4eab57ccfc95d58be914f5bb28e778a9d2edbc5245dcd7a",
+      "final_contacts": [
+        {
+          "other_body": "right_hip_roll_link",
+          "distance_m": -0.00018720898453595814
+        },
+        {
+          "other_body": "table",
+          "distance_m": -0.00024620895961946504
+        }
+      ]
+    },
+    {
+      "case_index": 4,
+      "source_val_episode": 94,
+      "sampler_seed": 20261026,
+      "official_success_flag_observed": false,
+      "first_official_success_sim_time_s": null,
+      "fell": false,
+      "finite_states": true,
+      "simulated_seconds": 16.0000000000011,
+      "policy_chunks": 15,
+      "sonic_decoder_calls": 750,
+      "maximum_target_z_m": 0.6647036381795332,
+      "diagnostic_interpretation": "target rests on table at end; no container success",
+      "last_second_samples": 51,
+      "last_second_container_contact_without_either_hand_samples": 0,
+      "video": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-4/G1WholebodyHandoverTeleop-v0/episode-4/rollout.mp4",
+      "video_sha256": "3d0fec75a66e3f55cefddf85879bb7dba245774bd1b88948f9ff926778fa2fd5",
+      "result": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-4/G1WholebodyHandoverTeleop-v0/result.json",
+      "result_sha256": "2ac94e1fdf068a3b04e655bb0fca683dbeb783aed0bb2edcdb67fc5ca55114c7",
+      "trace": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/case-4/G1WholebodyHandoverTeleop-v0/episode-4/trace.jsonl",
+      "trace_sha256": "273f0a23a2c87188c07a0426771f63c611134ca5b1073de5f4a7796cca87f2ae",
+      "startup": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/full-evaluation/server-4/startup.json",
+      "startup_sha256": "35555f7f18a1185bfa21dee26548445d0cc9283b29950416903d35fb4f7071c0",
+      "final_contacts": [
+        {
+          "other_body": "table",
+          "distance_m": -0.00022751800014497725
+        },
+        {
+          "other_body": "table",
+          "distance_m": -0.00023393699743756713
+        }
+      ]
+    }
+  ],
+  "full_local_evidence": {
+    "path": "/var/tmp/cvpr-evaluation-zxc-task50-eval6000/reports/EVALUATION_SUMMARY.json",
+    "sha256": "565493808f7eac4927d8c288c51882b872b1dcd656dc15e3e5bd912bed6903a4"
+  }
+}

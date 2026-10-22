@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "state_at_recording": "running",
+  "source_revision_at_launch": "324fea3e11a29ef3538ea616c97d912c72d8bdd6",
+  "run_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_40k_preparation/handover_joint40k_b32_s2000/training/posttrain/handover_task50_joint40k.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022073944",
+  "source_step": 40000,
+  "source_model_sha256": "ff1b6ea8c63edae671220b443ed08ae11ef8efe07cd83cdcc0f90233f3462dc9",
+  "source_model_bytes": 12066487572,
+  "strict_cpu_loading": {
+    "stored_tensors_compared": 1944,
+    "all_equal_and_finite": true,
+    "restored_shared_aliases": 2,
+    "optimizer_constructed": false
+  },
+  "environment": {
+    "prefix": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/envs/task-finetune-py311-cu126",
+    "python": "3.11.15 | packaged by conda-forge | (main, Aug 11 2026, 10:26:29) [GCC 14.4.0]",
+    "torch": "2.7.0+cu126",
+    "torch_cuda_build": "12.6",
+    "driver_version": "535.129.03",
+    "versions": {
+      "transformers": "4.57.1",
+      "accelerate": "1.7.0",
+      "flash-attn": "2.7.4.post1",
+      "safetensors": "0.6.2",
+      "numpy": "1.26.4",
+      "pillow": "11.3.0",
+      "pyarrow": "21.0.0",
+      "av": "16.0.1",
+      "wandb": "0.25.0",
+      "matplotlib": "3.10.7"
+    },
+    "pip_check": "passed",
+    "independent_site_packages": true,
+    "existing_production_versions_changed": false
+  },
+  "dataset": {
+    "task": "G1WholebodyHandoverTeleop-v0",
+    "source_root": "/gaozt-test1/datasets/sigmma_dataset/G1WholebodyHandoverTeleop-v0",
+    "successful_teacher_episodes": 50,
+    "train_episodes": 45,
+    "val_episodes": 5,
+    "independent_test_episodes": 0,
+    "source_fps": 50,
+    "training_fps": 30,
+    "source_selection": "ceil(k*50/30)",
+    "source_state45_reordered_by_names_to_40k_state43": true,
+    "original_state45_retained": true,
+    "original_data_modified": false,
+    "tokens_reencoded": false,
+    "new_30hz_physical_replay_claimed": false,
+    "train_rows": 16463,
+    "val_rows": 1562,
+    "train_complete_windows": 13808,
+    "fixed_validation_windows": 40,
+    "real_dino_frames": 18025,
+    "dino_shape": [
+      5,
+      1024
+    ],
+    "normalization": "inherited unchanged from source40k",
+    "action_values_outside_bounds_train": 0,
+    "action_values_outside_bounds_val": 0
+  },
+  "configuration": {
+    "gpu_count": 8,
+    "per_gpu_batch": 4,
+    "gradient_accumulation_steps": 1,
+    "effective_global_batch": 32,
+    "precision": "BF16 autocast with production FP32 optimizer masters",
+    "source_step": 40000,
+    "source_initialization": "strict complete VLM/MotionExpert/ActionExpert weight-only initialization; fresh optimizer/scheduler/RNG",
+    "max_optimizer_updates": 2000,
+    "warmup_updates": 100,
+    "peak_group_lrs": {
+      "action_header": 1e-05,
+      "lang_backbone": 1e-07,
+      "vision_tower": 1e-06,
+      "mm_projector": 1e-05,
+      "motion_expert": 1e-06
+    }
+  },
+  "early_gpu_health": {
+    "status": "passed",
+    "checked_utc": "2026-10-22T07:44:59.631504+00:00",
+    "verified_updates": [
+      2,
+      20
+    ],
+    "five_gradient_groups_finite_nonzero": true,
+    "cross_rank_probe_values_per_rank": 7700,
+    "probe_scope": "four leading values per trainable tensor, not all parameter bytes",
+    "instantaneous_gpu_memory_used_mib": [
+      62509,
+      62499,
+      62505,
+      62529,
+      62495,
+      62509,
+      62497,
+      61293
+    ],
+    "full_run_peak_memory_or_throughput_claimed": false
+  },
+  "monitor_snapshot": {
+    "generated_utc": "2026-10-22T07:47:00.768506+00:00",
+    "completed_optimizer_updates": 147,
+    "latest_train_loss_update": 143,
+    "latest_train_loss": 0.6507985591888428,
+    "latest_validation_loss_update": 1,
+    "latest_validation_loss": 12.57116985321045,
+    "estimated_remaining_seconds": 2529.0391348628114,
+    "recent_seconds_per_optimizer_update": 1.364834935166115
+  },
+  "monitor_scope": "Actual offline W&B plus production console; ETA uses A100 local wall-clock intervals after warmup, not convergence or throughput certification.",
+  "prelaunch_failure": {
+    "source_revision": "1602383ffe1e1003d1afbf70aa0a4a8cd0eb58d0",
+    "phase": "run-directory naming",
+    "gpu_workers_spawned": false,
+    "optimizer_updates": 0,
+    "cause": "relative unused DeepSpeed path resolved against different working directories",
+    "fixed_in_revision": "324fea3e11a29ef3538ea616c97d912c72d8bdd6",
+    "failed_attempt_preserved": true
+  },
+  "validation": {
+    "adapter_cpu_tests": 23,
+    "monitor_cpu_tests": 15,
+    "configuration_cpu_tests": 6,
+    "shell_syntax": "passed",
+    "python_compile": "passed"
+  },
+  "limits": [
+    "Training remains running; 2000 updates are not yet complete.",
+    "Early finite loss/gradient and sampled cross-rank checks do not establish convergence.",
+    "Fine-tuned physical task success has not been measured.",
+    "A100 and4090 wall clocks differ by about159 seconds in the copied snapshot; remaining-duration estimates use only A100 timestamps.",
+    "Teacher50Hz success acceptance was reused through artifact identity binding, not rerun or relabeled as30Hz physical success."
+  ]
+}

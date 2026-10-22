@@ -92,3 +92,18 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh status
 真实CPU生产加载通过：1944个stored tensor逐值/dtype/shape一致且有限，两项共享alias按实际共享关系恢复。
 该检查0更新、未建optimizer、未用GPU，不替代本任务八卡或物理验收。
 训练是否启动、实际loss和任务表现以各自运行记录为准，不因安装或loss下降宣称测评通过。
+
+## 本次实际启动记录
+
+2026-10-22已从上述40k初始化并实际启动八卡，源代码为`324fea3`；
+实际Python3.11.15、Torch2.7.0+cu126、Transformers4.57.1、FlashAttn2.7.4.post1、
+W&B0.25.0、Matplotlib3.10.7，驱动535.129.03。原生产包版本保持不变，仅补六项纯CPU绘图库。
+TRAIN13808窗、固定VAL40窗实际读取通过。第2、20次更新五组梯度有限且非零，
+每rank7700个参数探针一致；20步完整checkpoint已保存，训练继续。
+瞬时显存约61.3–62.5GB/卡，不冒充全程峰值或吞吐验收。
+早期GPU与监控证据摘要见[a100_task50_joint40k_validation.json](a100_task50_joint40k_validation.json)。
+
+本机查看快照位于`/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_current`，
+CSV、PNG和进度JSON绑定同一run；A100原目录持续更新。两机系统时钟实测约有159秒偏差，
+不调整运行中机器时钟，ETA时长始终使用A100自身的墙钟间隔，不把跨机复制时间混入估算。
+以上是启动和早期检查记录，2000步完成及后续物理效果仍须分别验收。

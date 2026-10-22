@@ -511,5 +511,158 @@
   },
   "end_to_end_speedup_measured": false,
   "full_20000_task_updates_completed": false,
-  "original_cuda_assertion_root_cause_resolved": false
+  "original_cuda_assertion_root_cause_resolved": false,
+  "read_only_backward_and_training_followup": {
+    "scope": "Read-only A100 progress/file metadata plus bounded synthetic single-layer GPU investigation on local4090; no changes to running training",
+    "original_report": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_unifolm38k_fused_controlled_validation/report.json",
+    "same_backend_loss_difference": 0.0,
+    "same_backend_gradient_max_absolute_difference": 0.013121962547302246,
+    "same_backend_parameter_max_absolute_difference": 1.1920928955078125e-07,
+    "same_backend_adam_state_max_absolute_difference": 2.0483857952058315e-05,
+    "original_probe_torch_deterministic_algorithms": false,
+    "current_training_seed_everything_source": "VLMExpert/scripts/train.py:205 calls seed_everything; VLMExpert/src/psi/utils/utils.py sets deterministic_algorithms=True with warn_only=True, not a strict all-operator guarantee",
+    "full_model_backward_cause_proven": false,
+    "no_evidence_fused_caused_failure": true,
+    "fine_tuning_quality_guaranteed_unaffected": false,
+    "bounded_layer_probe": {
+      "local_report": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_backward_repeatability_investigation/bounded_vision_probe.json",
+      "sha256": "e5172e77bc78eb4f9e2f022ec07ca62f11204aa0ef64d8d92814823724ac07d3",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "torch": "2.7.0+cu126",
+      "transformers": "4.57.1",
+      "flash_attn": "2.7.4.post1",
+      "weight_dtype": "float32",
+      "autocast_dtype": "bfloat16",
+      "layer": "Qwen3VLVisionAttention, actual installed class, random weights and synthetic data",
+      "shape": [
+        1280,
+        1024
+      ],
+      "matching_qwen_config_sha256": "f5329543933c8de56fdee52c4fdba02cfb0bf28abad0b271f298c1606c12afcb",
+      "combinations": 8,
+      "repeats_per_combination": 6,
+      "all_forward_exact": true,
+      "default_flash_four_combinations_all_five_nonreference_backward_repetitions_differed": true,
+      "explicit_deterministic_flash_four_combinations_all_six_backward_repetitions_exact": true,
+      "torch_deterministic_mode_scope": "False or True/warn_only=True, not strict error mode",
+      "nonreentrant_checkpoint_cases": [
+        false,
+        true
+      ],
+      "max_allocated_bytes": 166162944,
+      "max_relative_l2_default": 1.7833233911098373e-05,
+      "scope": "Confirms a local component nondeterminism source, not full-model original-gradient attribution, A100 equivalence, accuracy or physical success"
+    },
+    "a100_status_snapshot": {
+      "local_report": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_backward_repeatability_investigation/a100_status_snapshot.json",
+      "sha256": "af4427a818417761f5a2c12a20c11abf40b29e66b9b0071e9649f0806a62a2fb",
+      "captured_remote_utc": "2026-10-22T13:17:27.907351+00:00",
+      "progress": {
+        "state": "running",
+        "generated_utc": "2026-10-22T13:17:23.031876+00:00",
+        "completed_optimizer_updates": 6118,
+        "max_optimizer_updates": 20000,
+        "latest_train_loss": 0.7926843166351318,
+        "latest_train_loss_update": 6113,
+        "latest_validation_loss": 1.5133397579193115,
+        "latest_validation_loss_update": 6001,
+        "recent_seconds_per_optimizer_update": 1.8949220848083497,
+        "estimated_remaining_seconds": 26305.30838130951,
+        "estimated_finish_utc": "2026-10-22T20:35:48.340257+00:00"
+      },
+      "checkpoints": {
+        "4000": {
+          "save_marker_found": true,
+          "required_files_bytes": {
+            "model.safetensors": 12066487572,
+            "optimizer.bin": 23458742485,
+            "scheduler.bin": 1529,
+            "random_states_0.pkl": 16449,
+            "random_states_1.pkl": 16577,
+            "random_states_2.pkl": 16577,
+            "random_states_3.pkl": 16577,
+            "random_states_4.pkl": 16577,
+            "random_states_5.pkl": 16577,
+            "random_states_6.pkl": 16577,
+            "random_states_7.pkl": 16577
+          },
+          "scope": "completion marker and required file presence/nonzero sizes only; no weights loaded, content scan or cold restore"
+        },
+        "5000": {
+          "save_marker_found": true,
+          "required_files_bytes": {
+            "model.safetensors": 12066487572,
+            "optimizer.bin": 23458742485,
+            "scheduler.bin": 1529,
+            "random_states_0.pkl": 16449,
+            "random_states_1.pkl": 16577,
+            "random_states_2.pkl": 16577,
+            "random_states_3.pkl": 16577,
+            "random_states_4.pkl": 16577,
+            "random_states_5.pkl": 16577,
+            "random_states_6.pkl": 16577,
+            "random_states_7.pkl": 16577
+          },
+          "scope": "completion marker and required file presence/nonzero sizes only; no weights loaded, content scan or cold restore"
+        },
+        "6000": {
+          "save_marker_found": true,
+          "required_files_bytes": {
+            "model.safetensors": 12066487572,
+            "optimizer.bin": 23477652927,
+            "scheduler.bin": 1529,
+            "random_states_0.pkl": 16449,
+            "random_states_1.pkl": 16577,
+            "random_states_2.pkl": 16577,
+            "random_states_3.pkl": 16577,
+            "random_states_4.pkl": 16577,
+            "random_states_5.pkl": 16577,
+            "random_states_6.pkl": 16577,
+            "random_states_7.pkl": 16577
+          },
+          "scope": "completion marker and required file presence/nonzero sizes only; no weights loaded, content scan or cold restore"
+        }
+      }
+    },
+    "validation_curve": [
+      {
+        "update": 1,
+        "loss": 12.501106262207031
+      },
+      {
+        "update": 1001,
+        "loss": 1.2435096502304077
+      },
+      {
+        "update": 2001,
+        "loss": 1.3059521913528442
+      },
+      {
+        "update": 3001,
+        "loss": 1.3786263465881348
+      },
+      {
+        "update": 4001,
+        "loss": 1.4257500171661377
+      },
+      {
+        "update": 5001,
+        "loss": 1.5003924369812012
+      },
+      {
+        "update": 6001,
+        "loss": 1.5133397579193115
+      }
+    ],
+    "validation_rng_scope": "TaskTrainer.evaluate wraps the unchanged fixed40-window loader in isolated_rng(seed+100000+rank), restores training RNG afterwards; current task has fixed evaluation RNG",
+    "validation_interpretation": "Loss increased after update1001; evidence of possible overfitting/generalization degradation under fixed window/RNG protocol, not proof of a physical effect or causation by fused/nondeterministic backward",
+    "training_modified": false,
+    "a100_gpu_work_launched": false,
+    "training_signals_sent": false,
+    "sources": [
+      "https://github.com/Dao-AILab/flash-attention/blob/v2.7.4.post1/flash_attn/flash_attn_interface.py",
+      "https://docs.pytorch.org/docs/2.7/notes/randomness.html",
+      "https://docs.pytorch.org/docs/2.7/checkpoint.html"
+    ]
+  }
 }

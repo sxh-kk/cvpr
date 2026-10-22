@@ -1,5 +1,5 @@
 {
-  "state": "full_independent_backward_ab_failed_shared_gradient_control_pending",
+  "state": "fresh_fused_8gpu_running_early20_passed",
   "parent_run_timestamp": "261022080240",
   "origin_joint_step": 38000,
   "total_task_optimizer_updates": 20000,
@@ -61,7 +61,7 @@
     "cause_assignment": "Gradient divergence preceded optimizer updates; backend contribution not isolated",
     "continuous_fused_steps_completed": 0
   },
-  "production_backend_switched": false,
+  "production_backend_switched": true,
   "physical_effect_evaluated": false,
   "original_task_failure": {
     "completed_updates_last_console": 2345,
@@ -86,5 +86,430 @@
     "report_sha256": "9edea2a00599633169f17c41337a7e2690a9481d59a15718849e81ca444585e6",
     "resource_interference_excluded": false
   },
-  "full_gpu_source": "protected complete UnifoLM38000 state; not failed task2345"
+  "full_gpu_source": "protected complete UnifoLM38000 state; not failed task2345",
+  "controlled_gpu_validation": {
+    "status": "controlled_optimizer_comparison_passed",
+    "report_sha256": "3e5fa97d7b996e1bc81cc4b24c8ea35f06ab3934d65a8d2017c70a009a3c9394",
+    "local_report": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_unifolm38k_fused_controlled_validation/report.json",
+    "source_config_sha256": "7967b4482595096e0c205e24168ff5159fb3d2411fe5f9c87158cfeefc99123d",
+    "source_model_sha256": "12a71e046e221b83f0bdb0efb50f9ba82442045aca0efabef3ae337f185320b7",
+    "alternating_pairs": 2,
+    "preclip_and_postclip_gradients_all_exact": true,
+    "maximum_absolute_parameter_difference": 7.450580596923828e-09,
+    "maximum_absolute_adam_state_difference": 9.313225746154785e-10,
+    "real_backward_continuous_fused_steps": 3,
+    "real_backward_continuous_fused_losses": [
+      1.6478662490844727,
+      1.8839783668518066,
+      2.0176377296447754
+    ],
+    "all_model_and_optimizer_tensors_finite": true,
+    "peak_memory": {
+      "peak_allocated_bytes": 50013075456,
+      "peak_reserved_bytes": 52261027840,
+      "minimum_device_free_bytes_after_update": 32350470144,
+      "gpu_total_bytes": 85174583296,
+      "scope": "single-model controlled optimizer and independent continuous fused steps"
+    },
+    "independent_standard_repetition_passed": false,
+    "independent_full_backward_equivalence_passed": false,
+    "scope": "Identical-gradient optimizer update equivalence and bounded single-GPU finite/memory checks; original strict and standard-repeat backward differences remain unresolved",
+    "parameter_and_adam_absolute_tolerance": 1e-08,
+    "parameter_and_adam_relative_tolerance": 1e-05,
+    "counters_exact": true,
+    "full_step_comparison_passed": false,
+    "uncontrolled_full_step_comparison_passed": false
+  },
+  "user_accepted_recomputing_unsaved_2345_updates": true,
+  "restart_source_revision": "632968de7fb1557a0c52b299ad1da07d8d10c64b",
+  "switch_requirements_scope": "Historical preserve-progress plan, never reached because the original ordinary-AdamW task failed before its first checkpoint; fresh recomputation was separately authorized after controlled GPU checks.",
+  "production_backend": "fused AdamW, foreach=False",
+  "original_task_switched_in_place": false,
+  "production_switch_mode": "new task from38k, task0, user-accepted recomputation; unsaved2345 not restored",
+  "production_fresh_restart": {
+    "prepared_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute",
+    "run_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute/training/posttrain/handover_task50_joint38000_fused_restart.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022095337",
+    "run_timestamp": "261022095337",
+    "source_commit": "632968de7fb1557a0c52b299ad1da07d8d10c64b",
+    "source_unifolm_step": 38000,
+    "initial_task_step": 0,
+    "task2345_restored": false,
+    "unrecoverable_parent_updates": 2345,
+    "gpu_count": 8,
+    "per_gpu_batch": 4,
+    "effective_global_batch": 32,
+    "max_task_updates": 20000,
+    "warmup_steps": 1000,
+    "state_at_early_recording": "running",
+    "supervisor_started_utc": "2026-10-22T09:55:00.402405+00:00",
+    "manager_started_utc": "2026-10-22T09:55:17.563006+00:00",
+    "captured_remote_utc": "2026-10-22T10:00:06.691532+00:00",
+    "local_evidence": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_fused_early20/early_acceptance.json",
+    "evidence_sha256": "1e8ea009868ff9d78949eb8025cdf2a6da3258df8d75714f4c37ec796a0c5507",
+    "optimizer_initial_state_empty": true,
+    "optimizer_defaults_and_all_groups": {
+      "fused": true,
+      "foreach": false
+    },
+    "checks": {
+      "2": {
+        "base": {
+          "status": "passed",
+          "completed_updates": 2,
+          "gpu_count": 8,
+          "per_gpu_batch": 4,
+          "accumulation": 1,
+          "all_rank_probe_values_equal": true,
+          "probe_values_per_rank": 7700,
+          "metrics": {
+            "lr_act": 2e-08,
+            "lr_action_header": 2e-08,
+            "lr_lang_backbone": 2e-10,
+            "lr_vision_tower": 2e-09,
+            "lr_mm_projector": 2e-08,
+            "lr_motion_expert": 2e-09,
+            "grad_norm_act": 154.91281127929688,
+            "grad_norm_lang_backbone": 64.17652130126953,
+            "grad_norm_vision_tower": 79.73301696777344,
+            "grad_norm_mm_projector": 20.002721786499023,
+            "grad_norm_motion_expert": 42.04159927368164,
+            "grad_norm_vlm": 104.28848814698405,
+            "loss": 11.513908386230469,
+            "vlm_feat_norm": 3929.707275390625
+          },
+          "scope": "production all-rank finite loss/gradient checks and four-value probes per trainable tensor; not full parameter equality"
+        },
+        "fused_flags_and_memory": {
+          "status": "passed",
+          "completed_updates": 2,
+          "gpu_count": 8,
+          "per_gpu_batch": 4,
+          "accumulation": 1,
+          "all_rank_actual_fused_flags_passed": true,
+          "ranks": [
+            {
+              "rank": 0,
+              "peak_allocated_bytes": 58862791168,
+              "peak_reserved_bytes": 60435726336,
+              "device_free_bytes_after_update": 23490002944,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 1,
+              "peak_allocated_bytes": 58851387904,
+              "peak_reserved_bytes": 60429434880,
+              "device_free_bytes_after_update": 23496294400,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 2,
+              "peak_allocated_bytes": 58854468096,
+              "peak_reserved_bytes": 60425240576,
+              "device_free_bytes_after_update": 23500488704,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 3,
+              "peak_allocated_bytes": 58856369664,
+              "peak_reserved_bytes": 60452503552,
+              "device_free_bytes_after_update": 23473225728,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 4,
+              "peak_allocated_bytes": 58861415936,
+              "peak_reserved_bytes": 60481863680,
+              "device_free_bytes_after_update": 23443865600,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 5,
+              "peak_allocated_bytes": 58857155072,
+              "peak_reserved_bytes": 60439920640,
+              "device_free_bytes_after_update": 23485808640,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 6,
+              "peak_allocated_bytes": 58864774656,
+              "peak_reserved_bytes": 60450406400,
+              "device_free_bytes_after_update": 23475322880,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 7,
+              "peak_allocated_bytes": 58865150464,
+              "peak_reserved_bytes": 60423143424,
+              "device_free_bytes_after_update": 23502585856,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            }
+          ],
+          "scope": "Actual eight-rank flags and CUDA allocator peaks since process start at updates2/20 only; base finite and parameter probes remain separate, not full-run memory or throughput acceptance"
+        }
+      },
+      "20": {
+        "base": {
+          "status": "passed",
+          "completed_updates": 20,
+          "gpu_count": 8,
+          "per_gpu_batch": 4,
+          "accumulation": 1,
+          "all_rank_probe_values_equal": true,
+          "probe_values_per_rank": 7700,
+          "metrics": {
+            "lr_act": 2.0000000000000002e-07,
+            "lr_action_header": 2.0000000000000002e-07,
+            "lr_lang_backbone": 2e-09,
+            "lr_vision_tower": 2e-08,
+            "lr_mm_projector": 2.0000000000000002e-07,
+            "lr_motion_expert": 2e-08,
+            "grad_norm_act": 48.07109451293945,
+            "grad_norm_lang_backbone": 36.367332458496094,
+            "grad_norm_vision_tower": 32.8033447265625,
+            "grad_norm_mm_projector": 8.906753540039062,
+            "grad_norm_motion_expert": 9.555665969848633,
+            "grad_norm_vlm": 49.77923818239365,
+            "loss": 4.380304336547852,
+            "vlm_feat_norm": 3853.015869140625
+          },
+          "scope": "production all-rank finite loss/gradient checks and four-value probes per trainable tensor; not full parameter equality"
+        },
+        "fused_flags_and_memory": {
+          "status": "passed",
+          "completed_updates": 20,
+          "gpu_count": 8,
+          "per_gpu_batch": 4,
+          "accumulation": 1,
+          "all_rank_actual_fused_flags_passed": true,
+          "ranks": [
+            {
+              "rank": 0,
+              "peak_allocated_bytes": 59057369600,
+              "peak_reserved_bytes": 61696114688,
+              "device_free_bytes_after_update": 22229614592,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 1,
+              "peak_allocated_bytes": 59046081024,
+              "peak_reserved_bytes": 61689823232,
+              "device_free_bytes_after_update": 22235906048,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 2,
+              "peak_allocated_bytes": 59047539200,
+              "peak_reserved_bytes": 61685628928,
+              "device_free_bytes_after_update": 22240100352,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 3,
+              "peak_allocated_bytes": 59047277056,
+              "peak_reserved_bytes": 61712891904,
+              "device_free_bytes_after_update": 22212837376,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 4,
+              "peak_allocated_bytes": 59055762944,
+              "peak_reserved_bytes": 61742252032,
+              "device_free_bytes_after_update": 22183477248,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 5,
+              "peak_allocated_bytes": 59062628864,
+              "peak_reserved_bytes": 61700308992,
+              "device_free_bytes_after_update": 22225420288,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 6,
+              "peak_allocated_bytes": 59051733504,
+              "peak_reserved_bytes": 61836623872,
+              "device_free_bytes_after_update": 22089105408,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            },
+            {
+              "rank": 7,
+              "peak_allocated_bytes": 59055403520,
+              "peak_reserved_bytes": 61683531776,
+              "device_free_bytes_after_update": 22242197504,
+              "device_total_bytes": 85174583296,
+              "actual_defaults_fused_true_foreach_false": true,
+              "all_actual_groups_fused_true_foreach_false": true
+            }
+          ],
+          "scope": "Actual eight-rank flags and CUDA allocator peaks since process start at updates2/20 only; base finite and parameter probes remain separate, not full-run memory or throughput acceptance"
+        }
+      }
+    },
+    "checkpoint20": {
+      "checkpoint_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute/training/posttrain/handover_task50_joint38000_fused_restart.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022095337/checkpoints/ckpt_20",
+      "saved_state_marker": true,
+      "payloads": {
+        "model.safetensors": {
+          "bytes": 12066487572,
+          "mtime_ns": 1792663097082843260
+        },
+        "optimizer.bin": {
+          "bytes": 23175086239,
+          "mtime_ns": 1792663113235862549
+        },
+        "scheduler.bin": {
+          "bytes": 1529,
+          "mtime_ns": 1792663113240016128
+        },
+        "random_states_0.pkl": {
+          "bytes": 16449,
+          "mtime_ns": 1792663113249365850
+        },
+        "random_states_1.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088407495222
+        },
+        "random_states_2.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088408829750
+        },
+        "random_states_3.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088407249787
+        },
+        "random_states_4.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088406993564
+        },
+        "random_states_5.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088407574434
+        },
+        "random_states_6.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088407416637
+        },
+        "random_states_7.pkl": {
+          "bytes": 16577,
+          "mtime_ns": 1792663088408818684
+        }
+      },
+      "model_stored_tensors": 1944,
+      "scope": "completion marker, all required files, model extent and ZIP directory; no repeated full tensor/CRC scan"
+    },
+    "rolling_cpu_diagnostics": {
+      "CUDA_LAUNCH_BLOCKING": "1",
+      "PSI0_ROLLING_DIAGNOSTICS_DIR": "/dev/shm/cvpr-task50-fused-261022095337-1790016"
+    },
+    "rolling_slots_per_rank": 2,
+    "early_memory_bytes": {
+      "max_allocated_bytes_at_update20": 59062628864,
+      "max_reserved_bytes_at_update20": 61836623872,
+      "minimum_device_free_bytes_at_update20": 22089105408
+    },
+    "checkpoint_policy": {
+      "recovery_updates": [
+        20,
+        "every1000 except formal4000 multiples"
+      ],
+      "formal_every": 4000,
+      "max_keep": 2,
+      "preserve_every": 4000,
+      "scope": "Only this new run; retain all formal4000 checkpoints and the last two saves; old runs/source weights untouched"
+    },
+    "monitor_snapshot": {
+      "schema_version": 1,
+      "state": "running",
+      "generated_utc": "2026-10-22T09:59:58.292763+00:00",
+      "run_timestamp": "261022095337",
+      "run_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute/training/posttrain/handover_task50_joint38000_fused_restart.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022095337",
+      "completed_optimizer_updates": 65,
+      "max_optimizer_updates": 20000,
+      "resumed_task_step": 0,
+      "segment_completed_optimizer_updates": 65,
+      "progress_fraction": 0.00325,
+      "elapsed_seconds": 280.7297570705414,
+      "elapsed_origin": "launcher_started_utc",
+      "elapsed_scope": "Current run segment only; previous segment elapsed time is not merged.",
+      "latest_train_loss": 4.738868713378906,
+      "latest_validation_loss": 12.501106262207031,
+      "latest_train_loss_update": 61,
+      "latest_validation_loss_update": 1,
+      "recent_seconds_per_optimizer_update": null,
+      "eta_sample_intervals": 0,
+      "estimated_remaining_seconds": null,
+      "estimated_finish_utc": null,
+      "eta_scope": "Current run segment's recent post-warmup TRAIN metric-row wall time (W&B may merge same-step evaluation into the row), including observed validation/checkpoint pauses; previous segment timestamps are not merged and future pauses/final save may differ.",
+      "eta_wait_reason": "waiting_for_post_warmup_timestamps",
+      "loss_history_scope": "Current run segment only; earlier CSV and offline W&B files remain separate.",
+      "previous_loss_history_merged": false,
+      "loss_semantics": "Production logged rank-mean loss at optimizer update; with accumulation it is the last microbatch, not an average over every accumulated sample.",
+      "step_mapping": "completed_update = W&B zero-based _step + 1; console shows completed updates",
+      "validation_step_semantics": "Production validation occurs after update 1, 1+validation_steps, ... and the final update.",
+      "stop_reason": null,
+      "superseded_by_run_directory": null,
+      "latest_group_lrs": {
+        "action_header": 6.100000000000001e-07,
+        "lang_backbone": 6.099999999999999e-09,
+        "vision_tower": 6.099999999999999e-08,
+        "mm_projector": 6.100000000000001e-07,
+        "motion_expert": 6.099999999999999e-08
+      },
+      "cuda_visible_devices": "",
+      "training_modified": false,
+      "source": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute/training/posttrain/handover_task50_joint38000_fused_restart.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022095337/wandb/offline-run-20261022_095629-hpepgfy2/run-hpepgfy2.wandb",
+      "source_snapshot_bytes": 196608,
+      "source_snapshot_sha256": "323fa599d45a60118abf120e714f88125d449c6e9bfa696e1007bca5525887ec",
+      "tail_record_not_yet_flushed": true
+    },
+    "full_checkpoint_cold_restore_tested": false,
+    "full_model_numerical_audit_repeated": false,
+    "checkpoint_payloads_copied": false,
+    "scope": "Read-only early production8-GPU actual flags/memory and finite-gradient/selected-parameter-probe receipts, plus completed checkpoint20 file/extent/ZIP/RNG structure. Not full parameter equality, full checkpoint restoration,20k completion, physical success, or a throughput/speedup acceptance.",
+    "later_readonly_monitor_snapshot": {
+      "state": "running",
+      "generated_utc": "2026-10-22T10:05:46.925462+00:00",
+      "completed_optimizer_updates": 249,
+      "latest_train_loss": 1.033268690109253,
+      "latest_train_loss_update": 248,
+      "estimated_remaining_seconds": null,
+      "eta_wait_reason": "waiting_for_post_warmup_timestamps",
+      "local_evidence": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_fused_early20/latest_progress.json",
+      "sha256": "533b747a3f133f93d45f343dfde110d319e87eab18d3ffe0b8bcf3104b735ac9",
+      "scope": "Copied small progress file only, not live or a throughput comparison"
+    }
+  },
+  "end_to_end_speedup_measured": false,
+  "full_20000_task_updates_completed": false,
+  "original_cuda_assertion_root_cause_resolved": false
 }

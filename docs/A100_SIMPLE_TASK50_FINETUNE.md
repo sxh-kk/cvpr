@@ -1,9 +1,11 @@
 # A100：38k联合权重初始化，Handover任务微调20k步
 
 **当前配方：UnifoLM38k初始化，八卡联合微调20,000步，每4,000步保存。**
-2026-10-22该运行在2345次更新后因rank5 CUDA异步断言退出，尚未生成首个完整任务checkpoint。
-完整38k初始化权重仍受保护；未保存的2345步不能从磁盘恢复，不能宣称无损续训或已切换融合AdamW。
-使用`finetune-handover-task50-joint38k.sh`，完整命令见末尾“当前38k配方”。
+2026-10-22原普通AdamW运行在2345次更新后因rank5 CUDA异步断言退出，首次保存前的任务状态无法恢复。
+用户已接受测试通过后重算；同梯度整模型优化器对照及连续三步真实反向通过后，
+独立融合AdamW运行`261022095337`已从受保护的38k三模块权重、全新优化器和任务第0步启动。
+新运行八卡第2、20步检查通过，第20步完整恢复快照已保存；20k训练及物理效果尚未完成验收。
+当前入口为`a100_task_fused_restart.py`，实际路径与验证边界见末尾；普通AdamW入口保留作历史追溯。
 下方40k／2k运行是已停止的历史试跑，记录与checkpoint保留，不作为当前初始化来源。
 
 历史试跑曾完整继承UnifoLM 40k checkpoint的ActionExpert、VLM和MotionExpert，实际完成400次任务更新后，
@@ -118,7 +120,7 @@ CSV、PNG和进度JSON仅绑定历史40k run，原始训练日志和checkpoint�
 不调整运行中机器时钟，ETA时长始终使用A100自身的墙钟间隔，不把跨机复制时间混入估算。
 以上是历史启动和早期检查记录；原2000步预算未跑满，不能写成训练完成或物理任务验收通过。
 
-## 当前38k配方：任务训练20k步
+## 38k配方与原普通AdamW运行：任务训练20k步
 
 2026-10-22用户将初始化来源改为UnifoLM的38,000步联合checkpoint，并要求任务微调
 20,000次optimizer更新、每4,000次保存。此前40k配方及其运行记录保留作为历史；
@@ -143,7 +145,8 @@ SHA256为`12a71e046e221b83f0bdb0efb50f9ba82442045aca0efabef3ae337f185320b7`。
 不继承原UnifoLM或旧40k任务的optimizer、scheduler、RNG。DINO继续冻结。
 八卡batch4×累积1、全局batch32和五组峰值LR保持上述配方：Action1e-5、
 语言骨干1e-7、视觉塔1e-6、投影1e-5、Motion1e-6。新的cosine预算为20,000更新、
-1,000更新warmup；每4,000更新保存完整checkpoint，早期20步保存关闭。
+1,000更新warmup；原普通AdamW运行每4,000更新保存完整checkpoint，早期20步保存关闭。
+后文融合重跑补充20步和每1k恢复点，所有4k正式checkpoint继续保留。
 八卡第2、20更新健康探针仍保留。验证仍为固定40个真实窗口，沿用生产触发语义，
 在完成第1、1001、2001……次及最终更新后执行，不将验证步号冒认为checkpoint成绩。
 
@@ -161,6 +164,8 @@ SHA256为`12a71e046e221b83f0bdb0efb50f9ba82442045aca0efabef3ae337f185320b7`。
 38k独立CPU权重审计保存为该目录下的`joint38000_cpu_audit.json`；
 新任务准备目录为`handover_joint38000_b32_s20000`，不覆盖旧40k任务。
 独立Conda prefix与原数据、DINO路径继续复用。
+
+以下是原普通AdamW运行入口；当前融合重跑使用文末独立入口及新目录，不重复启动旧运行。
 
 ```bash
 bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh prepare
@@ -251,8 +256,8 @@ CUDA异步栈不能定位最初失败的模型算子，不能凭此认定为数�
 Adam状态最大差1.16185e-5。所有值有限、无OOM，首组计时步骤的PyTorch allocated峰值
 普通46.58GiB、融合44.26GiB；单GPU结果不代表八卡峰值。
 由于梯度差在优化器更新前已经出现，不能将此次差异直接归因于融合AdamW。
-原失败报告和容差保留，尚未进行连续三步融合检查，也未因此放行正式切换。
-下一步分别检查普通后端重复性，以及使用逐值相同的实际梯度隔离AdamW执行差异；
+该次strict尝试的失败报告和容差保留，未进入连续三步融合检查，也未因此放行正式切换。
+后续分别检查了普通后端重复性，以及使用逐值相同的实际梯度隔离AdamW执行差异；
 两类结论分开记录，同梯度后端比较不覆盖原独立反向对照失败。
 
 `validate_task_fused_step.py --mode controlled --microbenchmark-report <已验收小测试报告>`
@@ -262,7 +267,7 @@ Adam状态最大差1.16185e-5。所有值有限、无OOM，首组计时步骤的
 `full_step_comparison_passed`。报告仍保留独立反向的重复性结果及未知原因。
 
 用户已接受测试通过后从38k重新初始化、重算未保存的2345步。
-拟重跑仍是20k任务更新及原五组学习率、batch32；每4k正式checkpoint保留，新增20步及每1k恢复点，
+实际重跑仍是20k任务更新及原五组学习率、batch32；每4k正式checkpoint保留，新增20步及每1k恢复点，
 仅滚动保留新运行最近两次保存并豁免所有4k正式点。启用独立tmpfs中的每rank双槽CPU输入/RNG转储，
 诊断模式与存档停顿须计入实际耗时，不能把独立优化器测量冒充正式任务提速。
 
@@ -271,3 +276,50 @@ Adam状态最大差1.16185e-5。所有值有限、无OOM，首组计时步骤的
 `run`使用独立锁拒绝重复启动，在唯一tmpfs目录保留每rank两槽输入/RNG，启用
 `CUDA_LAUNCH_BLOCKING=1`以帮助定位上次未知native故障，并记录实际源码SHA和诊断环境。
 第2、20次更新既保留原参数探针，也核验八rank真实fused/foreach配置和CUDA显存峰值。
+
+### 受控对照结果与实际融合重跑
+
+受控整模型检查使用单张A100、真实batch4，以及完整UnifoLM38k模型和Adam状态。
+普通AdamW独立重复也未通过原梯度容差，最大preclip梯度差0.01312196；
+独立全反向等价性仍未通过，原因未定位，不归因于某个库，不将该差异当作可接受误差上界。
+两组交替后端对照使用逐值相同的真实preclip和postclip梯度，原容差未放宽；
+全部模型参数最大绝对差7.450580596923828e-9、Adam状态最大差9.313225746154785e-10，
+逐参数计数相同。额外连续三步融合更新各自使用真实反向梯度，loss、梯度、模型和Adam状态有限，未OOM。
+因此通过的是同梯度AdamW更新对照及短程有限性/显存检查，不是独立全反向的逐位或确定性等价。
+报告SHA256为`3e5fa97d7b996e1bc81cc4b24c8ea35f06ab3934d65a8d2017c70a009a3c9394`，
+本机原报告位于`/home/zxc/CVPR_Evaluation_runtime/reports/task50_unifolm38k_fused_controlled_validation/report.json`。
+
+实际生产重跑使用代码`632968de7fb1557a0c52b299ad1da07d8d10c64b`，A100监督器于
+2026-10-22 09:55:00 UTC启动，任务管理器09:55:17记录running；运行时间戳`261022095337`。
+初始任务计数为0，初始化收据确认38k ActionExpert、VLM和MotionExpert全部继承，
+CUDA准备后Adam状态为空，再设置真实优化器defaults和所有参数组为`fused=True, foreach=False`。
+没有继承原UnifoLM的optimizer，也没有恢复已丢失的2345次任务更新。
+八张A100、每卡4、累积1、全局32，原归一化、45/5划分、增强策略、冻结DINO及五组LR保持不变。
+
+新运行根目录：
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute`。
+该目录下`training_state.json`及`progress/progress.json`记录实际运行与进度，
+`progress/losses.csv`和`progress/loss.png`持续记录本段loss；旧曲线不拼入新任务。
+正式训练目录为该目录下的
+`training/posttrain/handover_task50_joint38000_fused_restart.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022095337`。
+原A100仓库保留196ec73且工作树干净，实际运行采用独立632968d worktree；
+GitHub网络拉取失败后使用已推送提交的校验Git bundle部署，没有改写旧运行源码。
+
+第2、20次更新的八卡loss/梯度有限性、每rank7700个参数探针一致性，以及所有rank实际融合配置均通过。
+这些是每个可训练tensor前4个值的探针，不是八卡完整参数逐值比较。
+两次TRAIN loss为11.513908和4.380304，首次固定VAL loss为12.501106；不同batch不能作为收敛结论。
+到第20步八rank中PyTorch allocated峰值最大55.006GiB、reserved峰值最大57.590GiB，
+检查时设备空闲最小20.572GiB；这是启动至第20步范围，不是20k全程峰值。
+
+`ckpt_20`已有生产保存完成标记，模型、optimizer、scheduler和八rank RNG共11个非空文件齐全；
+模型覆盖1944个stored tensor且文件extent完整，optimizer/scheduler的ZIP目录可读取。
+此次只核对保存完成和结构，没有重复全量tensor/CRC扫描，也没有宣称该checkpoint已冷恢复验证。
+后续每1k额外恢复点只在本新运行中滚动保留最近两次保存，所有4k正式点豁免清理。
+八卡早期证据及17个小文件的SHA绑定保存在
+`/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_fused_early20/early_acceptance.json`，
+SHA256为`1e8ea009868ff9d78949eb8025cdf2a6da3258df8d75714f4c37ec796a0c5507`；没有复制checkpoint载荷。
+仓库摘要见[a100_fused_adamw_validation.json](a100_fused_adamw_validation.json)。
+
+早期验收快照为第65步，训练继续运行；它不是实时进度。ETA仍等待1000步warmup后的真实时间间隔，
+不采用旧运行、微基准或跨机器复制时间推算。同步CUDA诊断、输入/RNG转储、验证和保存均会影响实际耗时。
+目前未完成端到端提速对照、完整20k训练或微调后物理评测，原CUDA断言根因也仍未定位。

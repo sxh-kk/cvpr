@@ -221,5 +221,22 @@
     "guard_entered_pause_branch": false,
     "local_evidence": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_failure2345/failure_audit.json",
     "root_cause": "unlocalized native CUDA async assertion; no exact failing batch/operator dump"
+  },
+  "successor_fused_run": {
+    "state_at_early_recording": "running",
+    "run_timestamp": "261022095337",
+    "run_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000_fused_recompute/training/posttrain/handover_task50_joint38000_fused_restart.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022095337",
+    "source_revision": "632968de7fb1557a0c52b299ad1da07d8d10c64b",
+    "source_step": 38000,
+    "initial_task_step": 0,
+    "old_task2345_restored": false,
+    "user_accepted_recomputation": true,
+    "early_gpu_updates_passed": [
+      2,
+      20
+    ],
+    "checkpoint20_save_and_structure_passed": true,
+    "evidence_summary": "a100_fused_adamw_validation.json",
+    "scope": "Separate new run; this file retains the failed ordinary-AdamW run history"
   }
 }

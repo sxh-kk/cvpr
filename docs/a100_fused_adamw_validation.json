@@ -1,5 +1,5 @@
 {
-  "state": "optimizer_microbenchmark_passed_full_task_and_switch_pending",
+  "state": "full_independent_backward_ab_failed_shared_gradient_control_pending",
   "parent_run_timestamp": "261022080240",
   "origin_joint_step": 38000,
   "total_task_optimizer_updates": 20000,
@@ -34,7 +34,57 @@
     "Keep the20k total budget, batch32, five learning rates, gradient clipping, frozen DINO and joint training.",
     "Verify eight-rank continuation at2 and20 updates; compare observed throughput separately."
   ],
-  "full_task_gpu_validation": "not_run",
+  "full_task_gpu_validation": {
+    "status": "failed",
+    "source_checkpoint": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/fused_adamw_validation/protected_unifolm38k/checkpoints/ckpt_38000",
+    "scope": "actual complete task model and real accepted transformed batch; single GPU A/B only",
+    "report_sha256": "957e898331e4dc97d841844599b4575c1ce39b34dafd593eb0500e65161ef02c",
+    "local_report": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_unifolm38k_fused_validation/report.json",
+    "loss_abs_difference": 0.0,
+    "max_abs_preclip_gradient_difference": 0.0078125,
+    "max_abs_parameter_difference": 1.1920928955078125e-07,
+    "max_abs_adam_state_difference": 1.1618481948971748e-05,
+    "peak_memory": {
+      "standard": {
+        "peak_allocated_bytes": 50013075456,
+        "peak_reserved_bytes": 52261027840,
+        "allocated_bytes_after_update": 47492298752,
+        "device_free_bytes_after_update": 32350470144
+      },
+      "fused": {
+        "peak_allocated_bytes": 47522338816,
+        "peak_reserved_bytes": 49476009984,
+        "allocated_bytes_after_update": 47493279744,
+        "device_free_bytes_after_update": 35135488000
+      }
+    },
+    "cause_assignment": "Gradient divergence preceded optimizer updates; backend contribution not isolated",
+    "continuous_fused_steps_completed": 0
+  },
   "production_backend_switched": false,
-  "physical_effect_evaluated": false
+  "physical_effect_evaluated": false,
+  "original_task_failure": {
+    "completed_updates_last_console": 2345,
+    "rank": 5,
+    "reported_cuda_assertion_utc": "2026-10-22T09:12:52Z",
+    "supervisor_finished_utc": "2026-10-22T09:12:56.010295+00:00",
+    "optimizer_backend_at_failure": "ordinary AdamW; fused not selected",
+    "complete_task_checkpoints": [],
+    "task_progress_restorable": false,
+    "guard_entered_pause_branch": false,
+    "local_evidence": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_failure2345/failure_audit.json",
+    "root_cause": "unlocalized native CUDA async assertion; no exact failing batch/operator dump"
+  },
+  "cpu_input_probe": {
+    "status": "bounded_prefix_completed_timeout_cleaned",
+    "batches_completed": 15,
+    "actual_batches_per_rank_epoch": 431,
+    "first_batch_wait_seconds": 27.794,
+    "subsequent_14_mean_seconds": 0.637195,
+    "rough_4000_replay_minutes": 42.93,
+    "scope": "single CPU rank0 virtual8-shard prefix, not eight-rank replay throughput",
+    "report_sha256": "9edea2a00599633169f17c41337a7e2690a9481d59a15718849e81ca444585e6",
+    "resource_interference_excluded": false
+  },
+  "full_gpu_source": "protected complete UnifoLM38000 state; not failed task2345"
 }

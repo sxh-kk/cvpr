@@ -1,6 +1,8 @@
 # A100：38k联合权重初始化，Handover任务微调20k步
 
 **当前配方：UnifoLM38k初始化，八卡联合微调20,000步，每4,000步保存。**
+2026-10-22该运行在2345次更新后因rank5 CUDA异步断言退出，尚未生成首个完整任务checkpoint。
+完整38k初始化权重仍受保护；未保存的2345步不能从磁盘恢复，不能宣称无损续训或已切换融合AdamW。
 使用`finetune-handover-task50-joint38k.sh`，完整命令见末尾“当前38k配方”。
 下方40k／2k运行是已停止的历史试跑，记录与checkpoint保留，不作为当前初始化来源。
 
@@ -179,16 +181,16 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
 62,446–62,532MiB的主要上下文，另有约12,960MiB的上下文，总设备占用75,418–75,504MiB。
 容器`/proc`与NVML的host PID不同，额外上下文归属尚未确定，未停止或修改其他进程。
 可见每rank的Inductor编译子进程持有继承的GPU设备句柄，这可能相关，但尚无直接PID映射证据。
-八个训练rank和数值检查均正常；该资源现象单独记录，不把16个NVML条目当作16个训练rank，
+以上为早期八个训练rank及数值检查通过时的快照；该资源现象单独记录，不把16个NVML条目当作16个训练rank，
 不将早期显存视为全程峰值或吞吐验收。完整20k训练及微调后的物理效果尚未验收。
 本次启动摘要见[a100_task50_joint38000_validation.json](a100_task50_joint38000_validation.json)。
 当前38k的本机查看快照单独存放于
 `/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_current`；
-它是带复制时间和SHA的快照，持续更新的原始CSV、PNG和进度在A100新准备目录下。
+它是带复制时间和SHA的早期快照，原始CSV、PNG和最终failed进度保存在A100新准备目录下。
 
 ## 融合AdamW：验证后受控切换
 
-用户授权先验证数值和显存，确认通过后保留当前进度切换。当前运行继续使用原普通AdamW，
+用户授权先验证数值和显存，确认通过后保留当前进度切换。原运行在仍使用普通AdamW时故障退出，
 不得因为合成小测试通过就直接重启或修改参数。新增工具不会默认停止任何训练。
 
 `benchmark_fused_adamw.py`已经完成单张A100、有限显存的优化器测试：
@@ -196,7 +198,7 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
 两分支合计PyTorch峰值242.21MiB；97步后最大参数差异5.96e-8，计数精确相同。
 1.34ms到0.68ms仅为7.28M元素的小样本优化器测量，且与原训练并发，不能当作整网提速。
 
-切换使用以下独立路径，不覆盖正在运行的196ec73源码或旧run：
+切换工具使用以下独立路径，不覆盖原运行使用的196ec73源码或旧run：
 
 1. `checkpoint_pause_guard.py`先只读绑定八个worker的PID及启动身份，默认dry-run。
    `watch --execute`等待原任务自然保存4000步；完整文件和保存完成标记通过后短暂停住八rank。
@@ -220,4 +222,46 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
 这段重放耗时单独显示，新段监控以恢复步数为下限，旧CSV不混入新段ETA。
 
 切换后还需八卡第2、20次连续更新检查及实际墙钟耗时对照。有限数值容差通过不代表逐位一致，
-也不替代完整20k训练和后续物理验收；截至本节准备记录，完整GPU对照与实际切换尚未执行。
+也不替代完整20k训练和后续物理验收；原任务未执行融合切换，后续独立验证结果见下文。
+
+### 首次保存前的故障与恢复边界
+
+原运行在A100时间09:12:52 UTC报告`TensorCompare.cu:112 _assert_async_cuda_kernel`断言，
+rank5随即SIGABRT，torchrun终止其余worker，监督器09:12:56记录failed。
+控制台最后完成2345次更新；checkpoint目录为空，没有完整模型、Adam状态、scheduler及八rank RNG可续接。
+CUDA异步栈不能定位最初失败的模型算子，不能凭此认定为数据、优化器或某项并发操作导致。
+
+4000步守卫在等待期间发现任务failed而退出；没有lease或held证据，未进入暂停分支。
+最初一次守卫因绑定文件名写错在启动检查阶段退出，日志独立封存；修正后的等待也没有暂停训练。
+故障证据保存在A100的`fused_adamw_validation/failure_2345_snapshot`和本机
+`/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_failure2345`。
+
+同期独立CPU取数探针50秒内读取15批，确认真实shape和每rank431批。
+首批等待27.79秒，后14批平均0.637秒；按该短前缀粗算4000批约43分钟，
+不是八rank重放实测或耗时承诺。探针采用独立进程组且禁用CUDA，但没有同期CPU/IO峰值记录；
+原训练末段也出现变慢，不能用事后空闲快照证明不存在间接资源影响。
+
+原任务故障后，另外的UnifoLM固定验证作业自然完成并释放GPU，未停止它。
+后续整模型AdamW对照使用硬链接保护的完整UnifoLM38k模型和原Adam状态；
+这可以检查融合执行的数值和显存，不能替代已经丢失的任务2345步状态或证明无损恢复。
+重新开始任务必须明确记录从38k初始化及重算范围，不能借用旧40k任务checkpoint冒充续训。
+
+首次整模型单GPU对照已执行且未通过原严格门槛：两后端loss均为1.647866249，
+但更新前的preclip梯度最大绝对差为0.0078125；随后参数最大差1.19209e-7，
+Adam状态最大差1.16185e-5。所有值有限、无OOM，首组计时步骤的PyTorch allocated峰值
+普通46.58GiB、融合44.26GiB；单GPU结果不代表八卡峰值。
+由于梯度差在优化器更新前已经出现，不能将此次差异直接归因于融合AdamW。
+原失败报告和容差保留，尚未进行连续三步融合检查，也未因此放行正式切换。
+下一步分别检查普通后端重复性，以及使用逐值相同的实际梯度隔离AdamW执行差异；
+两类结论分开记录，同梯度后端比较不覆盖原独立反向对照失败。
+
+`validate_task_fused_step.py --mode controlled --microbenchmark-report <已验收小测试报告>`
+保留原数值容差，增加standard对standard重复性控制、两组交替同梯度对照和连续三步真实反向。
+在更新前分别核验preclip和postclip梯度逐值相同；任一postclip差异都会阻止该优化器更新。
+该模式成功状态为`controlled_optimizer_comparison_passed`，旧strict模式及其恢复入口不会将它误认为
+`full_step_comparison_passed`。报告仍保留独立反向的重复性结果及未知原因。
+
+用户已接受测试通过后从38k重新初始化、重算未保存的2345步。
+拟重跑仍是20k任务更新及原五组学习率、batch32；每4k正式checkpoint保留，新增每1k恢复点，
+仅滚动保留新运行最近两次保存并豁免所有4k正式点。启用独立tmpfs中的每rank双槽CPU输入/RNG转储，
+诊断模式与存档停顿须计入实际耗时，不能把独立优化器测量冒充正式任务提速。

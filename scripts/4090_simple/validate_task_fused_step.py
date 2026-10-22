@@ -5,6 +5,10 @@ released the GPUs. One GPU holds one FP32 model/optimizer at a time. CPU keeps
 the restored source and reference results. No checkpoint or dataset is modified.
 This deliberately does not test DDP, the global batch of 32, sampler restoration
 or production scheduler advancement; those require a separate resume acceptance.
+The default strict mode compares independent backward passes. Explicit
+--mode controlled adds a standard/standard repetition diagnostic and replays
+identical gradients to isolate AdamW. Its distinct success status does not pass
+the independent-full-step gate or replace an earlier strict failure report.
 """
 from __future__ import annotations
 
@@ -108,6 +112,62 @@ def compare_maps(reference, candidate, *, atol, rtol, chunk_elements):
     return summary
 
 
+def gradients(model):
+    return {name: parameter.grad for name, parameter in model.named_parameters() if parameter.requires_grad}
+
+
+def snapshot_gradients(model):
+    """Own every CPU allocation; replay/clipping must never mutate the snapshot."""
+    return cpu_tree(gradients(model))
+
+
+def gradient_structure(reference, current):
+    problems = []
+    if set(reference) != set(current):
+        problems.append({"reason": "parameter names differ"})
+    for name in reference.keys() & current.keys():
+        expected, actual = reference[name], current[name]
+        if expected is None or actual is None:
+            if expected is not actual:
+                problems.append({"name": name, "reason": "None pattern differs"})
+        elif expected.shape != actual.shape or expected.dtype != actual.dtype or expected.layout != actual.layout:
+            problems.append({"name": name, "reason": "shape/dtype/layout differs"})
+    return {"passed": not problems, "problems": problems, "tensors": len(reference)}
+
+
+@torch.no_grad()
+def replay_preclip_gradients(model, reference, *, chunk_elements):
+    current = gradients(model)
+    structure = gradient_structure(reference, current)
+    # Validate the whole layout before any tensor is changed.
+    if not structure["passed"]:
+        raise ValueError("Cannot replay preclip gradients: None/shape/dtype/layout mismatch")
+    if any(expected is not None and expected.device.type != "cpu" for expected in reference.values()):
+        raise ValueError("Replay requires an independent CPU gradient snapshot")
+    for name, expected in reference.items():
+        if expected is not None:
+            current[name].copy_(expected)
+    exact = compare_maps(reference, gradients(model), atol=0.0, rtol=0.0,
+                         chunk_elements=chunk_elements)
+    exact.update(strict_zero_tolerance=True, gradient_source="first_branch_preclip_cpu_snapshot")
+    if not exact["passed"]:
+        raise RuntimeError("Preclip gradient replay failed full exact verification")
+    return exact
+
+
+def exact_postclip_comparison(reference, model, *, chunk_elements):
+    result = compare_maps(reference, gradients(model), atol=0.0, rtol=0.0,
+                          chunk_elements=chunk_elements)
+    result["strict_zero_tolerance"] = True
+    return result
+
+
+def guarded_optimizer_step(optimizer, postclip_audit):
+    if postclip_audit is not None and not postclip_audit.get("passed", False):
+        raise RuntimeError("Postclip gradients differ: optimizer.step was not executed")
+    return optimizer.step()
+
+
 def optimizer_tensors(optimizer):
     result = {}
     for group_index, group in enumerate(optimizer.param_groups):
@@ -190,7 +250,7 @@ def changed_groups(model, source, optimizer, chunk_elements):
     return changes
 
 
-def full_step(trainer, cpu_batch, safety, step, *, gradient_audit=None):
+def full_step(trainer, cpu_batch, safety, step, *, gradient_audit=None, postclip_audit=None):
     """Use production loss, bf16 autocast, backward, finite gates and group clip."""
     from psi.utils import move_to_device
     device = trainer.device
@@ -198,7 +258,8 @@ def full_step(trainer, cpu_batch, safety, step, *, gradient_audit=None):
     trainer.optimizer.zero_grad(set_to_none=True)
     torch.cuda.synchronize(device)
     torch.cuda.reset_peak_memory_stats(device)
-    begin, backward_end, optimizer_begin, end = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
+    begin, backward_end, clip_begin, clip_end, optimizer_begin, end = [
+        torch.cuda.Event(enable_timing=True) for _ in range(6)]
     wall = time.perf_counter()
     begin.record()
     with trainer.forward_autocast():
@@ -214,9 +275,15 @@ def full_step(trainer, cpu_batch, safety, step, *, gradient_audit=None):
     audit = gradient_audit(trainer.model) if gradient_audit else None
     # Audit CPU copies/comparison are excluded from both step timing intervals.
     wall = time.perf_counter()
-    optimizer_begin.record()
+    clip_begin.record()
     norms = trainer.clip_grad_norms(already_unscaled=True)
-    trainer.optimizer.step()
+    clip_end.record()
+    clip_end.synchronize()
+    clip_wall = time.perf_counter() - wall
+    postclip = postclip_audit(trainer.model) if postclip_audit else None
+    wall = time.perf_counter()
+    optimizer_begin.record()
+    guarded_optimizer_step(trainer.optimizer, postclip)
     end.record()
     end.synchronize()
     update_wall = time.perf_counter() - wall
@@ -227,11 +294,13 @@ def full_step(trainer, cpu_batch, safety, step, *, gradient_audit=None):
     check_finite_model_optimizer(trainer.model, trainer.optimizer)
     result = {"loss": float(losses["loss"].detach()), "preclip_group_norms": norms,
         "forward_backward_event_ms": begin.elapsed_time(backward_end),
-        "clip_optimizer_event_ms": optimizer_begin.elapsed_time(end),
-        "step_wall_seconds_excluding_audit": backward_wall + update_wall,
+        "clip_optimizer_event_ms": clip_begin.elapsed_time(clip_end) + optimizer_begin.elapsed_time(end),
+        "step_wall_seconds_excluding_audit": backward_wall + clip_wall + update_wall,
         "memory": memory, "all_parameters_and_adam_states_finite": True}
     if audit is not None:
         result["gradient_audit"] = audit
+    if postclip is not None:
+        result["postclip_gradient_audit"] = postclip
     del batch, losses
     return result
 
@@ -244,6 +313,8 @@ def write_json(path, value):
 
 def finish_acceptance(report):
     """A partial run or microbenchmark can never produce the full-step gate."""
+    if report.get("mode", "strict") != "strict":
+        raise ValueError("Controlled optimizer evidence cannot satisfy the independent full-step gate")
     comparisons = report.get("comparisons", [])
     extra = report.get("additional_fused_steps", [])
     warmup = report.get("discarded_warmup", [])
@@ -262,6 +333,7 @@ def finish_acceptance(report):
         raise ValueError("Full-step acceptance is not bound to the exact checkpoint/config")
     memories = [item["memory"] for item in steps] + [item["memory"] for item in warmup]
     report.update(status="passed", full_step_comparison_passed=True,
+        uncontrolled_full_step_comparison_passed=True,
         all_model_and_optimizer_tensors_finite=True,
         peak_memory={"peak_allocated_bytes": max(item["peak_allocated_bytes"] for item in memories),
             "peak_reserved_bytes": max(item["peak_reserved_bytes"] for item in memories),
@@ -270,11 +342,62 @@ def finish_acceptance(report):
             "scope": "PyTorch CUDA allocator peaks plus free-memory samples; includes one model and optimizer"})
 
 
+def finish_controlled_acceptance(report):
+    """Separate optimizer isolation from independent-backward reproducibility."""
+    pairs = report.get("same_gradient_comparisons", [])
+    repetition = report.get("baseline_repetition", {})
+    extra, warmup = report.get("additional_fused_steps", []), report.get("discarded_warmup", [])
+    if (report.get("mode") != "controlled" or len(pairs) < 2
+            or not repetition.get("comparison_complete") or len(extra) < 3 or len(warmup) != 2):
+        raise ValueError("Incomplete controlled optimizer/repetition/continuous-step evidence")
+    for index, pair in enumerate(pairs):
+        order = ["standard", "fused"] if index % 2 == 0 else ["fused", "standard"]
+        if (not pair.get("passed") or not pair.get("comparison_complete")
+                or pair.get("execution_order") != order
+                or not pair.get("parameters_and_buffers", {}).get("passed")
+                or not pair.get("adam_states_including_steps", {}).get("passed")
+                or not pair.get("preclip_structure", {}).get("passed")
+                or not pair.get("preclip_replay", {}).get("passed")
+                or not pair.get("preclip_replay", {}).get("strict_zero_tolerance")
+                or not pair.get("postclip_gradient_equality", {}).get("passed")
+                or not pair.get("postclip_gradient_equality", {}).get("strict_zero_tolerance")):
+            raise ValueError("Controlled optimizer input equality or numerical gate failed")
+    if any(item.get("gradient_source") != "own_real_backward" for item in extra):
+        raise ValueError("Continuous fused checks must use their own real backward gradients")
+    if (extra[0].get("restored_since_previous_step") is not True
+            or any(item.get("restored_since_previous_step") is not False for item in extra[1:])):
+        raise ValueError("Continuous fused checks must not restore between their real steps")
+    steps = ([branch["step"] for pair in pairs + [repetition]
+              for branch in pair["branches"].values()] + extra)
+    if (any(not item.get("all_parameters_and_adam_states_finite") for item in steps)
+            or any(not item.get("finite") for item in warmup)):
+        raise ValueError("Missing finite evidence for controlled or continuous real-gradient steps")
+    required = ("model.safetensors", "optimizer.bin", "scheduler.bin")
+    hashes = report.get("source_checkpoint_files_sha256", {})
+    if (any(len(hashes.get(name, "")) != 64 for name in required)
+            or len(report.get("source_config_sha256", "")) != 64):
+        raise ValueError("Controlled acceptance must be bound to checkpoint/config bytes")
+    memories = [item["memory"] for item in steps] + [item["memory"] for item in warmup]
+    report.update(status="controlled_optimizer_comparison_passed",
+        same_gradient_optimizer_comparison_passed=True,
+        postclip_gradients_exactly_equal=True,
+        continuous_fused_real_gradient_steps_passed=True,
+        all_model_and_optimizer_tensors_finite=True,
+        uncontrolled_full_step_comparison_passed=False, full_step_comparison_passed=False,
+        peak_memory={"peak_allocated_bytes": max(item["peak_allocated_bytes"] for item in memories),
+            "peak_reserved_bytes": max(item["peak_reserved_bytes"] for item in memories),
+            "minimum_device_free_bytes_after_update": min(item["device_free_bytes_after_update"] for item in memories),
+            "gpu_total_bytes": report["runtime"]["gpu_total_bytes"],
+            "scope": "single-model controlled optimizer and independent continuous fused steps"})
+
+
 def run(args):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 or torch.distributed.is_initialized():
         raise ValueError("Validation must run as a separate single-process GPU job")
     if args.repeats < 1 or args.extra_fused_steps < 2 or args.chunk_elements <= 0:
         raise ValueError("Require >=1 exact A/B repeat, >=2 extra fused steps, positive chunks")
+    if args.mode == "controlled" and args.repeats < 2:
+        raise ValueError("Controlled mode requires at least two alternating A/B pairs")
     # The script itself refuses to compete with an active training allocation.
     occupied = subprocess.check_output(["nvidia-smi", "--query-compute-apps=pid",
         "--format=csv,noheader"], text=True)
@@ -294,12 +417,14 @@ def run(args):
     if available_kib < args.minimum_host_free_gib * 1024 ** 2:
         raise MemoryError("Not enough host RAM for source, reference parameters, moments and gradients")
     output.mkdir(parents=True)
-    report = {"schema": "cvpr_single_gpu_task_adamw_acceptance_v1", "status": "preparing",
+    report = {"schema": "cvpr_single_gpu_task_adamw_acceptance_v1", "status": "preparing", "mode": args.mode,
         "started_utc": datetime.now(timezone.utc).isoformat(), "checkpoint": str(checkpoint),
         "source_checkpoint": str(checkpoint),
         "source_checkpoint_files_sha256": {name: file_sha256(checkpoint / name) for name in required},
         "source_config_sha256": file_sha256(args.prepared / "run_config.json"),
         "all_model_and_optimizer_tensors_finite": False, "full_step_comparison_passed": False,
+        "same_gradient_optimizer_comparison_passed": False, "postclip_gradients_exactly_equal": False,
+        "uncontrolled_full_step_comparison_passed": False, "continuous_fused_real_gradient_steps_passed": False,
         "checkpoint_files": identities, "prepared": str(args.prepared.resolve()),
         "tolerances": {"parameter_moments_atol": args.atol, "parameter_moments_rtol": args.rtol,
             "gradient_atol": args.grad_atol, "gradient_rtol": args.grad_rtol,
@@ -310,6 +435,16 @@ def run(args):
             "Restored five learning rates stay fixed for the isolated optimizer comparison",
             "Timing excludes checkpoint restoration, dataset decoding, CPU audits and safety batch snapshot",
             "Cold/warm effects and single-GPU timing do not establish production training speedup"]}
+    if args.microbenchmark_report is not None:
+        micro_path = args.microbenchmark_report.resolve(strict=True)
+        micro = json.loads(micro_path.read_text())
+        report["microbenchmark_report"] = {"path": str(micro_path), "sha256": file_sha256(micro_path),
+                                          "status": micro.get("status")}
+    if args.mode == "controlled":
+        report["limitations"] += [
+            "Controlled success does not replace or pass any prior independent full-step A/B report",
+            "A standard-vs-standard difference neither bounds all A/B error nor identifies a library cause"]
+        report["independent_backward_cause"] = "unresolved"
     write_json(output / "report.json", report)
     try:
         for path in (REPO, REPO / "VLMExpert/src", REPO / "VLMExpert"):
@@ -403,22 +538,27 @@ def run(args):
             warmup = full_step(trainer, cpu_batch, safety, checkpoint_step)
             report["discarded_warmup"].append({"fused": fused, "loss": warmup["loss"],
                 "finite": warmup["all_parameters_and_adam_states_finite"], "memory": warmup["memory"]})
-        report["comparisons"] = []
-        for repeat in range(args.repeats):
-            order = ("standard", "fused") if repeat % 2 == 0 else ("fused", "standard")
+        def evaluate_pair(comparison, order, *, share_gradients=False):
             branches = {}
             first_name, second_name = order
             first = {"backend": restore(first_name == "fused")}
-            gradient_reference = {}
+            comparison.update(execution_order=list(order), branches=branches,
+                              reference_backend=first_name)
+            gradient_reference, postclip_reference = {}, {}
 
             def capture_gradients(model):
-                gradient_reference.update({name: None if p.grad is None else cpu_tree(p.grad)
-                    for name, p in model.named_parameters() if p.requires_grad})
+                gradient_reference.update(snapshot_gradients(model))
                 return {"scope": "all preclip trainable gradients copied to CPU",
                         "tensors": len(gradient_reference)}
 
+            def capture_postclip(model):
+                postclip_reference.update(snapshot_gradients(model))
+                return {"passed": True, "kind": "independent_cpu_reference_snapshot",
+                        "tensors": len(postclip_reference)}
+
             first["step"] = full_step(trainer, cpu_batch, safety, checkpoint_step,
-                gradient_audit=capture_gradients)
+                gradient_audit=capture_gradients,
+                postclip_audit=capture_postclip if share_gradients else None)
             first["changed_groups"] = changed_groups(trainer.model, source_model,
                 trainer.optimizer, args.chunk_elements)
             reference_model = cpu_tree(trainer.model.state_dict())
@@ -427,44 +567,86 @@ def run(args):
             second = {"backend": restore(second_name == "fused")}
 
             def audit_gradients(model):
-                current = {name: p.grad for name, p in model.named_parameters() if p.requires_grad}
-                return compare_maps(gradient_reference, current, atol=args.grad_atol,
+                current = gradients(model)
+                raw = compare_maps(gradient_reference, current, atol=args.grad_atol,
                     rtol=args.grad_rtol, chunk_elements=args.chunk_elements)
+                comparison["independent_preclip_gradients"] = raw
+                if not share_gradients:
+                    return raw
+                comparison["preclip_structure"] = gradient_structure(gradient_reference, current)
+                write_json(output / "report.json", report)
+                replay = replay_preclip_gradients(model, gradient_reference,
+                    chunk_elements=args.chunk_elements)
+                comparison["preclip_replay"] = replay
+                return {"independent_raw_gradients": raw, "preclip_replay": replay,
+                        "gradient_source": "first_branch_preclip_cpu_snapshot"}
+
+            def check_postclip(model):
+                exact = exact_postclip_comparison(postclip_reference, model,
+                    chunk_elements=args.chunk_elements)
+                comparison["postclip_gradient_equality"] = exact
+                comparison["optimizer_step_blocked_by_postclip_gate"] = not exact["passed"]
+                write_json(output / "report.json", report)
+                return exact  # full_step refuses optimizer.step when false.
 
             second["step"] = full_step(trainer, cpu_batch, safety, checkpoint_step,
-                gradient_audit=audit_gradients)
+                gradient_audit=audit_gradients,
+                postclip_audit=check_postclip if share_gradients else None)
             second["changed_groups"] = changed_groups(trainer.model, source_model,
                 trainer.optimizer, args.chunk_elements)
             branches[second_name] = second
-            comparison = {"repeat": repeat, "execution_order": list(order), "branches": branches,
-                "reference_backend": first_name,
-                "loss_abs_difference": abs(first["step"]["loss"] - second["step"]["loss"]),
+            comparison.update(
+                loss_abs_difference=abs(first["step"]["loss"] - second["step"]["loss"]),
+                **{
                 "parameters_and_buffers": compare_maps(reference_model, trainer.model.state_dict(),
                     atol=args.atol, rtol=args.rtol, chunk_elements=args.chunk_elements),
                 "adam_states_including_steps": compare_maps(reference_adam, optimizer_tensors(trainer.optimizer),
                     atol=args.atol, rtol=args.rtol, chunk_elements=args.chunk_elements),
                 "last_backend_optimizer_groups": optimizer_state_identity(trainer.optimizer)}
-            comparison["passed"] = (comparison["loss_abs_difference"] <= args.loss_atol
-                and second["step"]["gradient_audit"]["passed"]
-                and comparison["parameters_and_buffers"]["passed"]
-                and comparison["adam_states_including_steps"]["passed"])
-            report["comparisons"].append(comparison)
-            write_json(output / "report.json", report)
+            )
+            independent_passed = (comparison["loss_abs_difference"] <= args.loss_atol
+                                  and comparison["independent_preclip_gradients"]["passed"])
+            comparison["independent_backward_comparison_passed"] = independent_passed
+            input_passed = (comparison["preclip_replay"]["passed"]
+                and comparison["postclip_gradient_equality"]["passed"]) if share_gradients else independent_passed
+            comparison["passed"] = (input_passed and comparison["parameters_and_buffers"]["passed"]
+                                     and comparison["adam_states_including_steps"]["passed"])
+            comparison["comparison_complete"] = True
             del gradient_reference, reference_model, reference_adam
             gc.collect()
+            return comparison
+
+        if args.mode == "controlled":
+            report["baseline_repetition"] = {"kind": "independent_standard_vs_standard",
+                "purpose": "Measure same-backend repeatability, without identifying a library cause or bounding A/B error"}
+            evaluate_pair(report["baseline_repetition"], ("standard_first", "standard_second"))
+            write_json(output / "report.json", report)
+        pair_key = "same_gradient_comparisons" if args.mode == "controlled" else "comparisons"
+        report[pair_key] = []
+        for repeat in range(args.repeats):
+            order = ("standard", "fused") if repeat % 2 == 0 else ("fused", "standard")
+            comparison = {"repeat": repeat, "same_preclip_replayed": args.mode == "controlled"}
+            report[pair_key].append(comparison)
+            evaluate_pair(comparison, order, share_gradients=args.mode == "controlled")
+            write_json(output / "report.json", report)
             if not comparison["passed"]:
-                raise RuntimeError("Actual full-model A/B numerical comparison failed; do not switch training")
+                raise RuntimeError("Full-model optimizer comparison failed; preserve this failure and do not switch training")
         report["additional_fused_steps"] = []
         restore(True)
         for index in range(args.extra_fused_steps + 1):
-            report["additional_fused_steps"].append(full_step(trainer, cpu_batch, safety,
-                checkpoint_step + index))
+            real_step = full_step(trainer, cpu_batch, safety, checkpoint_step + index)
+            real_step["gradient_source"] = "own_real_backward"
+            real_step["restored_since_previous_step"] = index == 0
+            report["additional_fused_steps"].append(real_step)
             trainer.optimizer.zero_grad(set_to_none=True)
         for name, identity in identities.items():
             stat = (checkpoint / name).stat()
             if (stat.st_size, stat.st_mtime_ns) != (identity["bytes"], identity["mtime_ns"]):
                 raise ValueError("Protected source checkpoint changed during the audit")
-        finish_acceptance(report)
+        if args.mode == "controlled":
+            finish_controlled_acceptance(report)
+        else:
+            finish_acceptance(report)
     except Exception as error:
         report.update(status="failed", error_type=type(error).__name__, error=str(error))
         write_json(output / "report.json", report)
@@ -480,6 +662,10 @@ def parse_args(argv=None):
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", required=True)
+    parser.add_argument("--mode", choices=("strict", "controlled"), default="strict",
+        help="controlled diagnoses independent repetition and isolates AdamW with exactly matched postclip gradients")
+    parser.add_argument("--microbenchmark-report", type=Path,
+        help="Optional immutable identity binding for the separately measured optimizer microbenchmark")
     parser.add_argument("--batch-indices", nargs=4, type=int, default=[0, 1, 2, 3])
     parser.add_argument("--rng-rank", type=int, default=0)
     parser.add_argument("--saved-cuda-rng-index", type=int, default=0)

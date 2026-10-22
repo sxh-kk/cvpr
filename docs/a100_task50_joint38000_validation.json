@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "state_at_recording": "running",
+  "state_at_recording": "failed",
   "source_revision_at_launch": "196ec733615be31ea60e299b268b3bf48a77ca1b",
   "run_timestamp": "261022080240",
   "run_directory": "/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/task50_38k_preparation/handover_joint38000_b32_s20000/training/posttrain/handover_task50_joint38000.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261022080240",
@@ -145,10 +145,11 @@
     ],
     "additional_context_memory_mib_per_gpu": 12960,
     "other_processes_signalled_or_changed": false,
-    "note": "All eight trainer ranks and numerical probes are live/passed. NVML PID namespace prevents direct process ownership matching; extra contexts are under read-only investigation, not counted as additional trainer ranks.",
+    "note": "Early snapshot only: all eight trainer ranks were live and update2/20 numerical probes had passed before the later2345-update native CUDA failure. NVML and container PID namespaces differ; no other process was stopped.",
     "compiler_subprocess_observation": "Each of the eight trainer ranks has an Inductor compile-worker server with inherited NVIDIA device descriptors.",
     "unconfirmed_inference": "These forked compiler processes may explain the second NVML context; host PID ownership is not established and no separate task attribution is claimed.",
-    "corrected_pid_comparison": "Direct comparison of NVML host PIDs with container rank PIDs is invalid; GPU ownership mapping remains unknown, not a failed numerical training check."
+    "corrected_pid_comparison": "Direct comparison of NVML host PIDs with container rank PIDs is invalid; GPU ownership mapping remains unknown, not a failed numerical training check.",
+    "subsequent_observation": "After all failed task workers exited, eight visible UnifoLM fixed-eval workers retained the remaining GPU contexts; that separate evaluation finished naturally before the full AdamW test. No process was stopped."
   },
   "monitor_snapshot": {
     "generated_utc": "2026-10-22T08:07:18.545866+00:00",
@@ -200,11 +201,23 @@
     "files_preserved": true
   },
   "limits": [
-    "The20000-update run is not complete; first full checkpoint is scheduled at4000.",
+    "The original20k task failed after2345 console updates before its first complete4k save; its unsaved task state cannot be restored.",
     "Early losses from different batches and sampled cross-rank checks do not establish convergence.",
     "Fine-tuned physical task success has not been measured.",
     "Successful source50Hz teacher trajectories were identity-bound, not physically revalidated after30Hz sampling.",
     "There is no independent TEST split; correlated50-episode data cannot establish official benchmark success.",
     "Extra GPU contexts and container/host PID mapping remain under read-only investigation; no other process was stopped."
-  ]
+  ],
+  "failure": {
+    "completed_updates_last_console": 2345,
+    "rank": 5,
+    "reported_cuda_assertion_utc": "2026-10-22T09:12:52Z",
+    "supervisor_finished_utc": "2026-10-22T09:12:56.010295+00:00",
+    "optimizer_backend_at_failure": "ordinary AdamW; fused not selected",
+    "complete_task_checkpoints": [],
+    "task_progress_restorable": false,
+    "guard_entered_pause_branch": false,
+    "local_evidence": "/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_failure2345/failure_audit.json",
+    "root_cause": "unlocalized native CUDA async assertion; no exact failing batch/operator dump"
+  }
 }

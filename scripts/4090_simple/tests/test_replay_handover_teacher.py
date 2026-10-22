@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from copy import deepcopy
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pyarrow as pa
@@ -118,6 +120,39 @@ def make_plan(root, *, source=9):
     return path,candidate
 
 
+def make_reference(root,source,binding):
+    """Synthetic explicit reference bundle for producer/validator integration."""
+    import prepare_handover_teacher_reference as reference
+    bundle=root/'reference';bundle.mkdir()
+    original=source['commands']
+    commands=np.vstack([original,np.full((100,78),.25,np.float32)])
+    applied=reference.held_commands(commands)
+    def save(name,values):
+        path=bundle/name;np.save(path,values,allow_pickle=False)
+        return {'path':name,'sha256':reference.sha256(path),'rows':len(values),'columns':78,'dtype':'float32'}
+    reference_descriptor=save('reference.npy',commands)
+    applied_descriptor=save('held.npy',applied)
+    repair=bundle/'result.json';write(repair,{'synthetic_fixture_only':True,
+        'modified_command_schema':{'file':'held.npy','sha256':applied_descriptor['sha256']},
+        'candidate_reset_identity':{key:binding[key] for key in ('candidate_id','candidate_spec_sha256','plan_sha256')}})
+    parquet=next(path for path in source['sources'] if path.endswith('.parquet'))
+    document={'contract':reference.CONTRACT,'scope':'TRAIN_teacher_only','source_episode_index':9,
+        'parent_source_parquet_sha256':module.file_sha256(parquet),'parent_source_commands':len(original),
+        'original_prefix_rows':len(original),'lineage_group_sources':source['row']['lineage_group_sources'],
+        'command_rate_hz':50,'execution_command_rate_hz':30,'decoder_hz':50,'physics_hz':200,
+        'body_token_version':'body_token_v1_1','hand_joint_names':list(module.HAND_NAMES),
+        'commands':reference_descriptor,'actual_executed_commands':applied_descriptor,
+        'prefix_verified':{'exact_native50_source_array_equal':True,'array_sha256':reference.array_sha256(original)},
+        'startup_recipe':{'control':module.PADDED_WARMUP_MODE,'seconds':1.,'startup_padding_is_synthetic':True},
+        'candidate_reset_binding':{key:binding[key] for key in ('candidate_id','candidate_spec_sha256','plan_sha256')},
+        'fixed_encoder':{'sha256':reference.ENCODER_SHA256,'decoder_sha256':reference.DECODER_SHA256},
+        'method':{'kind':'synthetic_fixture_no_physics_claim'},
+        'repair_inputs_sha256':{str(repair):module.file_sha256(repair),str(bundle/'held.npy'):applied_descriptor['sha256']},
+        'evaluation_oracle_allowed':False,'no_admission':True,'dataset_ready':False}
+    path=bundle/'teacher_reference.json';write(path,document)
+    return path,commands
+
+
 def renderer_fixture(sim_time_s):
     """Synthetic pose protocol only; this never renders or certifies a camera."""
     from copy import deepcopy
@@ -139,6 +174,170 @@ def renderer_fixture(sim_time_s):
 
 
 class ReplayHandoverTeacherTests(unittest.TestCase):
+    def test_teacher_reference_overlay_preserves_original_ancestry_reset_and_native_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);make_generic_source(root)
+            source=module.load_source(root,source_episode=9)
+            plan,_=make_plan(root);binding=module.read_candidate(plan,'registered-candidate')
+            path,commands=make_reference(root,source,binding)
+            original=deepcopy(source)
+            overlaid=module.apply_teacher_reference(source,path,binding,warmup_control=module.PADDED_WARMUP_MODE,
+                warmup_seconds=1.,command_rate=30)
+            np.testing.assert_array_equal(source['commands'],original['commands'])
+            np.testing.assert_array_equal(overlaid['commands'],commands)
+            np.testing.assert_array_equal(overlaid['commands'][:4],source['commands'])
+            self.assertEqual(overlaid['source_parent_rows'],4)
+            self.assertEqual(overlaid['row'],source['row'])
+            self.assertEqual(overlaid['initial'],source['initial'])
+            self.assertEqual(overlaid['source_record'],source['source_record'])
+            self.assertTrue(overlaid['teacher_reference']['no_admission'])
+            self.assertEqual(overlaid['teacher_reference']['commands_rows'],104)
+            self.assertTrue(overlaid['teacher_reference']['execution_requires_independent_admission'])
+            for filename,identity in overlaid['teacher_reference_input_sha256'].items():
+                self.assertEqual(overlaid['sources'][filename],identity)
+                self.assertEqual(module.file_sha256(filename),identity)
+            self.assertNotIn(str(path),source['sources'])
+            # Read the native reference exactly once, then apply the real30Hz
+            # hold; its separate applied table is evidence rather than input.
+            actual=commands[[module.command_source_index(t,30,len(commands)) for t in range(len(commands))]]
+            np.testing.assert_array_equal(actual,np.load(path.parent/'held.npy',allow_pickle=False))
+
+    def test_teacher_reference_new_execution_is_explicit_and_rejects_wrong_source_startup_clock_or_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);make_generic_source(root)
+            source=module.load_source(root,source_episode=9)
+            plan,_=make_plan(root);binding=module.read_candidate(plan,'registered-candidate')
+            path,commands=make_reference(root,source,binding)
+            def apply(candidate=binding,**kwargs):
+                args=dict(warmup_control=module.PADDED_WARMUP_MODE,warmup_seconds=1.,command_rate=30)
+                args.update(kwargs)
+                return module.apply_teacher_reference(source,path,candidate,**args)
+            for kwargs in ({'command_rate':50},{'warmup_seconds':.5},{'warmup_control':'measured_pose_pd'}):
+                with self.assertRaises(ValueError):apply(**kwargs)
+            with self.assertRaisesRegex(ValueError,'registered candidate'):apply(None)
+            wrong=deepcopy(binding);wrong['candidate_id']='another-reset'
+            new_execution=apply(wrong)['teacher_reference']
+            self.assertEqual(new_execution['repair_origin_candidate']['candidate_id'],binding['candidate_id'])
+            self.assertEqual(new_execution['executed_candidate']['candidate_id'],'another-reset')
+            self.assertTrue(new_execution['new_execution_differs_from_repair_origin'])
+            self.assertTrue(new_execution['new_execution_explicitly_allowed'])
+            wrong['proposal']['ancestor']['source_episode_index']=17
+            with self.assertRaisesRegex(ValueError,'different source'):apply(wrong)
+            commands[0,0]+=.01;np.save(path.parent/'reference.npy',commands,allow_pickle=False)
+            document=json.loads(path.read_text());document['commands']['sha256']=module.file_sha256(path.parent/'reference.npy')
+            write(path,document)
+            with self.assertRaisesRegex(ValueError,'prefix was modified'):apply()
+
+    def startup_history_fixture(self,tick):
+        first=(.005,np.zeros(3),np.zeros(29),np.zeros(29),np.zeros(29),np.array([0.,0.,-1.]))
+        def actual(index):
+            return (first[0]+index/50,np.full(3,index/100),np.full(29,index/200),
+                np.full(29,index/300),np.full(29,index/400),first[-1].copy())
+        history=[deepcopy(first) for _ in range(max(0,9-tick))]
+        history += [actual(index) for index in range(max(0,tick-9),tick+1)]
+        return first,history
+
+    def test_explicit_padding_fades_to_real_history_and_records_every994_input(self):
+        from simple.baselines.sonic_v1_1 import decoder_input
+        first,_=self.startup_history_fixture(0)
+        adapter=module.RepeatFirstSnapshotDecoderHistory(first,decoder_input,{'sim_time_s':.005,'source':'unit-test live snapshot'})
+        latent=np.full(64,.0625,np.float32)
+        for tick in range(13):
+            _,history=self.startup_history_fixture(tick)
+            value=adapter(latent,history)
+            event=adapter.receipt['decoder_inputs'][-1]
+            self.assertEqual(value.shape,(1,994))
+            self.assertEqual(event['padding_count'],max(0,9-tick))
+            self.assertEqual(event['decoder_call_index'],tick)
+            np.testing.assert_array_equal(np.asarray(event['input_values_float32'],np.float32),value[0])
+            self.assertEqual(event['input_sha256'],hashlib.sha256(value.astype('<f4').tobytes()).hexdigest())
+            self.assertTrue(all(t<=.005+tick/50+1e-9 for t in event['history_sample_times_s']))
+            if tick>=9:np.testing.assert_array_equal(value,decoder_input(latent,history))
+        self.assertEqual(adapter.receipt['padded_decoder_calls'],9)
+        self.assertEqual(adapter.receipt['total_decoder_calls'],13)
+        self.assertAlmostEqual(adapter.receipt['first_all_real_decoder_sim_time_s'],.185)
+        self.assertTrue(adapter.receipt['history_injection'])
+        self.assertEqual(adapter.receipt['decoder_inputs'][0]['history_sample_times_s'],[.005]*10)
+        self.assertEqual(adapter.receipt['decoder_inputs'][9]['history_origin'][0]['actual_timestep_index'],0)
+
+    def test_startup_padding_rejects_changed_initial_snapshot_and_future_or_delayed_slots(self):
+        from simple.baselines.sonic_v1_1 import decoder_input
+        first,history=self.startup_history_fixture(0)
+        def adapter():return module.RepeatFirstSnapshotDecoderHistory(first,decoder_input,{'sim_time_s':.005})
+        changed=deepcopy(history);changed[0][1][0]=1
+        with self.assertRaisesRegex(ValueError,'first actual snapshot'):adapter()(np.zeros(64),changed)
+        future=deepcopy(history);future[-1]=(.025,*future[-1][1:])
+        with self.assertRaisesRegex(ValueError,'causal actual50Hz'):adapter()(np.zeros(64),future)
+        value=adapter()
+        for tick in range(10):value(np.zeros(64),self.startup_history_fixture(tick)[1])
+        delayed=self.startup_history_fixture(10)[1];delayed[0]=deepcopy(first)
+        with self.assertRaisesRegex(ValueError,'fade9..1'):value(np.zeros(64),delayed)
+        self.assertEqual(value.receipt['total_decoder_calls'],10)
+
+    def test_startup_adapter_is_instance_local_and_retains_exact_upstream_physics_code(self):
+        import simple.baselines.sonic_v1_1 as sonic
+        first,_=self.startup_history_fixture(0)
+        adapter=module.RepeatFirstSnapshotDecoderHistory(first,sonic.decoder_input,{'sim_time_s':.005})
+        one=object.__new__(sonic.SonicV11OnnxController)
+        two=object.__new__(sonic.SonicV11OnnxController)
+        original=two.apply_physics.__func__
+        module.install_instance_startup_decoder(one,adapter)
+        self.assertIs(one.apply_physics.__func__.__code__,original.__code__)
+        self.assertIs(one.apply_physics.__func__.__globals__['decoder_input'],adapter)
+        self.assertIs(two.apply_physics.__func__,original)
+        self.assertIs(sonic.decoder_input,adapter.original_decoder_input)
+        changed=[k for k,v in original.__globals__.items() if one.apply_physics.__func__.__globals__[k] is not v]
+        self.assertEqual(changed,['decoder_input'])
+        with self.assertRaisesRegex(ValueError,'unchanged upstream'):module.install_instance_startup_decoder(one,adapter)
+
+    def test_new_warmup_metadata_does_not_change_legacy_live_receipt(self):
+        from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
+        old=object.__new__(LivePoseSonicWarmup);old.hand_policy='measured';old.reset()
+        self.assertFalse(old.receipt['history_injection'])
+        self.assertEqual(old.receipt['kind'],'live_initial_pose_sonic_v1_1')
+        self.assertNotIn('seconds',old.receipt)
+        def no_model_init(self,*args,**kwargs):self.hand_policy='measured';self.reset()
+        with patch.object(LivePoseSonicWarmup,'__init__',no_model_init):
+            new=module.make_repeat_first_snapshot_warmup('/unused',seconds=1.)
+        self.assertEqual(new.receipt['kind'],module.PADDED_WARMUP_KIND)
+        self.assertTrue(new.receipt['history_injection'])
+        self.assertEqual(new.receipt['seconds'],1.)
+        self.assertIn('tick0',new.receipt['hand_policy_scope'])
+        self.assertIsNone(new.startup_decoder)
+
+    def test_actual_post_step_outputs_and_per_event_padding_flags_are_not_inferred(self):
+        from simple.baselines.sonic_v1_1 import decoder_input
+        first,_=self.startup_history_fixture(0)
+        adapter=module.RepeatFirstSnapshotDecoderHistory(first,decoder_input,{'sim_time_s':.005})
+        warmup=SimpleNamespace(startup_decoder=adapter,receipt={'events':[]})
+        controller=SimpleNamespace(_last_raw_action=np.arange(29,dtype=np.float32)/7,
+            _body_target=np.arange(29,dtype=np.float64)/9)
+        for tick in range(12):
+            adapter(np.zeros(64),self.startup_history_fixture(tick)[1])
+            warmup.receipt['events'].append({'sim_time_s':.005+tick/50,'history_injection':False})
+            record={'tick50':tick,'sim_time_s':.005+tick/50,'decoder_calls_before':tick,'decoder_calls_after':tick+1}
+            module.record_padded_decoder_step(warmup,controller,record,is_warmup=True)
+            self.assertEqual(warmup.receipt['events'][-1]['history_injection'],tick<9)
+            self.assertEqual(warmup.receipt['events'][-1]['startup_history_padding_slots'],max(0,9-tick))
+            np.testing.assert_array_equal(record['controller_last_raw_policy_action29'],controller._last_raw_action)
+            np.testing.assert_array_equal(record['body_pd_target29'],controller._body_target)
+        # Teacher steps keep recording actual outputs, without relabelling or
+        # appending warmup commands after the genuine warmup has ended.
+        adapter(np.zeros(64),self.startup_history_fixture(12)[1])
+        record={'tick50':12,'sim_time_s':.245,'decoder_calls_before':12,'decoder_calls_after':13}
+        before=deepcopy(warmup.receipt['events'])
+        module.record_padded_decoder_step(warmup,controller,record,is_warmup=False)
+        self.assertEqual(warmup.receipt['events'],before)
+        controller._last_raw_action[0]=np.nan
+        with self.assertRaises(ValueError):module.record_padded_decoder_step(warmup,controller,record,is_warmup=False)
+        controller._last_raw_action=np.zeros(29)
+        controller._body_target=None
+        with self.assertRaises(ValueError):module.record_padded_decoder_step(warmup,controller,record,is_warmup=False)
+        controller._body_target=np.zeros(29)
+        record['decoder_calls_after']=12
+        with self.assertRaisesRegex(ValueError,'single physical decoder call'):
+            module.record_padded_decoder_step(warmup,controller,record,is_warmup=False)
+
     def test_actual_calibration_asset_binding_rejects_missing_or_wrong_bytes_and_rechecks_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)/'data-root';root.mkdir()

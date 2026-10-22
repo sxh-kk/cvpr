@@ -181,3 +181,54 @@ raw torso约10.10mm、腕/相机约5.26mm也完整记录，说明模型joint-fra
 仓库外`run_formal_batch_v3.py`先处理120个候选，必要时分轮明确登记额外候选，当前总预算最多480，
 每祖先接受上限仍5、目标100且需24组覆盖；预算耗尽不标记完成。
 实际进度以`collection-queue-v3/queue.json`和`formal_batch_live_summary.json`为准，勿把候选数当接受数。
+
+## 冷启动、撤手参考与独立批次
+
+原正式队列的代码、recipe和来源SHA保持冻结。后续实现使用独立工作区
+`/home/zxc/.codex/worktrees/handover-teacher-repairs/CVPR_Evaluation`，不改正在运行的采集或A100训练。
+新增队列为`cvpr-handover-quality100-serial-queue-v3`，审核为
+`cvpr-handover-independent-rtx-capture-audit-v3`，authority为
+`integration-source-row0-command-trace-renderer-pose-startup-reference-v4`；旧队列继续使用自己的原版审核。
+
+显式暖机模式`live_pose_sonic_v1_1_repeat_first_snapshot`从第一实际状态调用固定v1.1编码器，
+初始缺失的解码器历史用同一t0快照填充，前9次填充数为9至1，之后全部是真实50Hz历史。
+填充明确标记为synthetic，不捏造过去时间，不覆盖真实RGB、状态或动作标签。
+全程记录每次994维解码输入、实际raw action29和PD target29；独立审核从integration重建
+关节、速度、局部角速度、重力、上一实际输出与槽位时间，逐值核对输入及SHA。
+该模式只替换一个控制器实例的历史输入构造，不修改共享上游模块、力矩规则或别的进程。
+暖机的30个真实RGB事件仍只作历史，动作label保持不可用。
+
+部分教师已完成交接和放篮，但末尾仍有左手接触。`prepare_handover_teacher_reference.py`
+为此导出明确的TRAIN参考文件，严格保留全部原生50Hz命令前缀，仅追加经固定SONIC v1.1编码器生成的撤手尾段。
+原始parquet、初态、对象状态、源祖先和归一化不变；原生参考数组与实际30Hz保持后的执行数组分别保存。
+审核还将导出数组绑定到原研究执行的真实命令表，拒绝两份数组同时修改后自洽的伪来源。
+记录区分`repair_origin_candidate`和`executed_candidate`；同一来源的新扰动必须重新执行完整物理验收。
+任务几何只可用于离线TRAIN教师构造，禁止用于VAL/TEST策略的参考或未来观测。
+
+18次有完整证据的CPU诊断中，source45/variant100以及source17、68的原variant0独立审核通过。
+17、68的2秒尾段可以复现完整门槛；source17连同暖机总时长15.68秒。
+17、40、68的新variants100至104均失败，不能据原初态通过宣称扰动泛化已解决。
+这些none诊断全部不计RGB数据，证据在外部根目录的
+`worktree-startup-reference-production-cpu-v2/FAILURE_STAGE_REPORT.json`。
+source40的同seed无扰动新旧实现逐值一致，落箱后的篮缘偏心碰撞仍需单独处理。
+
+`--warmup-schedule`可增加`teacher_references`，按原始TRAIN source ID指定引用JSON的本地绝对路径和SHA。
+引用、代码、原始来源及实际执行参数在队列首次运行前冻结；不得修改旧队列的recipe来接纳新控制。
+`--companion-queue`仅读另一个队列的热计数，减少重复采集和超额来源；该计数只是调度提示，
+达到100和24组覆盖时也不自动标记数据完成，最终仍须逐条独立审计。
+
+## 不同冻结版本的数据合并
+
+打包器除`--queue-root`外支持互斥参数`--capture-sources selection.json`。
+显式选择文件的contract为`cvpr-handover-multi-queue-selection-v1`、scope为`TRAIN_only`，
+`sources`中每项声明`queue_root`、`collector_path`、`collector_sha256`和已接受的`candidate_ids`。
+加载前要求审核器SHA同时等于实际源码和该队列冻结recipe/代码快照，不把旧批次升级为新版身份。
+每个版本仍执行完整的来源、物理、动作、相机与像素审核，再全局检查候选/内容去重和每祖先最多5条。
+
+热队列审核使用最初读取的完整registry快照，只对本次审核函数的那一次`queue.json`读取提供固定输入，
+其余文件读取、审核函数和实际路径不变，不修改模块全局或运行进程。
+审核前后允许追加候选及进行中条目推进；已接受条目、计划、recipe和旧registration均不得改写。
+这样不因漫长像素审核期间正常新增一条而反复失败，最终包仍保存选择时的原始registry字节与SHA。
+
+完整100条打包、全量DINO和联合GPU预检完成前不设置`final_ready`。
+已有五条VAL继续保持原划分，独立TEST祖先仍待绑定；教师筛选成功率不作为训练后模型成功率。

@@ -59,6 +59,11 @@ trace额外保存目标/篮子姿态和具名接触，帮助区分仅碰篮、�
 `replay_handover_teacher.py`是已编码教师命令的真实本机诊断/重采入口；
 `handover_contact_quality.py`和`handover_geometry_quality.py`保留源50Hz严格规则，
 包括原解算接触力、掌根、交接顺序与容器支撑，物理通过仍不自动授权数据入库。
+新批次支持显式`--warmup-control live_pose_sonic_v1_1_repeat_first_snapshot`和
+`--teacher-reference`，完整记录同t0历史填充、真实解码输入及仅追加尾段的来源。
+必须新建冻结队列，不改活跃批次；`--companion-queue`只用作采集调度提示。
+`pack_handover_quality100.py --capture-sources`按每队列自己的冻结审核器合并，仍全局去重和限制每祖先最多5条。
+详细协议和CPU真实诊断边界见[冷启动与独立批次](../../docs/HANDOVER_QUALITY100.md#冷启动撤手参考与独立批次)。
 
 ## Conda 与依赖
 

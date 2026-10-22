@@ -29,13 +29,16 @@ FRAME_CALIBRATION = REPO / "VLMExpert/third_party/SIMPLE/src/simple/sensors/head
 SPEC_KEYS = ("ancestor", "variant", "physics_seed", "material_seed", "generation_seed", "initial_object_deltas")
 CORE_FILES = tuple(Path(__file__).resolve().parent / name for name in (
     "collect_handover_quality100.py", "plan_handover_quality100.py", "replay_handover_teacher.py",
-    "handover_eval_runtime.py", "prepare_handover_eval.py", "handover_contact_quality.py", "handover_geometry_quality.py"))
-AUDIT_CONTRACT = "cvpr-handover-independent-rtx-capture-audit-v2"
-QUEUE_CONTRACT = "cvpr-handover-quality100-serial-queue-v2"
-AUTHORITY_REVISION = "integration-source-row0-command-trace-renderer-pose-train-schedule-v3"
+    "handover_eval_runtime.py", "prepare_handover_eval.py", "handover_contact_quality.py", "handover_geometry_quality.py",
+    "prepare_handover_teacher_reference.py"))
+AUDIT_CONTRACT = "cvpr-handover-independent-rtx-capture-audit-v3"
+QUEUE_CONTRACT = "cvpr-handover-quality100-serial-queue-v3"
+AUTHORITY_REVISION = "integration-source-row0-command-trace-renderer-pose-startup-reference-v4"
 WARMUP_SCHEDULE_CONTRACT = "cvpr-handover-train-warmup-schedule-v1"
 WARMUP_SCOPE = "TRAIN_teacher_collection_only"
 WARMUP_KINDS = {"measured_pose_pd": "measured_pose_pd", "live_pose_sonic_v1_1": "live_initial_pose_sonic_v1_1"}
+PADDED_WARMUP = "live_pose_sonic_v1_1_repeat_first_snapshot"
+WARMUP_KINDS[PADDED_WARMUP] = "live_initial_pose_repeat_first_snapshot_sonic_v1_1"
 LIVE_WARMUP_SOURCE = REPO / "VLMExpert/third_party/SIMPLE/src/simple/baselines/live_pose_sonic_warmup.py"
 RENDERER_POSE_CONTRACT = "cvpr-handover-renderer-pose-evidence-v1"
 RENDER_POSITION_TOLERANCE_M = .001
@@ -166,11 +169,24 @@ def load_warmup_schedule(plan, plan_sha256, path=None):
             or set(document.get("controls", {})) != expected_sources
             or any(value not in WARMUP_KINDS for value in document["controls"].values())):
         raise ValueError("TRAIN warmup schedule must bind the base plan and exactly its24 original TRAIN sources")
+    references = document.get("teacher_references", {})
+    if not isinstance(references, dict) or not set(references) <= expected_sources:
+        raise ValueError("Modified teacher references must retain explicit original TRAIN ancestry")
+    for source, reference in references.items():
+        if (not isinstance(reference, dict) or set(reference) != {"path", "sha256"}
+                or not Path(reference["path"]).is_absolute() or sha256(reference["path"]) != reference["sha256"]):
+            raise ValueError("Modified teacher reference path/SHA differs from preregistration")
+        artifact = read(reference["path"])
+        if (artifact.get("contract") != "cvpr-handover-modified-teacher-reference-v1"
+                or artifact.get("source_episode_index") != int(source)
+                or artifact.get("scope") != "TRAIN_teacher_only"
+                or artifact.get("evaluation_oracle_allowed") is not False):
+            raise ValueError("Modified teacher references are forbidden as a validation/evaluation oracle")
     return {**document, "path": source_path, "sha256": identity,
             "evaluation_oracle_allowed": False, "warmup_supervision": "none"}
 
 
-def bind_result(run, candidate, plan_sha256, *, expected_warmup="measured_pose_pd"):
+def bind_result(run, candidate, plan_sha256, *, expected_warmup="measured_pose_pd", expected_reference=None):
     run = Path(run).resolve(strict=True)
     result = read(run / "result.json")
     if (result.get("status") != "teacher_diagnostic_completed"
@@ -188,17 +204,25 @@ def bind_result(run, candidate, plan_sha256, *, expected_warmup="measured_pose_p
             or controller.get("hand_torque_profile") != "recording_0p7_nm"
             or controller.get("body_token_version") != "body_token_v1_1"):
         raise ValueError("Capture must use the predeclared SONICv1.1/cap0.7 controller recipe")
+    reference = result.get("teacher_reference")
+    if expected_reference is None:
+        if reference is not None:
+            raise ValueError("Teacher command changes require an explicitly preregistered reference")
+    elif (not isinstance(reference, dict)
+            or {key: reference.get(key) for key in ("path", "sha256")} != expected_reference
+            or sha256(expected_reference["path"]) != expected_reference["sha256"]):
+        raise ValueError("Actual modified teacher reference differs from the frozen TRAIN schedule")
     warmup = result["warmup_control"]
     if (expected_warmup not in WARMUP_KINDS or warmup.get("kind") != WARMUP_KINDS[expected_warmup]
             or result.get("warmup_ticks") != 50
-            or (expected_warmup == "measured_pose_pd" and warmup.get("seconds") != 1.)):
+            or (expected_warmup in ("measured_pose_pd", PADDED_WARMUP) and warmup.get("seconds") != 1.)):
         raise ValueError("Actual one-second TRAIN warmup differs from the preregistered control schedule")
-    if expected_warmup == "live_pose_sonic_v1_1":
+    if expected_warmup in ("live_pose_sonic_v1_1", PADDED_WARMUP):
         code = result["capture_code_sha256"]
         if (code.get(str(LIVE_WARMUP_SOURCE)) != sha256(LIVE_WARMUP_SOURCE)
                 or warmup.get("helper_source_sha256") != code[str(LIVE_WARMUP_SOURCE)]
                 or warmup.get("hand_policy") != "measured" or warmup.get("state_forcing") is not False
-                or warmup.get("history_injection") is not False or warmup.get("initialization_count") != 1
+                or warmup.get("history_injection") is not (expected_warmup == PADDED_WARMUP) or warmup.get("initialization_count") != 1
                 or warmup.get("encoder_mode") != 0):
             raise ValueError("Live TRAIN warmup must retain the bound no-forcing real-history source recipe")
     if result.get("initial_object_deltas") != candidate["initial_object_deltas"]:
@@ -279,11 +303,11 @@ def audit_applied_forces(run, result):
             "bindings": {str(p): sha256(p) for p in (model_path, trajectory_path, log_path)}}
 
 
-def audit_physics(run, candidate, plan_sha256, *, expected_warmup="measured_pose_pd", _with_history=False):
+def audit_physics(run, candidate, plan_sha256, *, expected_warmup="measured_pose_pd", expected_reference=None, _with_history=False):
     """Recompute the original50Hz gate; producer success flags alone cannot pass."""
     from handover_contact_quality import evaluate_capture
     run = Path(run).resolve(strict=True)
-    result = bind_result(run, candidate, plan_sha256, expected_warmup=expected_warmup)
+    result = bind_result(run, candidate, plan_sha256, expected_warmup=expected_warmup, expected_reference=expected_reference)
     forces = audit_applied_forces(run, result)
     history = authoritative_history(run, result, candidate, expected_warmup=expected_warmup)
     samples_path = run / "quality_samples.jsonl"
@@ -303,6 +327,8 @@ def audit_physics(run, candidate, plan_sha256, *, expected_warmup="measured_pose
             "plan_sha256": plan_sha256, "source_episode_index": result["source_episode_index"],
             "physical_gate": quality, "initial_target_z_m": result["initial_target_z_m"],
             "source_commands": result["source_commands"],
+            "teacher_reference": result.get("teacher_reference"),
+            "startup_history_padding_audit": history.get("startup_history_padding_audit"),
             "teacher_collection_warmup": {"control": expected_warmup, "actual_receipt_kind": result["warmup_control"]["kind"],
                 "seconds": 1., "scope": WARMUP_SCOPE, "warmup_supervision": "none", "evaluation_oracle_allowed": False},
             "applied_force_audit": forces,
@@ -311,7 +337,93 @@ def audit_physics(run, candidate, plan_sha256, *, expected_warmup="measured_pose
     return (report, history) if _with_history else report
 
 
-def source_commands(result, *, with_initial=False):
+def modified_reference_commands(result, parquet, replay, hand_names, *, original_source=None,
+                                candidate=None, expected_warmup=None):
+    """Independently verify an appended teacher tail against the protected source.
+
+    References never replace resets, observations or source ancestry. The whole
+    original native50 command prefix must remain bitwise identical. Only the
+    explicitly documented appended command rows become new teacher labels.
+    """
+    import numpy as np
+    reference = result.get("teacher_reference")
+    if reference is None:
+        return None
+    path = Path(reference["path"]).resolve(strict=True)
+    if result["source_sha256"].get(str(path)) != reference["sha256"] or sha256(path) != reference["sha256"]:
+        raise ValueError("Modified teacher JSON is not bound with original source inputs")
+    artifact = read(path)
+    if (artifact.get("contract") != "cvpr-handover-modified-teacher-reference-v1"
+            or artifact.get("source_episode_index") != result["source_episode_index"]
+            or artifact.get("parent_source_parquet_sha256") != sha256(parquet)
+            or artifact.get("parent_source_commands") != len(replay)
+            or artifact.get("original_prefix_rows") != len(replay)
+            or artifact.get("scope") != "TRAIN_teacher_only"
+            or artifact.get("evaluation_oracle_allowed") is not False
+            or artifact.get("command_rate_hz") != 50
+            or artifact.get("body_token_version") != "body_token_v1_1"
+            or artifact.get("fixed_encoder") != {"sha256":"fb97de22819b2057b41459802128d91723d91a25f0ad73e7bfc41a9cf8365bae",
+                                                  "decoder_sha256":"34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509"}
+            or not isinstance(artifact.get("method"), (str, dict)) or not artifact["method"]):
+        raise ValueError("Modified teacher lineage, original prefix or TRAIN-only declaration differs")
+    names = [f"{side}_hand_{finger}_{j}_joint" for side in ("left", "right")
+             for finger, count in (("thumb", 3), ("index", 2), ("middle", 2)) for j in range(count)]
+    if artifact.get("hand_joint_names") != names:
+        raise ValueError("Modified teacher hand order must be the documented native replay order")
+    repair_inputs = artifact.get("repair_inputs_sha256")
+    if not isinstance(repair_inputs, dict) or not repair_inputs:
+        raise ValueError("Modified teacher repair must retain its actual physical generation evidence")
+    for evidence, identity in repair_inputs.items():
+        evidence = Path(evidence)
+        if (not evidence.is_absolute() or result["source_sha256"].get(str(evidence)) != identity
+                or sha256(evidence) != identity):
+            raise ValueError("Modified teacher generation evidence is missing or changed")
+    entry = artifact["commands"]
+    commands_path = local_file(path.parent, entry["path"])
+    if (result["source_sha256"].get(str(commands_path)) != entry["sha256"]
+            or sha256(commands_path) != entry["sha256"]):
+        raise ValueError("Modified teacher command array is not bound with source inputs")
+    commands = np.load(commands_path, allow_pickle=False)
+    if (commands.dtype != np.dtype("float32") or commands.ndim != 2
+            or commands.shape != (entry["rows"], 78) or entry.get("columns") != 78
+            or entry.get("dtype") != "float32" or not len(replay) < len(commands) <= len(replay)+250
+            or len(commands) != result["source_commands"] or not np.isfinite(commands).all()
+            or not np.array_equal(commands[:len(replay)], replay)):
+        raise ValueError("Modified teacher must preserve the full source prefix and append at most5s of finite commands")
+    actual_entry = artifact["actual_executed_commands"]
+    applied_path = local_file(path.parent, actual_entry["path"])
+    if (result["source_sha256"].get(str(applied_path)) != actual_entry["sha256"]
+            or sha256(applied_path) != actual_entry["sha256"]):
+        raise ValueError("Modified teacher actual execution table is not bound")
+    applied = np.load(applied_path, allow_pickle=False)
+    rows = np.arange(len(commands))
+    indices = (((rows*30//50)*50)+29)//30
+    if (applied.dtype != np.dtype("float32") or applied.shape != commands.shape
+            or actual_entry.get("rows") != len(commands) or actual_entry.get("columns") != 78
+            or actual_entry.get("dtype") != "float32"
+            or not np.array_equal(applied, commands[indices])):
+        raise ValueError("Modified teacher native50 reference does not reproduce its actual30Hz held commands")
+    if original_source is not None:
+        # Production always supplies the independently read original parquet,
+        # lineage row and frozen current candidate. The manual numeric checks
+        # above remain independent of this shared reference-format validator.
+        from prepare_handover_teacher_reference import validate_reference
+        if candidate is None or expected_warmup is None:
+            raise ValueError("Modified teacher provenance requires the frozen execution candidate and startup")
+        execution = {"candidate_id": candidate["candidate_id"],
+            "candidate_spec_sha256": candidate["candidate_spec_sha256"],
+            "plan_sha256": result["plan_sha256"],
+            "source_episode_index": candidate["ancestor"]["source_episode_index"]}
+        independently_checked, receipt = validate_reference(path, original_source,
+            expected_candidate=execution, expected_warmup=expected_warmup, allow_new_execution_candidate=True)
+        if (not np.array_equal(independently_checked, commands) or receipt != reference
+                or result.get("source_parent_rows") != len(replay)
+                or result.get("teacher_reference_inputs_unchanged") is not True):
+            raise ValueError("Modified teacher origin/execution/source receipt differs from independent reference validation")
+    return commands[:, :64], commands[:, 64:][:, [names.index(name) for name in hand_names]]
+
+
+def source_commands(result, *, with_initial=False, candidate=None, expected_warmup=None):
     """Read the identity-bound original source labels independently of the producer."""
     import numpy as np
     import pyarrow.parquet as pq
@@ -351,7 +463,7 @@ def source_commands(result, *, with_initial=False):
             or parquet_identity["sha256"] != result["source_sha256"][str(parquet[0])]
             or not parquet[0].as_posix().endswith("/" + parquet_identity["path"])):
         raise ValueError("Actual TRAIN parquet identity differs from layered source provenance")
-    if (tokens.shape != (result["source_commands"], 64) or hands.shape != (len(tokens), 14)
+    if (tokens.shape != (record["source_rows"], 64) or hands.shape != (len(tokens), 14)
             or len(set(names)) != 14 or not np.isfinite(tokens).all() or not np.isfinite(hands).all()
             or not np.allclose(values["timestamp"], np.arange(len(tokens))/50, rtol=0, atol=2e-5)):
         raise ValueError("Bound source action schema is incomplete")
@@ -363,6 +475,17 @@ def source_commands(result, *, with_initial=False):
             or not np.array_equal(replay[:, :64], tokens)
             or not np.array_equal(replay[:, 64:], hands[:, [names.index(n) for n in replay_names]])):
         raise ValueError("Source replay commands differ from named TRAIN action labels")
+    if result.get("teacher_reference") is not None and (candidate is None or expected_warmup is None):
+        raise ValueError("Modified teacher source audit requires the frozen candidate/startup context")
+    original_source = {"source_split": "train", "commands": replay, "row": rows[0],
+        "source_record": record, "sources": {str(parquet[0]): result["source_sha256"][str(parquet[0])]}}
+    modified = modified_reference_commands(result, parquet[0], replay, names,
+        original_source=original_source, candidate=candidate, expected_warmup=expected_warmup)
+    if modified is None:
+        if len(tokens) != result["source_commands"]:
+            raise ValueError("Unmodified teacher count differs from the protected source")
+    else:
+        tokens, hands = modified
     if not with_initial:
         return tokens, hands, names
     physics_paths = [p for p in paths if p.name == f"source_episode_{source_id:06d}_physics.json"]
@@ -399,7 +522,8 @@ def authoritative_history(run, result, candidate, *, expected_warmup="measured_p
     import numpy as np
     from handover_geometry_quality import build_container_geometry_cache
     run = Path(run)
-    tokens, hands, hand_names, source = source_commands(result, with_initial=True)
+    tokens, hands, hand_names, source = source_commands(result, with_initial=True,
+        candidate=candidate, expected_warmup=expected_warmup)
     record = result["source_provenance"]["source_record"]
     if (record.get("source_episode_index") != candidate["ancestor"]["source_episode_index"]
             or record.get("source_dataset_key") != candidate["ancestor"]["source_dataset_key"]
@@ -515,10 +639,11 @@ def authoritative_history(run, result, candidate, *, expected_warmup="measured_p
     if len(trace) != count-1:
         raise ValueError("Every actual50Hz warmup/teacher control tick must have a complete trace")
     live_events = []
-    if expected_warmup == "live_pose_sonic_v1_1":
+    if expected_warmup in ("live_pose_sonic_v1_1", PADDED_WARMUP):
         warmup = result["warmup_control"]
         live_events = warmup["events"]
-        if (len(live_events) != 40 or warmup.get("encoder_calls") != 40
+        expected_calls = 50 if expected_warmup == PADDED_WARMUP else 40
+        if (len(live_events) != expected_calls or warmup.get("encoder_calls") != expected_calls
                 or not math.isclose(warmup["first_sim_time_s"], times[0], rel_tol=0, abs_tol=1e-6)
                 or not np.array_equal(finite_vector(warmup["reference_body_q29"],29,"initial live reference body").astype(np.float32), history["q"][0,:29].astype(np.float32))
                 or not np.allclose(warmup["reference_root_wxyz"], history["root"][0,3:], rtol=0, atol=1e-12)
@@ -547,17 +672,18 @@ def authoritative_history(run, result, candidate, *, expected_warmup="measured_p
             expected_hands = history["q"][tick, [names.index(n) for n in hand_names]]
             if row.get("source_command_index") is not None:
                 raise ValueError("Warmup must never reference teacher source labels")
-            if expected_warmup == "measured_pose_pd" or tick < 10:
+            if expected_warmup == "measured_pose_pd" or (expected_warmup != PADDED_WARMUP and tick < 10):
                 if row.get("phase") != "warmup_measured_pose_pd" or row.get("actual_body_token64") is not None:
                     raise ValueError("Measured-pose warmup trace must have no fabricated body token")
                 increment = 0
             else:
                 token = finite_vector(row["actual_body_token64"], 64, "actual live warmup token")
-                event = live_events[tick-10]
-                if (row.get("phase") != "warmup_live_pose_sonic_v1_1"
+                event = live_events[tick if expected_warmup == PADDED_WARMUP else tick-10]
+                if (row.get("phase") != "warmup_" + expected_warmup
                         or not math.isclose(event["sim_time_s"], times[tick], rel_tol=0, abs_tol=1e-6)
                         or not np.array_equal(token.astype(np.float32), finite_vector(event["token64"],64,"live receipt token").astype(np.float32))
-                        or event.get("state_forcing") is not False or event.get("history_injection") is not False):
+                        or event.get("state_forcing") is not False
+                        or event.get("history_injection") is not (expected_warmup == PADDED_WARMUP and tick < 9)):
                     raise ValueError("Live warmup token/time differs from its bound real-history receipt")
                 expected_hands = history["q"][0, [names.index(n) for n in hand_names]]
                 increment = 1
@@ -575,6 +701,8 @@ def authoritative_history(run, result, candidate, *, expected_warmup="measured_p
         decoder_calls += increment
     if result.get("decoder_calls") != decoder_calls:
         raise ValueError("Final SONIC decoder count differs from the full scheduled control trace")
+    if expected_warmup == PADDED_WARMUP:
+        history["startup_history_padding_audit"] = audit_startup_history(history, trace, result)
     # The200Hz log also uses absolute times, so shifting the entire event clock
     # or changing only a trace/sidecar clock cannot preserve association.
     guard_path = local_file(run, result["force_guard"]["path"])
@@ -583,6 +711,106 @@ def authoritative_history(run, result, candidate, *, expected_warmup="measured_p
         raise ValueError("Actual200Hz force-guard absolute clock differs from integration history")
     history["bindings"][str(trace_path)] = sha256(trace_path)
     return history
+
+
+def audit_startup_history(history, trace, result):
+    """Rebuild every padded/real decoder input from actual integration states.
+
+    Only initial snapshot copies are permitted, with their real t0 retained.
+    Previous actions are checked against the preceding executed controller
+    output. Geometry/IMU computations below are not contact-force evidence.
+    """
+    import importlib.util
+    import sys
+    import mujoco
+    import numpy as np
+    path = REPO / "VLMExpert/third_party/SIMPLE/src/simple/baselines/sonic_v1_1.py"
+    if result["capture_code_sha256"].get(str(path)) != sha256(path):
+        raise ValueError("Startup history requires the frozen actual SONIC numeric contract")
+    simple_src = str(REPO / "VLMExpert/third_party/SIMPLE/src")
+    if simple_src not in sys.path:
+        sys.path.insert(0, simple_src)
+    spec = importlib.util.spec_from_file_location("handover_startup_sonic_numeric_contract", path)
+    sonic = importlib.util.module_from_spec(spec); spec.loader.exec_module(sonic)
+    receipt = result["warmup_control"]["startup_history_padding"]
+    count = len(trace)
+    if (receipt.get("contract") != "cvpr-sonic-v11-startup-repeat-first-snapshot-v1"
+            or receipt.get("policy") != "repeat_first_snapshot" or receipt.get("seeded_history_slots") != 10
+            or receipt.get("same_timestamp") is not True or receipt.get("initialization_count") != 1
+            or receipt.get("state_forcing") is not False or receipt.get("source_future_used") is not False
+            or receipt.get("history_injection") is not True or receipt.get("padded_decoder_calls") != 9
+            or receipt.get("total_decoder_calls") != count or len(receipt.get("decoder_inputs", [])) != count
+            or not math.isclose(receipt["first_all_real_decoder_sim_time_s"], history["times"][9], rel_tol=0, abs_tol=1e-6)):
+        raise ValueError("Only a declared causal9-call initial-snapshot padding prefix is permitted")
+    first = receipt["first_snapshot"]
+    if digest(first) != receipt.get("first_snapshot_sha256"):
+        raise ValueError("Startup first actual snapshot identity differs")
+    names, model = history["joint_names"], history["model"]
+    body = [names.index(name) for name in sonic.BODY_JOINT_NAMES]
+    permutation = sonic.POLICY_TO_BODY
+    default, scale = sonic.DEFAULT_ANGLES, sonic.ACTION_SCALE
+    initial_previous = np.asarray(((history["q"][0, body]-default)/scale)[permutation], np.float32)
+    if (first.get("body_joint_names") != list(sonic.BODY_JOINT_NAMES)
+            or not np.array_equal(finite_vector(first["physical_body_qpos29"],29,"startup measured body"), history["q"][0,body])
+            or not np.array_equal(finite_vector(first["physical_body_qvel29"],29,"startup measured velocity"), history["dq"][0,body])
+            or not np.allclose(first["root_pose7"], history["root"][0], rtol=0, atol=1e-12)
+            or not np.array_equal(first["root_qvel6"], history["root_velocity"][0])
+            or not np.array_equal(first["body_default_angles29"],default)
+            or not np.array_equal(first["body_action_scale29"],scale)
+            or not np.array_equal(finite_vector(first["controller_reset_previous_raw_action29"],29,"reset previous action"), np.zeros(29))
+            or not np.array_equal(np.asarray(first["effective_initial_previous_raw_action29"],np.float32),initial_previous)):
+        raise ValueError("Startup reference/default/previous action differs from the first true integration state")
+    observed_names = first["observed_joint_names"]
+    if (set(observed_names) != set(names) or len(observed_names) != len(names)
+            or not np.array_equal(np.asarray(first["observed_joint_qpos"],np.float32),
+                                  history["q"][0,[names.index(n) for n in observed_names]].astype(np.float32))):
+        raise ValueError("Startup observation is not the initial real measured joint snapshot")
+    data = mujoco.MjData(model)
+    pelvis = model.body("pelvis").id
+    samples = []
+    for tick, row in enumerate(trace):
+        mujoco.mj_setState(model, data, history["integration_states"][tick], history["state_spec"])
+        # Match actual pre-control IMU kinematics, without advancing simulation.
+        mujoco.mj_forward(model, data)
+        angular = np.zeros(6)
+        mujoco.mj_objectVelocity(model,data,mujoco.mjtObj.mjOBJ_BODY,pelvis,angular,1)
+        gravity = data.xmat[pelvis].reshape(3,3).T @ np.array([0.,0.,-1.])
+        if tick == 0:
+            previous = initial_previous
+            if (not np.allclose(first["body_local_angular_velocity3"],angular[:3],rtol=0,atol=1e-12)
+                    or not np.allclose(first["projected_gravity3"],gravity,rtol=0,atol=1e-12)
+                    or not np.array_equal(first["actual_qvel"],data.qvel)):
+                raise ValueError("Startup first IMU/full velocity differs from actual integration state")
+        else:
+            previous = finite_vector(trace[tick-1]["controller_last_raw_policy_action29"],29,"preceding actual raw action").astype(np.float32)
+        output = finite_vector(row["controller_last_raw_policy_action29"],29,"actual raw output").astype(np.float32)
+        target = finite_vector(row["body_pd_target29"],29,"actual body PD target")
+        if not np.allclose(target, default + output[sonic.BODY_TO_POLICY]*scale, rtol=0,atol=1e-7):
+            raise ValueError("Actual controller output differs from the applied body target")
+        samples.append((angular[:3],(history["q"][tick,body]-default)[permutation],
+                        history["dq"][tick,body][permutation],previous,gravity))
+        event = receipt["decoder_inputs"][tick]
+        pad = max(0,9-tick)
+        indices = [0]*pad + list(range(max(0,tick-9),tick+1))
+        origins = ([{"kind":"startup_repeat_first_snapshot","padded_from_initial":True,"padded_from_actual_timestep_index":0} for _ in range(pad)]
+            + [{"kind":"actual_physical_sample","actual_timestep_index":index} for index in indices[pad:]])
+        if (event.get("decoder_call_index") != tick or event.get("padding_count") != pad
+                or event.get("history_origin") != origins or event.get("all_ten_samples_real") is not (pad == 0)
+                or row.get("startup_decoder_input_index") != tick or row.get("startup_history_padding_slots") != pad
+                or not math.isclose(event["sim_time_s"],history["times"][tick],rel_tol=0,abs_tol=1e-6)
+                or not np.allclose(event["history_sample_times_s"],history["times"][indices],rtol=0,atol=1e-6)):
+            raise ValueError("Startup history must use only t0 copies then the true causal50Hz integration indices")
+        token = finite_vector(row["actual_body_token64"],64,"actual decoder token")
+        actual = np.asarray(event["input_values_float32"],np.float32)
+        expected = np.concatenate([token] + [np.stack([samples[index][term] for index in indices]).reshape(-1)
+                                            for term in range(5)]).astype(np.float32)
+        if (actual.shape != (994,) or not np.array_equal(actual,expected)
+                or event.get("input_sha256") != hashlib.sha256(actual.astype('<f4',copy=False).tobytes()).hexdigest()):
+            raise ValueError("Actual decoder input differs from independently reconstructed real/padded history")
+    return {"contract":"cvpr-handover-independent-startup-history-audit-v1", "decoder_inputs_checked":count,
+            "padded_calls":9,"all_real_from_call":9,"source_future_used":False,
+            "previous_action_chain_checked":True,"physical_state_source":"mjSTATE_INTEGRATION",
+            "history_payload_sha256":digest(receipt)}
 
 
 def audit_renderer_pose(event, model, data, *, world_reference, frame_calibration):
@@ -719,12 +947,13 @@ def calibration_asset_bindings(result, calibration):
     return bindings
 
 
-def audit_capture(run, capture, candidate, plan_sha256, *, expected_warmup="measured_pose_pd"):
+def audit_capture(run, capture, candidate, plan_sha256, *, expected_warmup="measured_pose_pd", expected_reference=None):
     """Read-only CPU audit of actual RTX pixels, clocks, labels and physical gate."""
     import numpy as np
     from PIL import Image
     run, capture = Path(run).resolve(strict=True), Path(capture).resolve(strict=True)
-    physics, history = audit_physics(run, candidate, plan_sha256, expected_warmup=expected_warmup, _with_history=True)
+    physics, history = audit_physics(run, candidate, plan_sha256, expected_warmup=expected_warmup,
+                                    expected_reference=expected_reference, _with_history=True)
     result, manifest = read(run / "result.json"), read(capture / "capture.json")
     expected = {"plan_sha256": plan_sha256, "candidate_id": candidate["candidate_id"],
                 "candidate_spec_sha256": candidate["candidate_spec_sha256"],
@@ -741,6 +970,12 @@ def audit_capture(run, capture, candidate, plan_sha256, *, expected_warmup="meas
                 "perturbation_receipt": result["perturbation_receipt"], "source_sha256": result["source_sha256"]}
     if any(manifest.get(key) != value for key, value in expected.items()):
         raise ValueError("RTX capture identity, controller clock, reset or source provenance differs")
+    if manifest.get("teacher_reference") != result.get("teacher_reference"):
+        raise ValueError("RTX command-reference lineage differs from its actual physical replay")
+    if expected_warmup == PADDED_WARMUP:
+        if (manifest.get("startup_history_padding_receipt") != result["warmup_control"]["startup_history_padding"]
+                or manifest.get("warmup_control_actual_kind") != WARMUP_KINDS[PADDED_WARMUP]):
+            raise ValueError("RTX startup padding receipt differs from independently audited physical history")
     if (manifest.get("contract") != "cvpr-handover-teacher-rtx-capture-v1"
             or manifest.get("status") != "raw_capture_completed_pending_independent_audit"
             or manifest.get("accepted_new_dataset") is not False
@@ -884,6 +1119,8 @@ def audit_capture(run, capture, candidate, plan_sha256, *, expected_warmup="meas
             "source_episode_index": result["source_episode_index"], "event_count": len(events),
             "teacher_events": len(events)-30, "warmup_events": 30,
             "teacher_collection_warmup": physics["teacher_collection_warmup"],
+            "teacher_reference": physics["teacher_reference"],
+            "startup_history_padding_audit": physics["startup_history_padding_audit"],
             "capture_content_sha256": digest(fingerprints), "physical_gate": physics["physical_gate"],
             "renderer_pose_audit": renderer_report,
             "bindings": bindings, "source_sha256": result["source_sha256"],
@@ -987,8 +1224,11 @@ def verified_queue(root):
                 or attempt.get("source_episode_index") != candidate["ancestor"]["source_episode_index"]):
             raise ValueError("Attempt candidate/plan/source identity differs from frozen registration")
         scheduled = state["recipe"]["warmup_schedule"]["controls"][str(attempt["source_episode_index"])]
+        reference = state["recipe"]["warmup_schedule"].get("teacher_references", {}).get(str(attempt["source_episode_index"]))
         if attempt.get("warmup_control") != scheduled:
             raise ValueError("Attempt TRAIN warmup differs from the frozen source schedule")
+        if attempt.get("teacher_reference") != reference:
+            raise ValueError("Attempt teacher reference differs from the frozen TRAIN schedule")
         if attempt["status"] == "accepted":
             expected_path = f"{attempt['directory']}/independent_capture_audit.json"
             if attempt.get("audit_path") != expected_path or attempt.get("rtx_capture_completed") is not True:
@@ -1013,7 +1253,8 @@ def verified_queue(root):
             # Recompute the authority relation too: a self-written eligible flag,
             # even with an updated receipt hash, cannot authorize queue recovery.
             run = root / attempt["directory"] / "rtx"
-            actual = audit_capture(run, run / "capture", candidate, identity, expected_warmup=scheduled)
+            actual = audit_capture(run, run / "capture", candidate, identity, expected_warmup=scheduled,
+                                   **({"expected_reference": reference} if reference is not None else {}))
             stable = lambda value: {k: v for k, v in value.items() if k != "generated_utc"}
             if stable(actual) != stable(audit):
                 raise ValueError("Accepted audit no longer matches independent physical/pixel/source revalidation")
@@ -1085,7 +1326,38 @@ def execute_phase(command, env, log_path, state, attempt, phase, root, timeout):
             raise RuntimeError(f"{phase} child returned{ returncode}; all partial evidence retained")
 
 
-def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_candidates=1, timeout=900, candidate_id=None, warmup_schedule=None):
+def advisory_pool(state, plan, companion_queue):
+    """Read a live companion registry for scheduling only, never admission.
+
+    All selected captures must still be independently re-audited by the final
+    packer using their own frozen authorities. A hot registry count is not a
+    completed dataset or a learned-policy measurement.
+    """
+    allowed = {row["source_episode_index"] for row in plan["original_ancestors"]}
+    companion = Path(companion_queue).resolve(strict=True)
+    other = read(companion / "queue.json")
+    other_plan, identity = load_plan(other["plan_path"])
+    if (identity != other["plan_sha256"] or other_plan["original_ancestors"] != plan["original_ancestors"]
+            or other_plan["source_manifest_sha256"] != plan["source_manifest_sha256"]
+            or other_plan["selection_sha256"] != plan["selection_sha256"]):
+        raise ValueError("Companion scheduling queue differs in original source identity")
+    counts, identities = Counter(), set()
+    for registry in (state, other):
+        for attempt in registry["attempts"]:
+            if attempt["status"] != "accepted":
+                continue
+            source = attempt["source_episode_index"]
+            if source not in allowed or attempt["candidate_id"] in identities:
+                raise ValueError("Advisory pool contains forbidden ancestry or a repeated candidate")
+            identities.add(attempt["candidate_id"]); counts[source] += 1
+    capped = Counter({source:min(count,5) for source,count in counts.items()})
+    return capped, {"scope":"scheduling_hint_only_pending_final_independent_audit", "companion_queue":str(companion),
+        "eligible_by_count_at_most5_per_ancestor":sum(capped.values()),"ancestors_by_count":len(capped),
+        "selection_possible_by_count":sum(capped.values()) >= 100 and set(capped) == allowed,
+        "dataset_ready":False,"policy_success_rate_claim":None,"observed_utc":now()}
+
+
+def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_candidates=1, timeout=900, candidate_id=None, warmup_schedule=None, companion_queue=None):
     root = Path(root).resolve(strict=True)
     inputs = {key: str(Path(value).resolve(strict=True)) for key, value in {
         "snapshot_root": snapshot_root, "data_root": data_root, "sonic_resources": sonic_resources, "python": python}.items()}
@@ -1093,6 +1365,10 @@ def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_cand
         raise ValueError("Queue outputs must not mutate source or construction resources")
     if type(max_candidates) is not int or max_candidates < 1 or timeout <= 0:
         raise ValueError("Use a positive bounded candidate count and timeout")
+    if companion_queue is not None:
+        companion_queue = str(Path(companion_queue).resolve(strict=True))
+        if Path(companion_queue) == root:
+            raise ValueError("A collection queue cannot be its own companion")
     with queue_lock(root):
         state, plan, candidates = verified_queue(root)
         if candidate_id is not None:
@@ -1112,10 +1388,12 @@ def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_cand
         schedule = load_warmup_schedule(plan, state["plan_sha256"], schedule_path)
         recipe = {"authority_revision": AUTHORITY_REVISION, "audit_contract": AUDIT_CONTRACT,
                   "inputs": inputs, "command_rate": 30, "warmup_schedule": schedule, "warmup_seconds": 1.,
+                  "simple_source_root":str(REPO / "VLMExpert/third_party/SIMPLE/src"),
                   "pd_profile": "fixed_cpp_baseline", "hand_torque_profile": "recording_0p7_nm",
                   "code_sha256": {str(p.relative_to(REPO)): sha256(p) for p in code_files},
                   "input_receipt_sha256": {str(p): sha256(p) for p in receipt_files},
                   "source_manifest_sha256": plan["source_manifest_sha256"], "selection_sha256": plan["selection_sha256"]}
+        recipe["companion_queue_scheduling_only"] = companion_queue
         if "recipe" in state and state["recipe"] != recipe:
             raise ValueError("Frozen queue recipe/source locations changed; create a separately reviewed queue")
         if "recipe" not in state:
@@ -1145,7 +1423,15 @@ def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_cand
                 break
             n = candidate["ancestor"]["source_episode_index"]
             selected_warmup = schedule["controls"][str(n)]
+            reference = schedule.get("teacher_references", {}).get(str(n))
             counts = Counter(a["source_episode_index"] for a in state["attempts"] if a["status"] == "accepted")
+            if companion_queue is not None:
+                counts, hint = advisory_pool(state, plan, companion_queue)
+                state["companion_scheduling_hint"] = hint
+                if hint["selection_possible_by_count"]:
+                    state["scheduling_stop_reason"] = "combined_count_target_reached_pending_final_independent_audit"
+                    write(root / "queue.json", queue_summary(state))
+                    break
             if candidate["candidate_id"] in tried or counts[n] >= 5:
                 continue
             remaining = 100 - sum(counts.values())
@@ -1158,6 +1444,7 @@ def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_cand
             attempt = {"candidate_id": candidate["candidate_id"], "candidate_spec_sha256": candidate["candidate_spec_sha256"],
                        "plan_path": plan_path, "plan_sha256": plan_sha, "source_episode_index": n,
                        "warmup_control": selected_warmup,
+                       "teacher_reference": reference,
                        "status": "registered", "directory": attempt_dir.name, "created_utc": now()}
             state["attempts"].append(attempt)
             write(root / "queue.json", queue_summary(state))
@@ -1165,24 +1452,34 @@ def collect(root, *, snapshot_root, data_root, sonic_resources, python, max_cand
                 "--sonic-resources", inputs["sonic_resources"], "--candidate-plan", str(plan_path), "--candidate-id", candidate["candidate_id"],
                 "--command-rate", "30", "--warmup-control", selected_warmup, "--warmup-seconds", "1", "--pd-profile", "fixed_cpp_baseline",
                 "--hand-torque-profile", "recording_0p7_nm"]
+            if reference is not None:
+                common.extend(["--teacher-reference", reference["path"]])
             phase = "screen"
             try:
                 if load_warmup_schedule(plan, state["plan_sha256"], schedule["path"]) != schedule:
                     raise ValueError("TRAIN warmup schedule changed before candidate execution")
                 env = dict(os.environ)
+                env["PYTHONPATH"] = recipe["simple_source_root"] + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
                 env["CUDA_VISIBLE_DEVICES"] = ""
                 screen = attempt_dir / "screen"
                 execute_phase([*common, "--render-mode", "none", "--output", str(screen)], env,
                               attempt_dir / "screen.log", state, attempt, phase, root, timeout)
-                preflight = audit_physics(screen, candidate, plan_sha, expected_warmup=selected_warmup)
+                preflight = audit_physics(screen, candidate, plan_sha, expected_warmup=selected_warmup,
+                                          expected_reference=reference)
                 write(attempt_dir / "preflight_audit.json", preflight)
                 attempt["preflight_audit_sha256"] = sha256(attempt_dir / "preflight_audit.json")
                 phase = "capture"
                 rendered, capture = attempt_dir / "rtx", attempt_dir / "rtx/capture"
+                capture_env = dict(env)
+                if "CUDA_VISIBLE_DEVICES" in os.environ:
+                    capture_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+                else:
+                    capture_env.pop("CUDA_VISIBLE_DEVICES", None)
                 execute_phase([*common, "--render-mode", "isaac", "--capture-training", str(capture), "--output", str(rendered)],
-                              dict(os.environ), attempt_dir / "capture.log", state, attempt, phase, root, timeout)
+                              capture_env, attempt_dir / "capture.log", state, attempt, phase, root, timeout)
                 attempt["rtx_capture_completed"] = True
-                audit = audit_capture(rendered, capture, candidate, plan_sha, expected_warmup=selected_warmup)
+                audit = audit_capture(rendered, capture, candidate, plan_sha, expected_warmup=selected_warmup,
+                                      expected_reference=reference)
                 if load_warmup_schedule(plan, state["plan_sha256"], schedule["path"]) != schedule:
                     raise ValueError("TRAIN warmup schedule changed during candidate execution")
                 previous = [read(root / a["audit_path"]) for a in state["attempts"] if a["status"] == "accepted"]
@@ -1228,6 +1525,7 @@ def main():
     run.add_argument("--timeout", type=float, default=900)
     run.add_argument("--candidate-id", help="Select one existing preregistered pilot; never alters its proposal or retries an old attempt")
     run.add_argument("--warmup-schedule", type=Path, help="Freeze the complete24-source TRAIN-only warmup schedule before any child executes")
+    run.add_argument("--companion-queue", type=Path, help="Read another queue only to avoid excess collection; final independent admission is still required")
     args = parser.parse_args()
     if args.mode == "init":
         result = initialize_queue(args.plan, args.output)
@@ -1241,11 +1539,13 @@ def main():
         candidate = next(c for c in plan["candidates"] if c["candidate_id"] == args.candidate_id)
         schedule = load_warmup_schedule(plan, identity, args.warmup_schedule)
         result = audit_capture(args.run_dir, args.capture_dir, candidate, identity,
-            expected_warmup=schedule["controls"][str(candidate["ancestor"]["source_episode_index"])])
+            expected_warmup=schedule["controls"][str(candidate["ancestor"]["source_episode_index"])],
+            expected_reference=schedule.get("teacher_references", {}).get(str(candidate["ancestor"]["source_episode_index"])))
     else:
         result = collect(args.queue, snapshot_root=args.snapshot_root, data_root=args.data_root,
             sonic_resources=args.sonic_resources, python=args.python, max_candidates=args.max_candidates,
-            timeout=args.timeout, candidate_id=args.candidate_id, warmup_schedule=args.warmup_schedule)
+            timeout=args.timeout, candidate_id=args.candidate_id, warmup_schedule=args.warmup_schedule,
+            companion_queue=args.companion_queue)
     print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
 
 

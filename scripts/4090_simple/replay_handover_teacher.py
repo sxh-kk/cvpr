@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import shutil
 import traceback
+from types import FunctionType, MethodType
 
 import numpy as np
 
@@ -35,6 +36,9 @@ RENDERER_POSE_CONTRACT = "cvpr-handover-renderer-pose-evidence-v1"
 RENDERER_LINKS = ("pelvis", "torso_link", "left_wrist_yaw_link", "right_wrist_yaw_link")
 CANDIDATE_SPEC_KEYS = ("ancestor", "variant", "physics_seed", "material_seed", "generation_seed", "initial_object_deltas")
 CALIBRATION_HELPER = Path(__file__).resolve().parents[2]/"VLMExpert/third_party/SIMPLE/src/simple/sensors/head_camera_mount.py"
+PADDED_WARMUP_MODE = "live_pose_sonic_v1_1_repeat_first_snapshot"
+PADDED_WARMUP_KIND = "live_initial_pose_repeat_first_snapshot_sonic_v1_1"
+STARTUP_HISTORY_CONTRACT = "cvpr-sonic-v11-startup-repeat-first-snapshot-v1"
 
 
 def json_default(value):
@@ -259,6 +263,38 @@ def load_source0(snapshot_root, *, source_episode=0):
     return load_source(snapshot_root, source_episode=source_episode)
 
 
+def apply_teacher_reference(source, path, binding, *, warmup_control, warmup_seconds, command_rate):
+    """Overlay a preregistered TRAIN tail while preserving all original evidence.
+
+    The reference array is native50Hz; the regular command_source_index still
+    performs the actual30Hz hold. Never execute its separate held-table as a
+    second native reference or silently replace source ancestry/reset data.
+    """
+    if binding is None or command_rate != 30 or warmup_seconds != 1.:
+        raise ValueError("Modified teacher requires a registered candidate, true30Hz and exactly1s startup")
+    from prepare_handover_teacher_reference import validate_reference
+    expected = {key:binding[key] for key in ("candidate_id","candidate_spec_sha256","plan_sha256")}
+    expected["source_episode_index"] = binding["proposal"]["ancestor"]["source_episode_index"]
+    commands, receipt = validate_reference(path,source,expected_candidate=expected,expected_warmup=warmup_control,
+        allow_new_execution_candidate=True)
+    if len(commands)>len(source["commands"])+250:
+        raise ValueError("Modified TRAIN teacher may append at most5s of commands")
+    document = json.loads(Path(receipt["path"]).read_text())
+    identities = {receipt["path"]:receipt["sha256"],receipt["commands_path"]:receipt["commands_sha256"],
+        receipt["actual_executed_commands_path"]:receipt["actual_executed_commands_sha256"],
+        **document["repair_inputs_sha256"]}
+    for filename,identity in identities.items():
+        if file_sha256(filename)!=identity or (filename in source["sources"] and source["sources"][filename]!=identity):
+            raise ValueError("Modified teacher inputs changed or conflict with original source identity")
+    overlaid = deepcopy(source)
+    overlaid.update(commands=commands.copy(),source_parent_rows=len(source["commands"]),
+        teacher_reference=receipt,teacher_reference_input_sha256=identities)
+    # load_source intentionally shares the reset's source-proof dict. Keep that
+    # original reset proof untouched when extending command provenance.
+    overlaid["sources"] = {**source["sources"],**identities}
+    return overlaid
+
+
 def canonical_sha256(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
         allow_nan=False, ensure_ascii=True).encode()).hexdigest()
@@ -366,6 +402,167 @@ def sonic_command_parameters(command):
             or parameters["controller"] is None):
         raise ValueError("SONIC ActionCmd must retain its actual controller/token/hand parameters")
     return parameters
+
+
+class RepeatFirstSnapshotDecoderHistory:
+    """Instance-local decoder adapter for an explicit causal startup prefix.
+
+    A real sample is appended by the unchanged physical controller before each
+    call. The first9 inputs therefore contain9..1 copies of reset t0. Every
+    later input must contain exactly ten real chronological50Hz samples. No
+    synthetic past timestamps, body-state forcing or future references exist.
+    """
+    def __init__(self, first_sample, original_decoder_input, first_snapshot):
+        self.first_sample = deepcopy(first_sample)
+        self.original_decoder_input = original_decoder_input
+        self.receipt = {"contract":STARTUP_HISTORY_CONTRACT,"policy":"repeat_first_snapshot",
+            "seeded_history_slots":10,"initialization_count":1,"same_timestamp":True,
+            "timestamp_policy":"All startup copies retain actual reset t0; never fabricated past timestamps",
+            "padding_scope":"Decoder proprioception only; never RGB/state observations or training action labels",
+            "first_snapshot":deepcopy(first_snapshot),"first_snapshot_sha256":canonical_sha256(first_snapshot),
+            "decoder_inputs":[],"padded_decoder_calls":0,"total_decoder_calls":0,
+            "first_all_real_decoder_sim_time_s":None,"state_forcing":False,
+            "source_future_used":False,"history_injection":True,
+            "adapter_source_sha256":file_sha256(__file__)}
+
+    def __call__(self, latent64, history):
+        latent = vector(latent64,64,"startup actual token64").astype(np.float32)
+        if len(history)!=10:
+            raise ValueError("Startup decoder requires exactly ten explicitly described slots")
+        tick = self.receipt["total_decoder_calls"]
+        pad = max(0,9-tick)
+        actual_indices = list(range(max(0,tick-9),tick+1))
+        origins = ([{"kind":"startup_repeat_first_snapshot","padded_from_initial":True,
+            "padded_from_actual_timestep_index":0} for _ in range(pad)]
+            + [{"kind":"actual_physical_sample","actual_timestep_index":index} for index in actual_indices])
+        expected_times = [self.first_sample[0]]*pad + [self.first_sample[0]+index/50 for index in actual_indices]
+        times = [float(sample[0]) for sample in history]
+        if len(origins)!=10 or not np.allclose(times,expected_times,rtol=0,atol=1e-6):
+            raise ValueError("Startup padding must fade9..1 then use only causal actual50Hz samples")
+        widths=(3,29,29,29,3)
+        for index,sample in enumerate(history):
+            if len(sample)!=6 or any(np.shape(v)!=(w,) or not np.isfinite(v).all()
+                    for v,w in zip(sample[1:],widths)):
+                raise ValueError("Invalid actual/startup decoder sample shape or finite values")
+            if index<pad and any(not np.array_equal(a,b) for a,b in zip(sample[1:],self.first_sample[1:])):
+                raise ValueError("Startup padding must repeat only the first actual snapshot")
+        if pad:
+            value=np.concatenate([latent]+[np.stack([sample[index] for sample in history]).reshape(-1)
+                for index in range(1,6)]).astype(np.float32)[None]
+        else:
+            value=self.original_decoder_input(latent,history)
+        if value.shape!=(1,994) or not np.isfinite(value).all():
+            raise ValueError("Invalid official decoder994 input")
+        self.receipt["decoder_inputs"].append({"decoder_call_index":tick,
+            "sim_time_s":times[-1],"history_sample_times_s":times,"padding_count":pad,
+            "history_origin":origins,"all_ten_samples_real":pad==0,
+            "input_values_float32":value[0].tolist(),
+            "input_sha256":hashlib.sha256(value.astype('<f4',copy=False).tobytes()).hexdigest()})
+        self.receipt["padded_decoder_calls"] += int(pad>0)
+        self.receipt["total_decoder_calls"] += 1
+        if not pad and self.receipt["first_all_real_decoder_sim_time_s"] is None:
+            self.receipt["first_all_real_decoder_sim_time_s"] = times[-1]
+        return value
+
+
+def install_instance_startup_decoder(controller, adapter):
+    """Keep the upstream physical method, replacing only this instance's input builder."""
+    original=controller.apply_physics.__func__
+    if ("decoder_input" not in original.__code__.co_names
+            or original.__globals__.get("decoder_input") is not adapter.original_decoder_input
+            or "apply_physics" in controller.__dict__):
+        raise ValueError("Require the unchanged upstream controller before startup adaptation")
+    globals_copy=dict(original.__globals__)
+    globals_copy["decoder_input"]=adapter
+    adapted=FunctionType(original.__code__,globals_copy,original.__name__,original.__defaults__,original.__closure__)
+    adapted.__kwdefaults__=original.__kwdefaults__
+    controller.apply_physics=MethodType(adapted,controller)
+    adapter.receipt["physical_method_adapter"]={"scope":"this controller instance only; no module-global monkeypatch",
+        "unchanged_function_code":True,"globals_replaced":["decoder_input"],
+        "upstream_source_path":original.__globals__["__file__"],
+        "upstream_source_sha256":file_sha256(original.__globals__["__file__"])}
+
+
+def record_padded_decoder_step(warmup, controller, record, *, is_warmup):
+    """Bind actual post-step decoder output and label the startup prefix truthfully.
+
+    These values are read from the physical controller after env.step, never
+    inferred from a desired reference or a later previous-action input.
+    """
+    decoder = warmup.startup_decoder.receipt["decoder_inputs"][-1]
+    if (record["decoder_calls_after"] != record["decoder_calls_before"]+1
+            or decoder["decoder_call_index"] != record["tick50"]
+            or not math.isclose(decoder["sim_time_s"],record["sim_time_s"],abs_tol=1e-6)):
+        raise ValueError("Padded decoder step is not the current single physical decoder call")
+    raw_action = vector(controller._last_raw_action,29,"actual controller raw policy action29")
+    body_target = vector(controller._body_target,29,"actual controller physical PD target29")
+    event = None
+    if is_warmup:
+        event = warmup.receipt["events"][-1]
+        if not math.isclose(event["sim_time_s"],record["sim_time_s"],abs_tol=1e-6):
+            raise ValueError("Padded warmup event is not the current actual decoder command")
+    record.update(startup_decoder_input_index=decoder["decoder_call_index"],
+        startup_history_padding_slots=decoder["padding_count"],
+        controller_last_raw_policy_action29=raw_action.tolist(),
+        body_pd_target29=body_target.tolist())
+    if event is not None:
+        event.update(history_injection=decoder["padding_count"]>0,
+            startup_history_padding_slots=decoder["padding_count"])
+
+
+def make_repeat_first_snapshot_warmup(resource_dir, *, seconds):
+    """Use the fixed live-pose encoder from tick0 with declared startup padding."""
+    from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
+    import simple.baselines.sonic_v1_1 as sonic
+
+    class PaddedLivePoseWarmup(LivePoseSonicWarmup):
+        def reset(self):
+            super().reset()
+            self.startup_decoder=None
+            self.receipt.update(kind=PADDED_WARMUP_KIND,seconds=seconds,history_injection=True,
+                startup_adapter_source_sha256=file_sha256(__file__),
+                proprioception="Explicit first-reset-snapshot padding during first9 decoder calls; then ten real50Hz samples",
+                hand_policy_scope="Measured first live hands from tick0; no teacher references or future labels")
+
+        def command(self,robot,controller,observation):
+            if self.startup_decoder is None:
+                import mujoco
+                model,data=robot.mjModel,robot.mjData
+                if (controller._history or controller.decoder_calls or controller._last_tick is not None
+                        or controller._body_target is not None
+                        or not np.isclose(data.time,observation['sim_time_s'],rtol=0,atol=1e-9)):
+                    raise ValueError("Startup padding requires the first actual post-reset snapshot and fresh controller")
+                q=np.asarray([data.joint(n).qpos[0] for n in sonic.BODY_JOINT_NAMES],float)
+                dq=np.asarray([data.joint(n).qvel[0] for n in sonic.BODY_JOINT_NAMES],float)
+                pelvis=model.body('pelvis').id
+                velocity=np.zeros(6)
+                mujoco.mj_objectVelocity(model,data,mujoco.mjtObj.mjOBJ_BODY,pelvis,velocity,1)
+                gravity=data.xmat[pelvis].reshape(3,3).T@np.array([0.,0.,-1.])
+                previous=np.asarray(((q-sonic.DEFAULT_ANGLES)/sonic.ACTION_SCALE)[sonic.POLICY_TO_BODY],np.float32)
+                root_joint=int(model.body_jntadr[pelvis]);root_dof=int(model.jnt_dofadr[root_joint])
+                snapshot={"sim_time_s":float(data.time),"body_joint_names":list(sonic.BODY_JOINT_NAMES),
+                    "physical_body_qpos29":q.tolist(),"physical_body_qvel29":dq.tolist(),
+                    "observed_joint_names":list(observation['joint_names']),
+                    "observed_joint_qpos":np.asarray(observation['joint_qpos']).tolist(),
+                    "root_pose7":[*data.xpos[pelvis],*data.xquat[pelvis]],
+                    "root_qvel6":data.qvel[root_dof:root_dof+6].tolist(),"actual_qvel":data.qvel.tolist(),
+                    "body_local_angular_velocity3":velocity[:3].tolist(),"projected_gravity3":gravity.tolist(),
+                    "controller_reset_previous_raw_action29":controller._last_raw_action.tolist(),
+                    "effective_initial_previous_raw_action29":previous.tolist(),
+                    "effective_previous_action_rule":"Unchanged upstream apply_physics initializes measured-pose target before its first sample",
+                    "body_default_angles29":sonic.DEFAULT_ANGLES.tolist(),"body_action_scale29":sonic.ACTION_SCALE.tolist(),
+                    "source":"Only the first actual post-reset observation/current physical sensors; no teacher trajectory"}
+                sample=(float(data.time),velocity[:3].copy(),(q-sonic.DEFAULT_ANGLES)[sonic.POLICY_TO_BODY].copy(),
+                    dq[sonic.POLICY_TO_BODY].copy(),previous.copy(),gravity.copy())
+                adapter=RepeatFirstSnapshotDecoderHistory(sample,sonic.decoder_input,snapshot)
+                install_instance_startup_decoder(controller,adapter)
+                for _ in range(10):controller._history.append(deepcopy(sample))
+                self.startup_decoder=adapter
+                self.receipt['startup_history_padding']=adapter.receipt
+            command=super().command(robot,controller,observation)
+            self.phase='warmup_'+PADDED_WARMUP_MODE
+            return command
+    return PaddedLivePoseWarmup(resource_dir,hand_policy='measured')
 
 
 def renderer_pose_snapshot(diagnostics, *, sim_time_s, observation_sim_time_s,
@@ -607,6 +804,9 @@ def run(args):
     perturbation = None
     if binding:
         source, perturbation = apply_candidate(source, binding)
+    if getattr(args,"teacher_reference",None) is not None:
+        source = apply_teacher_reference(source,args.teacher_reference,binding,warmup_control=args.warmup_control,
+            warmup_seconds=args.warmup_seconds,command_rate=args.command_rate)
     calibration_identities = calibration_source_identities()
     resource_data_root,calibration_asset_sha = bound_calibration_assets(args.data_root,calibration_identities)
     output = args.output.resolve()
@@ -648,6 +848,10 @@ def run(args):
     if binding:
         result.update({key:binding[key] for key in ("plan_path","plan_sha256","candidate_id","candidate_spec_sha256")})
         result["candidate"] = binding["candidate"]
+    if "teacher_reference" in source:
+        result.update(teacher_reference=source["teacher_reference"],source_parent_rows=source["source_parent_rows"],
+            teacher_reference_input_sha256=source["teacher_reference_input_sha256"],
+            teacher_command_policy="original native50Hz prefix plus explicit TRAIN-only modified-teacher tail")
     write_json(output / "result.json", result)
     os.environ["SIMPLE_DATA_DIR"] = str(resource_data_root)
     import gymnasium as gym
@@ -668,8 +872,10 @@ def run(args):
         simple_directory/"core/action.py",simple_directory/"engines/isaacsim.py",
         simple_directory/"engines/mujoco.py",simple_directory/"sensors/head_camera_mount.py",
         simple_directory/"envs/sonic_loco_manip.py")
-    if args.warmup_control == "live_pose_sonic_v1_1":
+    if args.warmup_control in ("live_pose_sonic_v1_1",PADDED_WARMUP_MODE):
         code_paths += (simple_directory/"baselines/live_pose_sonic_warmup.py",)
+    if "teacher_reference" in source:
+        code_paths += (script_directory/"prepare_handover_teacher_reference.py",)
     result["capture_code_sha256"] = {str(path):file_sha256(path) for path in code_paths}
     code_directory = output / "provenance/code"
     code_directory.mkdir(parents=True)
@@ -772,6 +978,8 @@ def run(args):
         if args.warmup_control == "live_pose_sonic_v1_1":
             from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
             warmup = LivePoseSonicWarmup(args.sonic_resources, hand_policy="measured")
+        elif args.warmup_control == PADDED_WARMUP_MODE:
+            warmup = make_repeat_first_snapshot_warmup(args.sonic_resources,seconds=args.warmup_seconds)
         if rendered:
             from video_capture import RawVideoRecorder
             video = RawVideoRecorder(output / "rollout.mp4", fps=50, shape=np.asarray(obs["head_stereo_left"]).shape)
@@ -785,6 +993,9 @@ def run(args):
                 "perturbation_receipt","initial_object_deltas","warmup_control","controller_identity",
                 "capture_code_sha256","code_snapshots","instruction","resource_data_root",
                 "calibration_source_asset_sha256")}
+            if "teacher_reference" in result:
+                metadata.update({key:deepcopy(result[key]) for key in ("teacher_reference","source_parent_rows",
+                    "teacher_reference_input_sha256","teacher_command_policy")})
             training_capture = TrainingCapture(capture_path,metadata=metadata,joint_names=source["model_joint_names"],
                 warmup_ticks=warmup_ticks,start_time=start_time)
             result["training_capture_path"] = str(capture_path)
@@ -865,6 +1076,8 @@ def run(args):
                     reward=float(reward), official_success=bool(terminated), truncated=bool(truncated),
                     decoder_calls_after=controller.decoder_calls, pelvis_z_m=height, pelvis_tilt_degrees=tilt,
                     finite_physics=bool(finite), physics_state_row_after=len(states)-1)
+                if args.warmup_control == PADDED_WARMUP_MODE:
+                    record_padded_decoder_step(warmup,controller,record,is_warmup=reference is None)
                 record["applied_forces_after"] = applied_force_state(data)
                 if not record["applied_forces_after"]["all_zero"]:
                     raise RuntimeError("Nonzero post-control externally applied force")
@@ -908,6 +1121,15 @@ def run(args):
                 for path,sha in result["capture_code_sha256"].items())
             if not result["code_unchanged_during_run"]:
                 result.update(status="error",error="Capture source changed during run; raw capture rejected")
+            if "teacher_reference" in source:
+                try:
+                    result["teacher_reference_inputs_unchanged"] = all(file_sha256(path)==identity
+                        for path,identity in source["teacher_reference_input_sha256"].items())
+                except OSError as error:
+                    result["teacher_reference_inputs_unchanged"] = False
+                    result["teacher_reference_input_error"] = repr(error)
+                if not result["teacher_reference_inputs_unchanged"]:
+                    result.update(status="error",error="Modified teacher inputs changed during run; raw capture rejected")
             try:
                 _,end_asset_sha = bound_calibration_assets(resource_data_root,calibration_identities)
                 result["calibration_source_assets_unchanged"] = end_asset_sha==calibration_asset_sha
@@ -921,6 +1143,11 @@ def run(args):
                     applied_force_checks=result.get("applied_force_checks"),force_guard=result.get("force_guard"),
                     physics_model=result["physics_model"],
                     calibration_source_assets_unchanged=result["calibration_source_assets_unchanged"])
+                if "teacher_reference" in result:
+                    training_capture.metadata["teacher_reference_inputs_unchanged"] = result["teacher_reference_inputs_unchanged"]
+                if args.warmup_control == PADDED_WARMUP_MODE and warmup is not None and warmup.startup_decoder is not None:
+                    training_capture.metadata.update(startup_history_padding_receipt=deepcopy(warmup.startup_decoder.receipt),
+                        warmup_control_actual_kind=PADDED_WARMUP_KIND)
                 result["training_capture"] = training_capture.close(completed=result["status"]=="teacher_diagnostic_completed")
             if states:
                 np.savez_compressed(output / "trajectory.npz", physics_state_spec=np.asarray(spec),
@@ -953,11 +1180,13 @@ def main():
     parser.add_argument("--source-episode", type=int, default=None, help="Original TRAIN source ID; default0 without candidate")
     parser.add_argument("--candidate-plan", type=Path)
     parser.add_argument("--candidate-id")
+    parser.add_argument("--teacher-reference",type=Path,
+        help="Explicit candidate-bound TRAIN modified-teacher JSON; original prefix/reset/ancestry retained")
     parser.add_argument("--capture-training", nargs="?", const=Path("capture"), type=Path,
         help="Isaac-only raw training capture directory; flag alone uses OUTPUT/capture")
     parser.add_argument("--seed", type=int, default=None, help="Candidate physics_seed or default20261022")
     parser.add_argument("--render-mode", choices=("none", "isaac"), default="none")
-    parser.add_argument("--warmup-control", choices=("measured_pose_pd","live_pose_sonic_v1_1"), default="measured_pose_pd")
+    parser.add_argument("--warmup-control", choices=("measured_pose_pd","live_pose_sonic_v1_1",PADDED_WARMUP_MODE), default="measured_pose_pd")
     parser.add_argument("--warmup-seconds", type=float, default=1.)
     parser.add_argument("--pd-profile", choices=("fixed_cpp_baseline","official_v1_1_ankle_pitch_1_5"), default="fixed_cpp_baseline")
     parser.add_argument("--hand-torque-profile", choices=("mjcf_limits","recording_0p7_nm"), default="mjcf_limits")

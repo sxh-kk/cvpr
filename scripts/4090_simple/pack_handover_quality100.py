@@ -120,20 +120,27 @@ def checkpoint_contract(preparation, run_config, statistics, state_info):
     return identity, inherited
 
 
-def collect_admitted(queue_root, limit=None):
+def collect_admitted(queue_root, limit=None, *, collector=None, candidate_ids=None):
     """Recheck collector admission, every input SHA and independent CPU audit."""
-    import collect_handover_quality100 as collector
+    if collector is None:
+        import collect_handover_quality100 as collector
     queue_root = Path(queue_root).resolve(strict=True)
     queue_bytes = (queue_root / "queue.json").read_bytes()
     queue_sha = hashlib.sha256(queue_bytes).hexdigest()
-    queue, plan, candidates = collector.verified_queue(queue_root)
-    require(sha(queue_root / "queue.json") == queue_sha,
-            "Collector registry changed while selecting the admitted snapshot; retry")
+    queue, plan, candidates = verify_registry_snapshot(collector, queue_root, queue_bytes)
+    verify_append_only_registry(json.loads(queue_bytes), read(queue_root / "queue.json"))
     require(queue.get("contract") == collector.QUEUE_CONTRACT
             and queue.get("authority_revision") == collector.AUTHORITY_REVISION,
             "Unknown collector registry or obsolete audit authority")
     accepted = [a for a in queue["attempts"] if a["status"] == "accepted"]
     require(bool(accepted), "No independently admitted real RTX capture exists")
+    if candidate_ids is not None:
+        require(isinstance(candidate_ids, list) and bool(candidate_ids)
+                and all(isinstance(value, str) for value in candidate_ids)
+                and len(set(candidate_ids)) == len(candidate_ids), "Candidate selection must be an explicit unique list")
+        by_id = {a["candidate_id"]: a for a in accepted}
+        require(set(candidate_ids) <= set(by_id), "Selection contains an unaccepted candidate")
+        accepted = [by_id[value] for value in candidate_ids]
     if limit is not None:
         require(type(limit) is int and limit > 0, "Pilot limit must be a positive integer")
         accepted = accepted[:limit]
@@ -175,7 +182,9 @@ def collect_admitted(queue_root, limit=None):
         require(run.is_relative_to(queue_root), "Run escapes collector root")
         capture = run / "capture"
         checked = collector.audit_capture(run, capture, candidate, attempt["plan_sha256"],
-                                          expected_warmup=controls[str(source_id)])
+                                          expected_warmup=controls[str(source_id)],
+                                          **({"expected_reference": schedule["teacher_references"][str(source_id)]}
+                                             if str(source_id) in schedule.get("teacher_references", {}) else {}))
         for key in checked:
             if key == "generated_utc":
                 continue
@@ -188,6 +197,7 @@ def collect_admitted(queue_root, limit=None):
         events = [json.loads(line) for line in events_path.read_text().splitlines() if line]
         packed.append({"attempt": attempt, "candidate": candidate, "capture": capture, "manifest": manifest,
                        "events": events, "audit": audit, "audit_path": audit_path, "result": read(run / "result.json")})
+    verify_append_only_registry(json.loads(queue_bytes), read(queue_root / "queue.json"))
     return packed, plan, {"queue_path": str(queue_root / "queue.json"), "queue_sha256": queue_sha,
                           "collector_contract": collector.QUEUE_CONTRACT,
                           "audit_contract": collector.AUDIT_CONTRACT,
@@ -195,6 +205,109 @@ def collect_admitted(queue_root, limit=None):
                           "warmup_schedule": schedule,
                           "_snapshot_utf8": queue_bytes.decode("utf-8"),
                           "accepted_selected": len(packed), "accepted_registry_total": sum(a["status"] == "accepted" for a in queue["attempts"])}
+
+
+def verify_registry_snapshot(collector, root, registry_bytes):
+    """Run the frozen auditor against one consistent initial registry read.
+
+    Keep the actual capture paths and every validation function unchanged.
+    Only this call's queue.json read uses its saved input bytes. This permits
+    append-only collection to continue without repeatedly invalidating a long
+    full pixel audit. The module globals and running collector are untouched.
+    """
+    from types import FunctionType
+    from copy import deepcopy
+    function = collector.verified_queue
+    snapshot = json.loads(registry_bytes)
+    if "read" not in function.__globals__:
+        # Dependency-injected unit-test auditors do not read a registry file.
+        return function(root)
+    original_read = function.__globals__["read"]
+    registry = (Path(root) / "queue.json").resolve(strict=True)
+    def snapshot_read(path):
+        if Path(path).resolve(strict=True) == registry:
+            return deepcopy(snapshot)
+        return original_read(path)
+    globals_copy = {**function.__globals__, "read": snapshot_read}
+    scoped = FunctionType(function.__code__, globals_copy, function.__name__, function.__defaults__, function.__closure__)
+    scoped.__kwdefaults__ = function.__kwdefaults__
+    return scoped(root)
+
+
+def verify_append_only_registry(snapshot, live):
+    """Running attempts may advance; admitted entries may never be rewritten."""
+    for key in ("contract", "authority_revision", "plan_path", "plan_sha256", "recipe", "frozen_recipe_sha256"):
+        require(live.get(key) == snapshot.get(key), "Live queue changed its frozen identity during packing")
+    prior = snapshot.get("registrations", [])
+    require(live.get("registrations", [])[:len(prior)] == prior, "Live queue rewrote prior registrations")
+    old, current = snapshot["attempts"], live["attempts"]
+    require(len(current) >= len(old), "Live queue removed previously registered attempts")
+    identity_keys = ("candidate_id", "candidate_spec_sha256", "plan_path", "plan_sha256", "source_episode_index", "directory")
+    for before, after in zip(old, current):
+        require(all(before.get(key) == after.get(key) for key in identity_keys),
+                "Live queue rewrote an existing attempt identity")
+        if before["status"] == "accepted":
+            require(before == after, "Live queue changed a previously admitted capture entry")
+
+
+def collect_admitted_sources(manifest_path, limit=None):
+    """Use each queue's exact frozen auditor without rewriting a running queue.
+
+    This explicit local execution manifest is created by the operator. A
+    declared SHA must match both the executable auditor and its already frozen
+    queue recipe before import. Each auditor still performs its full independent
+    source, physics, renderer and pixel checks; no version is upgraded in place.
+    """
+    import importlib.util
+    manifest_path = Path(manifest_path).resolve(strict=True)
+    document = read(manifest_path)
+    require(document.get("contract") == "cvpr-handover-multi-queue-selection-v1"
+            and document.get("scope") == "TRAIN_only"
+            and isinstance(document.get("sources"), list) and bool(document["sources"]),
+            "Use an explicit TRAIN-only multi-queue selection")
+    items, bindings, snapshots, plan = [], [], [], None
+    seen_queues, seen_ids, seen_contents = set(), set(), set()
+    for index, source in enumerate(document["sources"]):
+        queue_root = Path(source["queue_root"]).resolve(strict=True)
+        require(queue_root not in seen_queues, "Repeated queue in collection selection")
+        seen_queues.add(queue_root)
+        auditor = Path(source["collector_path"]).resolve(strict=True)
+        require(auditor.name == "collect_handover_quality100.py"
+                and sha(auditor) == source["collector_sha256"], "Declared executable auditor identity changed")
+        queue = read(queue_root / "queue.json")
+        code_key = "scripts/4090_simple/collect_handover_quality100.py"
+        require(queue.get("recipe", {}).get("code_sha256", {}).get(code_key) == sha(auditor)
+                and sha(owned(queue_root / "frozen-code", code_key)) == sha(auditor),
+                "Auditor must be the version frozen before queue execution")
+        name = "handover_frozen_auditor_" + sha(auditor)
+        spec = importlib.util.spec_from_file_location(name, auditor)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        selected, candidate_plan, binding = collect_admitted(queue_root, collector=module,
+                                                            candidate_ids=source["candidate_ids"])
+        if plan is None:
+            plan = candidate_plan
+        require(candidate_plan["original_ancestors"] == plan["original_ancestors"]
+                and candidate_plan["source_manifest_sha256"] == plan["source_manifest_sha256"]
+                and candidate_plan["selection_sha256"] == plan["selection_sha256"],
+                "Queues must retain identical original TRAIN ancestry and release identity")
+        snapshots.append(binding.pop("_snapshot_utf8"))
+        bindings.append({**binding, "collector_path": str(auditor), "collector_sha256": sha(auditor)})
+        for item in selected:
+            candidate_id, content = item["candidate"]["candidate_id"], item["audit"]["capture_content_sha256"]
+            require(candidate_id not in seen_ids and content not in seen_contents,
+                    "Combined dataset repeats a candidate or complete physical capture")
+            seen_ids.add(candidate_id); seen_contents.add(content)
+            items.append(item)
+    if limit is not None:
+        require(type(limit) is int and limit > 0, "Pilot limit must be a positive integer")
+        items = items[:limit]
+    counts = Counter(item["candidate"]["ancestor"]["source_episode_index"] for item in items)
+    require(bool(items) and len(items) <= 100 and max(counts.values()) <= 5,
+            "Combined TRAIN selection must contain at most100 captures and at most5 per original ancestor")
+    return items, plan, {"contract": document["contract"], "selection_path": str(manifest_path),
+        "selection_sha256": sha(manifest_path), "sources": bindings,
+        "_snapshots_utf8": snapshots, "accepted_selected": len(items)}
 
 
 def eligible_currents(events):
@@ -379,13 +492,19 @@ def verify_lerobot_reader(pack_root, episodes, raw_events):
             "DINO_features_or_model_loaded": False, "GPU_used": False}
 
 
-def pack(queue_root, output, preparation, run_config, statistics, state_info, *, limit=None):
+def pack(queue_root, output, preparation, run_config, statistics, state_info, *, limit=None, capture_sources=None):
     import pyarrow.parquet as pq
     identity, inherited_stats = checkpoint_contract(preparation, run_config, statistics, state_info)
-    items, plan, queue_binding = collect_admitted(queue_root, limit)
-    output = Path(output).absolute(); queue_root = Path(queue_root).resolve(strict=True)
+    require((queue_root is None) != (capture_sources is None), "Select one queue or an explicit multi-queue manifest")
+    if capture_sources is None:
+        items, plan, queue_binding = collect_admitted(queue_root, limit)
+        queue_roots = [Path(queue_root).resolve(strict=True)]
+    else:
+        items, plan, queue_binding = collect_admitted_sources(capture_sources, limit)
+        queue_roots = [Path(row["queue_path"]).parent for row in queue_binding["sources"]]
+    output = Path(output).absolute()
     require(not output.exists() and not output.is_symlink() and not output.resolve().is_relative_to(REPO)
-            and not output.resolve().is_relative_to(queue_root), "Use a fresh external output outside the capture queue")
+            and not any(output.resolve().is_relative_to(root) for root in queue_roots), "Use a fresh external output outside the capture queue")
     staging = output.parent / f".{output.name}.partial-{uuid.uuid4().hex}"; staging.mkdir(parents=True)
     pack_root = staging / "train"; episodes = []; receipts = []; offset = 0; shape = None; task_ids = {}
     try:
@@ -396,6 +515,13 @@ def pack(queue_root, output, preparation, run_config, statistics, state_info, *,
             destination.write_bytes(queue_snapshot.encode("utf-8"))
             require(sha(destination) == queue_binding["queue_sha256"], "Frozen collector snapshot changed")
             queue_binding["frozen_snapshot"] = "accepted_evidence/queue_snapshot.json"
+        for index, snapshot in enumerate(queue_binding.pop("_snapshots_utf8", [])):
+            relative = f"accepted_evidence/queue-{index:03d}-snapshot.json"
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(snapshot.encode("utf-8"))
+            require(sha(destination) == queue_binding["sources"][index]["queue_sha256"], "Frozen queue snapshot changed")
+            queue_binding["sources"][index]["frozen_snapshot"] = relative
         for episode, item in enumerate(items):
             events = item["events"]; candidate = item["candidate"]; manifest = item["manifest"]
             eligible, history = eligible_currents(events)
@@ -425,12 +551,15 @@ def pack(queue_root, output, preparation, run_config, statistics, state_info, *,
                 "lineage_complete": True, "split": "train", "split_restriction": "train_only",
                 "diversity_receipt": item["audit"].get("diversity_receipt"),
                 "teacher_collection_warmup": item["audit"]["teacher_collection_warmup"],
+                "teacher_reference": item["audit"].get("teacher_reference"),
+                "startup_history_padding_audit": item["audit"].get("startup_history_padding_audit"),
                 "history_only_prefix_rows": 30, "eligible_current_rows": eligible,
                 "physics_validation": {"gate": "handover-physics-v2", "verified_handover_success": True}})
             receipts.append({"episode_index": episode, "candidate_id": candidate["candidate_id"],
                 "admission_path": str(item["audit_path"]), "admission_sha256": sha(item["audit_path"]),
                 "capture_content_sha256": item["audit"]["capture_content_sha256"], "source_sha256": manifest["source_sha256"],
                 "teacher_collection_warmup": item["audit"]["teacher_collection_warmup"],
+                "teacher_reference": item["audit"].get("teacher_reference"),
                 "plan_sha256": manifest["plan_sha256"], "candidate_spec_sha256": manifest["candidate_spec_sha256"],
                 "parquet_sha256": sha(parquet), "video": video, "eligible_current_rows": eligible,
                 "history_rows": history, "frames": len(events)})
@@ -481,11 +610,15 @@ def pack(queue_root, output, preparation, run_config, statistics, state_info, *,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ("queue-root", "output", "preparation", "run-config", "statistics", "state-info"):
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--queue-root", type=Path)
+    selection.add_argument("--capture-sources", type=Path, help="Explicit selection with each queue's frozen executable auditor")
+    for key in ("output", "preparation", "run-config", "statistics", "state-info"):
         parser.add_argument("--" + key, type=Path, required=True)
     parser.add_argument("--limit", type=int, help="Package an admitted prefix as an explicitly incomplete pilot")
     args = parser.parse_args()
-    report = pack(args.queue_root, args.output, args.preparation, args.run_config, args.statistics, args.state_info, limit=args.limit)
+    report = pack(args.queue_root, args.output, args.preparation, args.run_config, args.statistics, args.state_info,
+                  limit=args.limit, capture_sources=args.capture_sources)
     print(json.dumps({key: report[key] for key in ("status", "train_episodes", "train_target_satisfied", "final_ready")}))
 
 

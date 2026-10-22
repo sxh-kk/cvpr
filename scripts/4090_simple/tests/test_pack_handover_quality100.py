@@ -287,3 +287,84 @@ def test_full_synthetic_unit_pack_has_actual_cpu_lerobot_read_and_stays_incomple
     metadata = json.loads((tmp_path / "packed/train/meta/episodes.jsonl").read_text().splitlines()[0])
     assert metadata["teacher_collection_warmup"] == warmup
     assert report["episodes"][0]["teacher_collection_warmup"] == warmup
+
+
+def multi_queue_fixture(tmp_path, monkeypatch):
+    """Fake admissions isolate cross-queue identity checks; no real data claim."""
+    plan = {"original_ancestors": [{"source_episode_index": i} for i in range(24)],
+            "source_manifest_sha256": "release", "selection_sha256": "selection"}
+    sources = []
+    for index in range(2):
+        queue = tmp_path / f"queue-{index}"; queue.mkdir()
+        executable = tmp_path / f"code-{index}/scripts/4090_simple/collect_handover_quality100.py"
+        executable.parent.mkdir(parents=True)
+        executable.write_text(f"AUTHORITY_REVISION = 'unit-auditor-{index}'\n")
+        frozen = queue / "frozen-code/scripts/4090_simple/collect_handover_quality100.py"
+        frozen.parent.mkdir(parents=True); frozen.write_bytes(executable.read_bytes())
+        packer.write(queue / "queue.json", {"recipe": {"code_sha256": {
+            "scripts/4090_simple/collect_handover_quality100.py": packer.sha(executable)}}})
+        sources.append({"queue_root": str(queue), "collector_path": str(executable),
+            "collector_sha256": packer.sha(executable), "candidate_ids": [f"candidate-{index}"]})
+    def fake_collect(root, limit=None, *, collector, candidate_ids):
+        index = int(Path(root).name.split('-')[-1])
+        assert collector.AUTHORITY_REVISION == f"unit-auditor-{index}"
+        return [{"candidate": {"candidate_id": value, "ancestor": {"source_episode_index": index}},
+                 "audit": {"capture_content_sha256": f"content-{value}"}} for value in candidate_ids], deepcopy(plan), {
+            "queue_path": str(Path(root) / "queue.json"), "_snapshot_utf8": "unit", "queue_sha256": "unit"}
+    monkeypatch.setattr(packer, "collect_admitted", fake_collect)
+    document = {"contract": "cvpr-handover-multi-queue-selection-v1", "scope": "TRAIN_only", "sources": sources}
+    path = tmp_path / "selection.json"; packer.write(path, document)
+    return path, document
+
+
+def test_multiple_queues_use_their_own_frozen_auditor(tmp_path, monkeypatch):
+    path, _ = multi_queue_fixture(tmp_path, monkeypatch)
+    items, _, binding = packer.collect_admitted_sources(path)
+    assert len(items) == 2 and len(binding["_snapshots_utf8"]) == 2
+    assert binding["sources"][0]["collector_sha256"] != binding["sources"][1]["collector_sha256"]
+
+
+@pytest.mark.parametrize("tamper", ["executable", "frozen", "recipe", "repeated_queue", "repeated_candidate", "cap"])
+def test_multiple_queue_selection_rejects_identity_and_global_limit_violations(tmp_path, monkeypatch, tamper):
+    path, document = multi_queue_fixture(tmp_path, monkeypatch)
+    row = document["sources"][0]; queue = Path(row["queue_root"])
+    if tamper == "executable":
+        Path(row["collector_path"]).write_text("raise AssertionError('must never execute changed code')\n")
+    elif tamper == "frozen":
+        (queue / "frozen-code/scripts/4090_simple/collect_handover_quality100.py").write_text("changed")
+    elif tamper == "recipe":
+        packer.write(queue / "queue.json", {"recipe": {"code_sha256": {}}})
+    elif tamper == "repeated_queue":
+        document["sources"][1] = deepcopy(row)
+    elif tamper == "repeated_candidate":
+        document["sources"][1]["candidate_ids"] = row["candidate_ids"]
+    elif tamper == "cap":
+        row["candidate_ids"] = [f"more-{i}" for i in range(6)]
+    packer.write(path, document)
+    with pytest.raises(ValueError):
+        packer.collect_admitted_sources(path)
+
+
+def test_live_registry_may_append_but_may_not_rewrite_admitted_captures():
+    snapshot = {"contract":"unit", "attempts":[{"candidate_id":"old","status":"accepted","audit_sha256":"fixed"},
+        {"candidate_id":"running","status":"capture_running"}]}
+    live = deepcopy(snapshot)
+    live["attempts"][1].update(status="accepted", audit_sha256="new")
+    live["attempts"].append({"candidate_id":"next","status":"screen_running"})
+    packer.verify_append_only_registry(snapshot,live)
+    live["attempts"][0]["audit_sha256"]="changed"
+    with pytest.raises(ValueError,match="previously admitted"):
+        packer.verify_append_only_registry(snapshot,live)
+
+
+def test_snapshot_audit_changes_no_module_global_or_actual_payload_read(tmp_path):
+    from types import SimpleNamespace
+    root=tmp_path; packer.write(root/"queue.json",{"attempts":[],"version":"live"})
+    packer.write(root/"payload.json",{"actual":"payload"})
+    namespace={"read":packer.read}
+    exec("def verified_queue(root):\n    return read(root/'queue.json'), read(root/'payload.json'), []\n",namespace)
+    frozen=json.dumps({"attempts":[],"version":"snapshot"}).encode()
+    module=SimpleNamespace(verified_queue=namespace['verified_queue'])
+    registry,payload,_=packer.verify_registry_snapshot(module,root,frozen)
+    assert registry["version"]=="snapshot" and payload=={"actual":"payload"}
+    assert namespace["read"] is packer.read and packer.read(root/'queue.json')["version"]=="live"

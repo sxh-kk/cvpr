@@ -654,8 +654,11 @@ class QueueTests(unittest.TestCase):
             calls.append((phase,command[command.index('--warmup-control')+1]))
             frozen=collector.read(root/'frozen_recipe.json')
             self.assertEqual(frozen['warmup_schedule']['controls'][str(self.live_source)],'live_pose_sonic_v1_1')
+            self.assertEqual(env['PYTHONPATH'].split(collector.os.pathsep)[0],str(collector.REPO/'VLMExpert/third_party/SIMPLE/src'))
+            self.assertEqual(env['CUDA_VISIBLE_DEVICES'],'' if phase=='screen' else 'unit-visible')
         with patch.object(collector,'execute_phase',side_effect=execute),patch.object(collector,'audit_physics',return_value={'eligible_dataset':False}), \
-                patch.object(collector,'audit_capture',side_effect=ValueError('fixture preserves rejection')) as audit:
+                patch.object(collector,'audit_capture',side_effect=ValueError('fixture preserves rejection')) as audit, \
+                patch.dict(collector.os.environ,{'CUDA_VISIBLE_DEVICES':'unit-visible','PYTHONPATH':'/an-older-editable-checkout'}):
             collector.collect(self.queue,**self.inputs,candidate_id=candidate['candidate_id'],warmup_schedule=path)
             self.assertEqual(audit.call_args.kwargs['expected_warmup'],'live_pose_sonic_v1_1')
         self.assertEqual(calls,[('screen','live_pose_sonic_v1_1'),('capture','live_pose_sonic_v1_1')])
@@ -723,6 +726,111 @@ class QueueTests(unittest.TestCase):
         self.assertIn('collect_handover_quality100.py',' '.join(state['recipe']['code_sha256']))
         frozen=self.queue/'frozen_recipe.json';frozen.write_text(frozen.read_text()+' ')
         with self.assertRaisesRegex(ValueError,'recipe changed'):collector.verified_queue(self.queue)
+
+
+class ModifiedReferenceTests(unittest.TestCase):
+    """Synthetic command arrays test lineage/prefix admission, never success."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.parquet = self.root / 'original.parquet'; self.parquet.write_bytes(b'original source identity fixture')
+        self.replay = np.arange(4*78,dtype=np.float32).reshape(4,78)/100
+        self.commands = np.concatenate([self.replay,self.replay[-1:]],axis=0)
+        self.array = self.root / 'commands.npy'; np.save(self.array,self.commands)
+        self.applied = self.root / 'applied.npy'
+        rows=np.arange(len(self.commands));indices=(((rows*30//50)*50)+29)//30
+        np.save(self.applied,self.commands[indices])
+        self.evidence = self.root / 'research.json'; collector.write(self.evidence,{'no_admission':True})
+        self.names = [f'{side}_hand_{finger}_{j}_joint' for side in ('left','right')
+            for finger,count in (('thumb',3),('index',2),('middle',2)) for j in range(count)]
+        self.path = self.root / 'reference.json'
+        self.reference = {'contract':'cvpr-handover-modified-teacher-reference-v1', 'source_episode_index':17,
+            'parent_source_parquet_sha256':collector.sha256(self.parquet),'parent_source_commands':4,
+            'original_prefix_rows':4,'scope':'TRAIN_teacher_only','evaluation_oracle_allowed':False,
+            'command_rate_hz':50,'body_token_version':'body_token_v1_1','method':'synthetic appended-tail unit fixture',
+            'fixed_encoder':{'sha256':'fb97de22819b2057b41459802128d91723d91a25f0ad73e7bfc41a9cf8365bae',
+                'decoder_sha256':'34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509'},
+            'hand_joint_names':self.names,'commands':{'path':self.array.name,'sha256':collector.sha256(self.array),
+                'rows':5,'columns':78,'dtype':'float32'},'actual_executed_commands':{'path':self.applied.name,
+                'sha256':collector.sha256(self.applied),'rows':5,'columns':78,'dtype':'float32'},
+                'repair_inputs_sha256':{str(self.evidence):collector.sha256(self.evidence)}}
+        self.result = {'source_episode_index':17,'source_commands':5}
+        self.save()
+
+    def save(self):
+        self.reference['commands']['sha256']=collector.sha256(self.array)
+        collector.write(self.path,self.reference)
+        self.result.update(teacher_reference={'path':str(self.path),'sha256':collector.sha256(self.path)},
+            source_sha256={str(p):collector.sha256(p) for p in (self.path,self.array,self.applied,self.evidence)})
+
+    def audit(self):
+        return collector.modified_reference_commands(self.result,self.parquet,self.replay,list(reversed(self.names)))
+
+    def test_original_prefix_is_preserved_and_tail_hands_are_reordered_by_name(self):
+        tokens,hands=self.audit()
+        np.testing.assert_array_equal(tokens,self.commands[:,:64])
+        np.testing.assert_array_equal(hands,self.commands[:,64:][:,::-1])
+
+    def test_rehashed_reference_cannot_rewrite_an_original_source_command(self):
+        self.commands[0,0]+=1;np.save(self.array,self.commands);self.save()
+        with self.assertRaisesRegex(ValueError,'preserve the full source prefix'):self.audit()
+
+    def test_parent_or_evaluation_scope_changes_are_rejected(self):
+        for key,value in [('parent_source_parquet_sha256','0'*64),('evaluation_oracle_allowed',True),
+                          ('scope','TEST'),('original_prefix_rows',3)]:
+            original=self.reference[key];self.reference[key]=value;self.save()
+            with self.assertRaisesRegex(ValueError,'lineage'):self.audit()
+            self.reference[key]=original
+
+    def test_missing_generation_evidence_cannot_be_approved_by_a_success_flag(self):
+        self.reference['repair_inputs_sha256']={};self.reference['success']=True;self.save()
+        with self.assertRaisesRegex(ValueError,'generation evidence'):self.audit()
+
+    def production_context(self):
+        candidate={'candidate_id':'actual-new-reset','candidate_spec_sha256':'new-spec',
+                   'ancestor':{'source_episode_index':17}}
+        receipt={**self.result['teacher_reference'],
+            'repair_origin_candidate':{'candidate_id':'research-origin','candidate_spec_sha256':'origin-spec','plan_sha256':'origin-plan'},
+            'executed_candidate':{'candidate_id':candidate['candidate_id'],'candidate_spec_sha256':'new-spec','plan_sha256':'new-plan'},
+            'new_execution_differs_from_repair_origin':True,'execution_requires_independent_admission':True}
+        self.result.update(teacher_reference=copy.deepcopy(receipt),plan_sha256='new-plan',
+                           source_parent_rows=4,teacher_reference_inputs_unchanged=True)
+        return candidate,receipt,{'independently_read_original_source':True}
+
+    def production_audit(self,candidate,source):
+        return collector.modified_reference_commands(self.result,self.parquet,self.replay,self.names,
+            original_source=source,candidate=candidate,expected_warmup=collector.PADDED_WARMUP)
+
+    def test_production_reference_audit_binds_original_source_and_actual_execution_separately(self):
+        candidate,receipt,source=self.production_context()
+        with patch('prepare_handover_teacher_reference.validate_reference',return_value=(self.commands.copy(),receipt)) as checked:
+            tokens,hands=self.production_audit(candidate,source)
+        np.testing.assert_array_equal(tokens,self.commands[:,:64]);np.testing.assert_array_equal(hands,self.commands[:,64:])
+        self.assertIs(checked.call_args.args[1],source)
+        self.assertEqual(checked.call_args.kwargs,{'expected_candidate':{
+            'candidate_id':'actual-new-reset','candidate_spec_sha256':'new-spec','plan_sha256':'new-plan','source_episode_index':17},
+            'expected_warmup':collector.PADDED_WARMUP,'allow_new_execution_candidate':True})
+
+    def test_production_reference_receipt_cannot_forge_origin_current_or_admission(self):
+        for field,value in [('repair_origin_candidate',{'candidate_id':'invented'}),
+                            ('executed_candidate',{'candidate_id':'other-execution'}),
+                            ('execution_requires_independent_admission',False)]:
+            candidate,receipt,source=self.production_context()
+            self.result['teacher_reference'][field]=value
+            with patch('prepare_handover_teacher_reference.validate_reference',return_value=(self.commands.copy(),receipt)):
+                with self.assertRaisesRegex(ValueError,'origin/execution/source receipt'):
+                    self.production_audit(candidate,source)
+
+    def test_production_reference_rejects_stale_parent_count_input_change_and_validator_failure(self):
+        for field,value in [('source_parent_rows',5),('teacher_reference_inputs_unchanged',False)]:
+            candidate,receipt,source=self.production_context();self.result[field]=value
+            with patch('prepare_handover_teacher_reference.validate_reference',return_value=(self.commands.copy(),receipt)):
+                with self.assertRaisesRegex(ValueError,'origin/execution/source receipt'):
+                    self.production_audit(candidate,source)
+        candidate,_,source=self.production_context()
+        with patch('prepare_handover_teacher_reference.validate_reference',side_effect=ValueError('recorded actual tail differs')):
+            with self.assertRaisesRegex(ValueError,'recorded actual tail differs'):
+                self.production_audit(candidate,source)
 
 
 if __name__=='__main__':unittest.main()

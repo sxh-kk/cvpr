@@ -420,7 +420,7 @@ def train(root):
     entry.train(config)
 
 
-def run(root):
+def run(root, entrypoint=None):
     import fcntl
     root = Path(root).resolve(strict=True)
     with (root / "launch.lock").open("a") as lock:
@@ -455,7 +455,7 @@ def run(root):
         # The production name includes global world size. Obtain it using the
         # saved configuration under a short-lived eight-rank naming environment.
         naming = dict(env, WORLD_SIZE="8", RANK="0", LOCAL_RANK="0")
-        command = [sys.executable, str(Path(__file__).resolve()), "name", "--prepared", str(root)]
+        command = [sys.executable, str(Path(entrypoint or __file__).resolve()), "name", "--prepared", str(root)]
         naming_result = subprocess.run(command, env=naming, cwd=REPO / "VLMExpert", text=True,
                                        capture_output=True, check=False)
         (root / "run_name.log").write_text(naming_result.stdout + naming_result.stderr)
@@ -467,7 +467,7 @@ def run(root):
         state_path = root / "training_state.json"
         with (root / "train.log").open("x") as log:
             process = subprocess.Popen([sys.executable, "-m", "torch.distributed.run", "--standalone",
-                "--nproc_per_node=8", str(Path(__file__).resolve()), "train", "--prepared", str(root)],
+                "--nproc_per_node=8", str(Path(entrypoint or __file__).resolve()), "train", "--prepared", str(root)],
                 cwd=REPO / "VLMExpert", env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
             state.update(pid=process.pid, state="running")
             shared.write_json(state_path, state)

@@ -262,6 +262,12 @@ Adam状态最大差1.16185e-5。所有值有限、无OOM，首组计时步骤的
 `full_step_comparison_passed`。报告仍保留独立反向的重复性结果及未知原因。
 
 用户已接受测试通过后从38k重新初始化、重算未保存的2345步。
-拟重跑仍是20k任务更新及原五组学习率、batch32；每4k正式checkpoint保留，新增每1k恢复点，
+拟重跑仍是20k任务更新及原五组学习率、batch32；每4k正式checkpoint保留，新增20步及每1k恢复点，
 仅滚动保留新运行最近两次保存并豁免所有4k正式点。启用独立tmpfs中的每rank双槽CPU输入/RNG转储，
 诊断模式与存档停顿须计入实际耗时，不能把独立优化器测量冒充正式任务提速。
+
+新入口`a100_task_fused_restart.py prepare`只接受绑定旧准备配置、38k模型及实际微基准SHA的
+受控GPU报告；`train`在CUDA模型和全新空Adam状态准备完成后选择fused，保持任务计数从0开始。
+`run`使用独立锁拒绝重复启动，在唯一tmpfs目录保留每rank两槽输入/RNG，启用
+`CUDA_LAUNCH_BLOCKING=1`以帮助定位上次未知native故障，并记录实际源码SHA和诊断环境。
+第2、20次更新既保留原参数探针，也核验八rank真实fused/foreach配置和CUDA显存峰值。

@@ -152,14 +152,16 @@
     "subsequent_observation": "After all failed task workers exited, eight visible UnifoLM fixed-eval workers retained the remaining GPU contexts; that separate evaluation finished naturally before the full AdamW test. No process was stopped."
   },
   "monitor_snapshot": {
-    "generated_utc": "2026-10-22T08:07:18.545866+00:00",
-    "completed_optimizer_updates": 67,
-    "latest_train_loss_update": 55,
-    "latest_train_loss": 5.589617729187012,
-    "latest_validation_loss_update": 1,
-    "latest_validation_loss": 12.501106262207031,
+    "state": "failed",
+    "generated_utc": "2026-10-22T09:12:56.498156+00:00",
+    "completed_optimizer_updates": 2345,
+    "latest_train_loss_update": 2337,
+    "latest_train_loss": 0.2537391781806946,
+    "latest_validation_loss_update": 2001,
+    "latest_validation_loss": 1.2806029319763184,
     "estimated_remaining_seconds": null,
-    "eta_wait_reason": "waiting_for_post_warmup_timestamps"
+    "eta_wait_reason": "training_failed",
+    "scope": "Final failed original run; no ETA after failure. Early numerical probes are retained separately."
   },
   "monitor_health": {
     "state": "ok",

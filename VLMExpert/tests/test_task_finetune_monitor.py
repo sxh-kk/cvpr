@@ -35,6 +35,78 @@ def test_waiting_does_not_invent_loss_elapsed_or_eta(tmp_path):
     assert progress["eta_wait_reason"] == "training_not_started"
 
 
+def test_resume_cpu_replay_keeps_saved_progress_without_inventing_new_updates(tmp_path):
+    binding = state(tmp_path, resumed_task_step=4000, max_optimizer_steps=20000, warmup_steps=1000)
+    for console in (CONSOLE, {**CONSOLE, "completed": 4000, "maximum": 20000}):
+        progress = monitor.make_progress(binding, [], console, now_s=1000)
+        assert progress["state"] == "resuming"
+        assert progress["completed_optimizer_updates"] == 4000
+        assert progress["segment_completed_optimizer_updates"] == 0
+        assert progress["estimated_remaining_seconds"] is None
+        assert progress["latest_train_loss"] is None
+        assert progress["eta_wait_reason"] == "waiting_for_resumed_training_updates"
+        assert progress["previous_loss_history_merged"] is False
+
+
+def test_resume_first_new_update_and_eta_use_only_new_segment_timestamps(tmp_path):
+    binding = state(tmp_path, resumed_task_step=4000, max_optimizer_steps=20000, warmup_steps=1000)
+    rows = [{"completed_update": step, "train_loss": .3, "timestamp_unix_s": 1000 + 2 * (step - 4000)}
+            for step in range(4001, 4007)]
+    first = monitor.make_progress(binding, rows[:1], CONSOLE, now_s=1002)
+    assert first["state"] == "running"
+    assert first["completed_optimizer_updates"] == first["latest_train_loss_update"] == 4001
+    assert first["segment_completed_optimizer_updates"] == 1
+    assert first["estimated_remaining_seconds"] is None
+    recent = monitor.make_progress(binding, rows, CONSOLE, now_s=1012)
+    assert recent["recent_seconds_per_optimizer_update"] == 2
+    assert recent["estimated_remaining_seconds"] == (20000 - 4006) * 2
+
+
+@pytest.mark.parametrize("invalid", [-1, 100, 101, True, 4.5, "40", None])
+def test_invalid_resume_checkpoint_is_rejected(tmp_path, invalid):
+    with pytest.raises(ValueError, match="resumed_task_step"):
+        monitor.make_progress(state(tmp_path, resumed_task_step=invalid), [], CONSOLE)
+
+
+def test_resume_history_and_console_cannot_roll_back_or_mix_previous_loss(tmp_path):
+    binding = state(tmp_path, resumed_task_step=40)
+    for step in (1, 39, 40):
+        with pytest.raises(ValueError, match="resumed task checkpoint"):
+            monitor.make_progress(binding, [{"completed_update": step, "train_loss": .1}], CONSOLE)
+    with pytest.raises(ValueError, match="roll back"):
+        monitor.make_progress(binding, [], {**CONSOLE, "completed": 39})
+    progress = monitor.make_progress(binding, [{"completed_update": 0}], CONSOLE)
+    assert progress["completed_optimizer_updates"] == 40
+
+
+def test_resume_csv_is_new_segment_only_and_previous_csv_is_preserved(tmp_path, monkeypatch):
+    binding = tmp_path / "state.json"
+    binding.write_text(json.dumps(state(tmp_path, resumed_task_step=40)))
+    source = tmp_path / "run/wandb/offline-run-new/run.wandb"
+    source.parent.mkdir(parents=True)
+    source.touch()
+    old_csv = tmp_path / "previous-losses.csv"
+    old_csv.write_text("preserved old segment\n")
+    before = old_csv.read_bytes(), old_csv.stat().st_mtime_ns
+    rows = [{"completed_update": 41, "train_loss": .25}]
+    monkeypatch.setattr(monitor, "read_history", lambda _: (rows, {"source": str(source)}))
+    output = tmp_path / "out"
+    output.mkdir()
+    args = SimpleNamespace(state=binding, output_dir=output, eta_window=50, eta_min_updates=5,
+                           no_plot=True, plot_python=sys.executable)
+    monitor.refresh(args)
+    assert (output / "losses.csv").read_text().splitlines()[1].startswith("41,")
+    assert before == (old_csv.read_bytes(), old_csv.stat().st_mtime_ns)
+    # A shrinking stream must not replace the successful progress/CSV snapshot.
+    rows.clear()
+    with pytest.raises(ValueError, match="rolls back"):
+        monitor.refresh(args)
+    assert (output / "losses.csv").read_text().splitlines()[1].startswith("41,")
+    binding.write_text(json.dumps(state(tmp_path, resumed_task_step=39)))
+    with pytest.raises(ValueError, match="resume checkpoint differs"):
+        monitor.refresh(args)
+
+
 def test_postwarmup_eta_includes_actual_checkpoint_validation_pause(tmp_path):
     # Nine seconds ordinary update time plus a 20-second checkpoint/val pause.
     rows = [{"completed_update": step, "train_loss": 1 / step,

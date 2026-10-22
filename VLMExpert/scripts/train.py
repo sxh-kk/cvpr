@@ -285,15 +285,17 @@ def train(config: LaunchConfig):
     # later epochs (with offset zero) so persistent-worker/generator semantics do
     # not change when the first resumed epoch ends. Iterable streams retain the
     # original fetch-and-skip behavior below.
-    resumed_map_dataloader = (
-        ResumedMapDataLoader(
+    resume_factory = getattr(trainer, "create_resume_data_manager", None)
+    if initial_global_step and resume_factory is not None:
+        resumed_map_dataloader = resume_factory(initial_global_step)
+    elif config.train.skip_resumed_steps and not is_iterable_train_dataset:
+        resumed_map_dataloader = ResumedMapDataLoader(
             trainer.train_dataloader,
             skipped_batches=resumed_micro_steps_to_skip,
             resume_epoch=epoch_start,
         )
-        if config.train.skip_resumed_steps and not is_iterable_train_dataset
-        else None
-    )
+    else:
+        resumed_map_dataloader = None
 
     overwatch.info(f"Accelerator runs in: {trainer.project_dir}")
     trainer.set_train()
@@ -312,13 +314,16 @@ def train(config: LaunchConfig):
     for epoch in range(epoch_start, MAX_TRAINING_EPOCHS):
         trainer.next_epoch(epoch)
         local_step_start = 0
+        epoch_dataloader = trainer.train_dataloader
         if resumed_map_dataloader is not None:
             # Match Accelerator's active loader during accumulation and the
             # validation-loader cleanup below; retain original microbatch IDs in
             # safety snapshots and diagnostics.
-            trainer.train_dataloader, local_step_start = resumed_map_dataloader.for_epoch(epoch)
+            epoch_dataloader, local_step_start = resumed_map_dataloader.for_epoch(epoch)
+            if not getattr(resumed_map_dataloader, "keep_prepared_loader", False):
+                trainer.train_dataloader = epoch_dataloader
         accelerator.wait_for_everyone()
-        for local_step, batch in enumerate(trainer.train_dataloader, start=local_step_start):
+        for local_step, batch in enumerate(epoch_dataloader, start=local_step_start):
             if (
                 is_iterable_train_dataset
                 and config.train.skip_resumed_steps

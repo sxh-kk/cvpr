@@ -2,6 +2,8 @@
 
 A100的Handover任务适配见[38k联合权重初始化、任务微调20k步](../docs/A100_SIMPLE_TASK50_FINETUNE.md)：
 保留已训练动作头、VLM及Motion，八卡batch32，每4k保存，沿用原归一化并记录本地损失和实测ETA。
+融合AdamW的完整状态对照、checkpoint边界暂停及数据流恢复规则也记录在该文档中；
+默认新任务入口仍使用普通AdamW，恢复入口只在验证报告通过后启用fused。
 
 `action_architecture="dual_source_v1"` 实现双来源串行结构。当前 UnifoLM 配方设置
 `tune_vlm=True, tune_motion=True`，联合更新 VLM、MotionExpert 与新 action expert；DINO 保持冻结。

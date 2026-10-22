@@ -1,0 +1,40 @@
+{
+  "state": "optimizer_microbenchmark_passed_full_task_and_switch_pending",
+  "parent_run_timestamp": "261022080240",
+  "origin_joint_step": 38000,
+  "total_task_optimizer_updates": 20000,
+  "global_batch": 32,
+  "source_training_revision": "196ec733615be31ea60e299b268b3bf48a77ca1b",
+  "microbenchmark": {
+    "status": "optimizer_microbenchmark_passed",
+    "source_report_sha256": "c62d78883b05b23a6f7eee00dca5b59ffd4b4d71afa58f48fc01247285a78e0b",
+    "source_report_path": "/var/tmp/cvpr-evaluation-zxc-core6-v11-100/reports/a100-fused-adamw-microbenchmark.json",
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "torch": "2.7.0+cu126",
+    "numel_per_branch": 7280399,
+    "initial_nonzero_step": 938,
+    "correctness_steps": 12,
+    "additional_warmup_timing_steps_per_branch": 85,
+    "peak_pytorch_allocated_bytes": 253971968,
+    "all_parameters_moments_counters_compared": true,
+    "counters_exact": true,
+    "absolute_tolerance": 1e-08,
+    "relative_tolerance": 1e-05,
+    "median_optimizer_milliseconds": {
+      "standard": 1.3414775848388674,
+      "candidate": 0.6795096158981324
+    },
+    "timing_scope": "bounded sampled shapes, optimizer-only, concurrent with training; not end-to-end speedup"
+  },
+  "switch_requirements": [
+    "Wait for complete natural task checkpoint, then prove all eight ranks have not committed the next optimizer update; reject/auto-continue if not proven.",
+    "Protect all model, optimizer, scheduler and eight-rank RNG payloads.",
+    "Require full real-model single-GPU A/B finite/numerical/memory evidence bound by source SHA.",
+    "Restore complete state and main RNG; replay the original CPU worker stream with431 actual batches per epoch.",
+    "Keep the20k total budget, batch32, five learning rates, gradient clipping, frozen DINO and joint training.",
+    "Verify eight-rank continuation at2 and20 updates; compare observed throughput separately."
+  ],
+  "full_task_gpu_validation": "not_run",
+  "production_backend_switched": false,
+  "physical_effect_evaluated": false
+}

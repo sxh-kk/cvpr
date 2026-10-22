@@ -114,16 +114,39 @@ def unix_time(value):
         raise ValueError(f"Invalid timezone-aware timestamp {value!r}") from error
 
 
+def segment_rows(rows, resumed_task_step):
+    """A continuation has its own offline stream, beginning after the saved update."""
+    accepted = []
+    for row in rows:
+        step = row["completed_update"]
+        if type(step) is not int or step < 0:
+            raise ValueError("History update needs a nonnegative integer")
+        if step == 0:
+            continue  # No completed update; never manufacture a loss row for it.
+        if resumed_task_step and step <= resumed_task_step:
+            raise ValueError("History update precedes or repeats the resumed task checkpoint")
+        accepted.append(row)
+    return accepted
+
+
 def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_updates=5):
     now_s = time.time() if now_s is None else now_s
     maximum = state.get("max_optimizer_steps", state.get("max_training_steps"))
     warmup = state.get("warmup_steps", 0)
     if type(maximum) is not int or maximum <= 0 or type(warmup) is not int or not 0 <= warmup < maximum:
         raise ValueError("State needs positive max_optimizer_steps and valid warmup_steps")
+    resumed = state.get("resumed_task_step", 0)
+    if type(resumed) is not int or not 0 <= resumed < maximum:
+        raise ValueError("State needs 0 <= resumed_task_step < max_optimizer_steps")
     if console["maximum"] not in (0, maximum):
         raise ValueError("Console budget differs from bound task run")
+    console_step = console["completed"]
+    if (type(console_step) is not int or console_step < 0
+            or 0 < console_step < resumed):
+        raise ValueError("Console updates roll back before the resumed task checkpoint")
+    rows = segment_rows(rows, resumed)
     train = [row for row in rows if "train_loss" in row]
-    completed = max(console["completed"], max((row["completed_update"] for row in train), default=0))
+    completed = max(resumed, console_step, max((row["completed_update"] for row in train), default=0))
     if completed > maximum:
         raise ValueError("Observed updates exceed the bound task run budget")
     declared = state.get("state", "prepared")
@@ -131,7 +154,8 @@ def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_up
     done = completed == maximum and (console["success"] or declared in ("complete", "completed"))
     status = (declared if declared in USER_STOP_STATES else
               "failed" if failed and not done else "completed" if done else
-              "finalizing" if completed == maximum else "running" if completed else "waiting")
+              "finalizing" if completed == maximum else
+              "resuming" if resumed and completed == resumed else "running" if completed else "waiting")
     stamped = [row for row in train if "timestamp_unix_s" in row]
     started = unix_time(state.get("started_utc"))
     elapsed_origin = "launcher_started_utc"
@@ -157,8 +181,10 @@ def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_up
             "generated_utc": datetime.fromtimestamp(now_s, timezone.utc).isoformat(),
             "run_timestamp": state["timestamp"], "run_directory": str(Path(state["run_directory"]).resolve()),
             "completed_optimizer_updates": completed, "max_optimizer_updates": maximum,
+            "resumed_task_step": resumed, "segment_completed_optimizer_updates": completed - resumed,
             "progress_fraction": completed / maximum, "elapsed_seconds": elapsed,
             "elapsed_origin": elapsed_origin if started is not None else None,
+            "elapsed_scope": "Current run segment only; previous segment elapsed time is not merged.",
             "latest_train_loss": train[-1]["train_loss"] if train else None,
             "latest_validation_loss": validation[-1]["val_loss"] if validation else None,
             "latest_train_loss_update": train[-1]["completed_update"] if train else None,
@@ -167,13 +193,16 @@ def make_progress(state, rows, console, *, now_s=None, eta_window=50, eta_min_up
             "estimated_remaining_seconds": remaining,
             "estimated_finish_utc": datetime.fromtimestamp(now_s + remaining, timezone.utc).isoformat()
                 if remaining is not None and status == "running" else None,
-            "eta_scope": "Recent post-warmup TRAIN metric-row wall time (W&B may merge same-step evaluation into the row), including observed validation/checkpoint pauses; future pauses and final save may differ.",
+            "eta_scope": "Current run segment's recent post-warmup TRAIN metric-row wall time (W&B may merge same-step evaluation into the row), including observed validation/checkpoint pauses; previous segment timestamps are not merged and future pauses/final save may differ.",
             "eta_wait_reason": None if remaining is not None else
                 "training_switched" if status == "switched" else
                 "training_stopped_by_user" if status == "stopped_by_user" else
                 "training_failed" if status == "failed" else
                 "awaiting_training_finalization" if status == "finalizing" else
+                "waiting_for_resumed_training_updates" if status == "resuming" else
                 "training_not_started" if completed == 0 else "waiting_for_post_warmup_timestamps",
+            "loss_history_scope": "Current run segment only; earlier CSV and offline W&B files remain separate.",
+            "previous_loss_history_merged": False,
             "loss_semantics": "Production logged rank-mean loss at optimizer update; with accumulation it is the last microbatch, not an average over every accumulated sample.",
             "step_mapping": "completed_update = W&B zero-based _step + 1; console shows completed updates",
             "validation_step_semantics": "Production validation occurs after update 1, 1+validation_steps, ... and the final update.",
@@ -219,16 +248,22 @@ def refresh(args):
     if not Path(state["run_directory"]).is_absolute():
         raise ValueError("run_directory must be absolute")
     marker = args.output_dir / "progress.json"
+    previous = None
     if marker.is_file():
         previous = json.loads(marker.read_text())
         if any(previous.get(key) != value for key, value in run.items()):
             raise ValueError("Output already belongs to a different training run")
+        if previous.get("resumed_task_step", 0) != state.get("resumed_task_step", 0):
+            raise ValueError("Output resume checkpoint differs from the bound segment")
     sources = sorted((Path(run["run_directory"]) / "wandb").glob("offline-run-*/*.wandb"))
     if len(sources) > 1:
         raise ValueError("Expected at most one local W&B file for a fresh task run")
     rows, metadata = read_history(sources[0]) if sources else ([], {"source": None})
     progress = make_progress(state, rows, console_snapshot(state["log"]), eta_window=args.eta_window,
                              eta_min_updates=args.eta_min_updates)
+    if previous is not None and progress["completed_optimizer_updates"] < previous["completed_optimizer_updates"]:
+        raise ValueError("Observed progress rolls back within the bound run segment")
+    rows = segment_rows(rows, progress["resumed_task_step"])
     progress.update(metadata)
     curve.atomic_text(args.output_dir / "losses.csv", curve.csv_text(CSV_FIELDS, rows))
     if not args.no_plot:

@@ -185,3 +185,39 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint38k.sh status
 当前38k的本机查看快照单独存放于
 `/home/zxc/CVPR_Evaluation_runtime/reports/task50_handover_joint38000_current`；
 它是带复制时间和SHA的快照，持续更新的原始CSV、PNG和进度在A100新准备目录下。
+
+## 融合AdamW：验证后受控切换
+
+用户授权先验证数值和显存，确认通过后保留当前进度切换。当前运行继续使用原普通AdamW，
+不得因为合成小测试通过就直接重启或修改参数。新增工具不会默认停止任何训练。
+
+`benchmark_fused_adamw.py`已经完成单张A100、有限显存的优化器测试：
+五组LR、原betas/eps/weight decay、非零动量和逐参数计数、多步含无梯度参数均通过。
+两分支合计PyTorch峰值242.21MiB；97步后最大参数差异5.96e-8，计数精确相同。
+1.34ms到0.68ms仅为7.28M元素的小样本优化器测量，且与原训练并发，不能当作整网提速。
+
+切换使用以下独立路径，不覆盖正在运行的196ec73源码或旧run：
+
+1. `checkpoint_pause_guard.py`先只读绑定八个worker的PID及启动身份，默认dry-run。
+   `watch --execute`等待原任务自然保存4000步；完整文件和保存完成标记通过后短暂停住八rank。
+   两次只读栈检查必须证明尚未提交4001步，未知或错过边界会自动恢复原训练。
+   独立watchdog租约到期、控制器退出或检查失败都会放行，工具自身不发送终止信号。
+2. 只有有效`held_verified`证据再次核验后才能停止该原任务，并硬链接保护完整checkpoint。
+   不删除旧记录，不将未完成保存或旧40k试跑的权重用于这次恢复。
+3. `validate_task_fused_step.py`在GPU释放后使用真实batch4和完整模型/Adam状态，
+   双后端预热后每次重新加载相同checkpoint和RNG，交替执行对照。
+   比较全部梯度、参数、Adam两阶状态及逐参数计数，记录整步显存和有限性。
+   这是单GPU对照，八卡梯度平均、数据恢复和实际吞吐另行验收。
+4. `a100_task_fused_resume.py prepare`只接受绑定相同模型、优化器、scheduler和配置SHA的
+   完整GPU验收与小测试报告；`run`恢复到新日志段，任务总预算仍20k，保存仍每4k。
+   首先核对实际模型、全部Adam状态、scheduler及八rank主进程RNG，然后才选择fused执行。
+   计数不重置，学习率不重启warmup，DINO、三专家反传、batch32及有限性检查保持原配方。
+
+恢复修正了实际发现的两个问题：本任务prepared loader实际每rank431批/轮，原通用估算为432；
+普通checkpoint又没有保存独立shuffle生成器、worker增强随机流和预取队列。
+`replay_task_data.py`因此从原始seed和第0轮开始CPU重放全部已消费批，保留原四worker、
+预取设置和同一个iterator，并在重放后恢复模型侧CPU/CUDA RNG，避免只跳索引改变后续增强。
+这段重放耗时单独显示，新段监控以恢复步数为下限，旧CSV不混入新段ETA。
+
+切换后还需八卡第2、20次连续更新检查及实际墙钟耗时对照。有限数值容差通过不代表逐位一致，
+也不替代完整20k训练和后续物理验收；截至本节准备记录，完整GPU对照与实际切换尚未执行。

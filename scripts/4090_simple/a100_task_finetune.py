@@ -327,15 +327,10 @@ def verify_data_check(root, plan, *, require_launch_gate=True):
     return report
 
 
-def train(root):
+def task_trainer_class(plan):
+    """Reuse the accepted task dataset/evaluation contract in fresh or resume runs."""
     import torch
     from psi.trainers.posttrain import PosttrainTrainer
-    config, plan = load_prepared(root)
-    if not (Path(root) / "data_check.json").is_file():
-        raise ValueError("Run the actual CPU data check before launching workers")
-    verify_data_check(root, plan)
-    if int(os.environ.get("WORLD_SIZE", "0")) != 8:
-        raise ValueError("This configuration requires exactly eight GPU ranks")
 
     class TaskTrainer(PosttrainTrainer):
         def create_datasets(self):
@@ -399,9 +394,22 @@ def train(root):
             with shared.isolated_rng(self.cfg.seed + 100000 + self.accelerator.process_index, self.device):
                 return super().evaluate()
 
+    return TaskTrainer
+
+
+def train(root):
+    config, plan = load_prepared(root)
+    if not (Path(root) / "data_check.json").is_file():
+        raise ValueError("Run the actual CPU data check before launching workers")
+    verify_data_check(root, plan)
+    if int(os.environ.get("WORLD_SIZE", "0")) != 8:
+        raise ValueError("This configuration requires exactly eight GPU ranks")
+    TaskTrainer = task_trainer_class(plan)
+
     class Factory:
         @staticmethod
         def instantiate(cfg, device_id):
+            import torch
             return TaskTrainer(cfg, torch.device(f"cuda:{device_id}"))
 
     spec = importlib.util.spec_from_file_location("task_finetune_production", REPO / "VLMExpert/scripts/train.py")

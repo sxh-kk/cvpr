@@ -51,6 +51,7 @@ def overrides(source_run, dataset_root, dino_root, output, *, max_steps=2000, wa
         "train.name": "posttrain", "train.output_dir": str(output / "training"),
         "train.resume_from_checkpoint": None, "train.skip_resumed_steps": False,
         "train.lora": False, "train.data_parallel": "ddp", "train.mixed_precision": "bf16",
+        "train.deepspeed_config": str(REPO / "VLMExpert/scripts/deepspeed/zero3.json"),
         "train.train_batch_size": 4, "train.val_batch_size": 1,
         "train.gradient_accumulation_steps": 1, "train.num_workers": 4,
         "train.dataloader_start_method": "spawn", "train.training_safety_checks": True,
@@ -294,7 +295,7 @@ def bounds_coverage(config):
     return report
 
 
-def verify_data_check(root, plan):
+def verify_data_check(root, plan, *, require_launch_gate=True):
     root = Path(root)
     report = read_json(root / "data_check.json")
     ready = Path(plan["dataset_root"]) / "ADAPTATION_READY.json"
@@ -305,9 +306,10 @@ def verify_data_check(root, plan):
         stat = Path(path).stat()
         if (stat.st_size, stat.st_mtime_ns) != (identity["bytes"], identity["mtime_ns"]):
             raise ValueError(f"CPU-accepted artifact changed: {path}")
-    gate = read_json(root / "launch_gate.json")
-    if gate["data_check_sha256"] != shared.sha256(root / "data_check.json"):
-        raise ValueError("CPU data acceptance changed after launch")
+    if require_launch_gate:
+        gate = read_json(root / "launch_gate.json")
+        if gate["data_check_sha256"] != shared.sha256(root / "data_check.json"):
+            raise ValueError("CPU data acceptance changed after launch")
     return report
 
 
@@ -403,8 +405,13 @@ def run(root):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if (root / "training_state.json").exists():
             raise ValueError("A run was already launched here; preserve it and prepare a new directory")
-        check(root)
         config, plan = load_prepared(root)
+        if (root / "data_check.json").exists():
+            # Rebind accepted bytes; do not decode or numerically revalidate
+            # already accepted histories, future windows, or DINO features.
+            verify_data_check(root, plan, require_launch_gate=False)
+        else:
+            check(root)
         if shared.sha256(plan["source_checkpoint"]) != plan["source_checkpoint_sha256"]:
             raise ValueError("40k model bytes changed before launch")
         shared.write_json(root / "launch_gate.json", {"data_check_sha256": shared.sha256(root / "data_check.json"),
@@ -427,7 +434,13 @@ def run(root):
         # saved configuration under a short-lived eight-rank naming environment.
         naming = dict(env, WORLD_SIZE="8", RANK="0", LOCAL_RANK="0")
         command = [sys.executable, str(Path(__file__).resolve()), "name", "--prepared", str(root)]
-        named = subprocess.check_output(command, env=naming, cwd=REPO / "VLMExpert", text=True)
+        naming_result = subprocess.run(command, env=naming, cwd=REPO / "VLMExpert", text=True,
+                                       capture_output=True, check=False)
+        (root / "run_name.log").write_text(naming_result.stdout + naming_result.stderr)
+        if naming_result.returncode:
+            raise RuntimeError("Task run naming failed; see run_name.log: " +
+                               (naming_result.stdout + naming_result.stderr)[-2000:])
+        named = naming_result.stdout
         state["run_directory"] = named.strip().splitlines()[-1]
         state_path = root / "training_state.json"
         with (root / "train.log").open("x") as log:

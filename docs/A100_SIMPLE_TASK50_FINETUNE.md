@@ -65,6 +65,8 @@ bash VLMExpert/scripts/train/psi0/finetune-handover-task50-joint40k.sh run
 `prepare`生成可复现argv/配置/来源；`check`实际读取DINO和LeRobot样本、检查关节顺序、真实历史及完整未来；
 `run`重核文件及GPU空闲后启动，不停止其他训练。已有目录不重复启动，可用`TASK50_RUN_DIR`指定新目录。
 旧UnifoLM后训练脚本默认新建动作头，不应用于本任务。
+已接受的CPU数据检查仅重绑文件身份，不重复解码或数值验收；父进程和八卡worker使用同一绝对配置路径，
+避免工作目录不同使未使用的DeepSpeed配置字段也产生不一致。首次命名失败发生在创建worker之前，0更新记录保留。
 
 ## 损失和剩余时间
 

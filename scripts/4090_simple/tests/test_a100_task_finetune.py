@@ -26,6 +26,11 @@ class TaskConfigurationTests(unittest.TestCase):
         self.assertNotIn("model.action_architecture", values)
         self.assertNotIn("data.transform.repack.action_keys", values)
         self.assertNotIn("data.transform.field.action_min", values)
+        # This otherwise-unused DDP field is still serialized and compared by
+        # parent/worker parsers; a relative path changes with their different cwd.
+        path = Path(values["train.deepspeed_config"])
+        self.assertTrue(path.is_absolute())
+        self.assertTrue(path.is_file())
 
     def test_five_small_group_learning_rates_are_explicit(self):
         values = task.overrides("/source", "/data", "/dino", "/output")
@@ -77,6 +82,9 @@ class TaskConfigurationTests(unittest.TestCase):
                 "data_check_sha256": task.shared.sha256(root / "data_check.json")})
             plan = {"dataset_root": str(data)}
             self.assertEqual(task.verify_data_check(root, plan)["status"], "cpu_data_check_passed")
+            (root / "launch_gate.json").unlink()
+            self.assertEqual(task.verify_data_check(root, plan, require_launch_gate=False)["status"],
+                             "cpu_data_check_passed")
             payload.write_bytes(b"changed_payload")
             with self.assertRaisesRegex(ValueError, "artifact changed"):
                 task.verify_data_check(root, plan)

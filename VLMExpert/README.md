@@ -1,5 +1,8 @@
 ## 本仓库扩展：双来源 Action Expert
 
+A100的Handover任务适配见[40k联合权重继承配方](../docs/A100_SIMPLE_TASK50_FINETUNE.md)：
+保留已训练动作头、VLM及Motion，八卡batch32，沿用原归一化，记录本地损失和实测ETA。
+
 `action_architecture="dual_source_v1"` 实现双来源串行结构。当前 UnifoLM 配方设置
 `tune_vlm=True, tune_motion=True`，联合更新 VLM、MotionExpert 与新 action expert；DINO 保持冻结。
 两套 expert 也可分别通过 `tune_vlm=False`（不设置 `tune_mm_*`）、`tune_motion=False` 固定为 `eval/no_grad`。

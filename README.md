@@ -2,6 +2,8 @@
 
 MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert同步官方Ψ₀工程。
 
+A100任务适配见[Handover50条、40k三专家联合微调及损失/ETA记录](docs/A100_SIMPLE_TASK50_FINETUNE.md)。
+
 | 模块 | 当前用途 | 说明 |
 | --- | --- | --- |
 | MotionExpert | 5Hz历史5帧＋当前帧，预测未来5帧；一步完整11个hidden作为运动先验，可反传 | [接口与训练](MotionExpert/README.md) |

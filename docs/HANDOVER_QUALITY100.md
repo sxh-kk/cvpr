@@ -376,3 +376,92 @@ Action、语言骨干、视觉塔、projector和Motion五组梯度均有限且�
 A100原作业的只读进度在北京时间04:48:31已记录`completed`、20,000/20,000次更新，
 收据为`a100_readonly_progress_collection_stop_20261023.json`。本次未操作远端训练；
 这只确认原作业进度状态，不替代最终checkpoint保存、导出或20k权重物理测评验收。
+
+## Ψ₀频率与最初测评复核
+
+本节核对本机保留的官方Ψ₀固定版本`cda3fdfafe47cb6fa75400d013de1bd36e3cea05`，
+不把不同采集配方混为同一数据协议。Ψ₀模型没有一律30Hz的架构要求：
+官方`SonicRepackTransform.delta_timestamps(fps)`按数据集`meta.fps`使用`t/fps`查询动作。
+`action_chunk_size=30`表示30个动作，30Hz约覆盖1秒，50Hz约覆盖0.6秒，
+不能把30步等同于30Hz，也不能只修改fps标签而保持物理时序不变。
+30Hz数据/动作时间基准也不要求VLM每秒做30次完整推理；一次预测的chunk长度与再次查询前的执行步数分开配置。
+见[官方时间查询实现](https://github.com/physical-superintelligence-lab/Psi0/blob/cda3fdfafe47cb6fa75400d013de1bd36e3cea05/src/psi/config/transform_psi0_sonic.py#L60)。
+
+官方SONIC v1.1真机采集配方明确使用`sonic_v1_1`和30Hz数据导出；
+`raw_sonic_to_psi_lerobot.py`保留记录的64维`action.motion_token`和14维手命令、具名43维实测状态，
+逐帧复制视频并写`i/30`时间戳。它没有从实测姿态反推新token，也没有执行50→30Hz物理重采。
+因此该固定30Hz转换器不能直接接任意50Hz数据并宣称时序已适配。
+见[官方v1.1采集配置](https://github.com/physical-superintelligence-lab/Psi0/blob/cda3fdfafe47cb6fa75400d013de1bd36e3cea05/real/SONIC/launch_data_collection_dex1.py#L27)
+与[原始数据转换器](https://github.com/physical-superintelligence-lab/Psi0/blob/cda3fdfafe47cb6fa75400d013de1bd36e3cea05/scripts/data/raw_sonic_to_psi_lerobot.py#L100)。
+
+官方SIMPLE是另一条链路：后处理默认50Hz、可配置`skip/downsample`，图像和动作使用同一抽样索引，
+评测读取数据集`meta.fps`设置步进/渲染频率。该版本名字含SONIC的后处理实际构造36维WBC动作，
+不是SONIC v1.1 token迁移算法；本机原Handover replay/eval元数据也为50Hz。
+见[官方SIMPLE后处理](https://github.com/physical-superintelligence-lab/SIMPLE/blob/803db7e4c1f0fef11008c9480ee75b2f9cc0ca36/scripts/postprocess_psi0_sonic.py#L203)
+和[评测入口](https://github.com/physical-superintelligence-lab/SIMPLE/blob/803db7e4c1f0fef11008c9480ee75b2f9cc0ca36/src/simple/cli/eval.py)。
+
+我们新增的`MotionHistoryIndex`才硬性要求30Hz RGB/DINO源，从中取过去1秒至当前的6个5Hz时刻。
+新100条采用30Hz高层命令保持、50Hz SONIC解码和200Hz物理，并实际重采，符合当前联合checkpoint时间协议。
+未来若改50Hz，须同步处理数据/动作时间语义和Motion历史读取，并重新训练及验收。
+
+最初task6000五场景的直接失败证据是：39虽抬升22cm、交接并碰篮，末尾仍有左手接触；
+65/80/92/94仅抬升1.38–3.13mm，未形成初始稳定抓取。五条均有限、未跌倒。
+因此1/5是较弱接触flag，完整释放没有一条可确认成功；其中四条失败发生在最初抓取阶段。
+已有证据支持以下排查顺序，但未证明每项造成多少成功率损失：
+
+- 旧TRAIN45只有24组动作祖先，source0家族占52.74%窗口，且首秒动作命令没有进入监督，覆盖问题明确存在。
+- 首次模型预测前的PD暖机已使骨盆下降2.14–3.12cm，存在训练/部署初态差异。
+- 固定40窗VAL从1001步1.24351上升到6001步1.51334，是泛化退化警讯；缺少多checkpoint同场景物理对照，不能单凭它断言过拟合导致失败。
+- 50→30Hz命令保持及手部控制差异真实存在，但只改执行前缀、live暖机、0.7Nm手限扭矩、FSQ投影的八次模型诊断均未抓起。
+
+source0在50/30Hz及两种手限扭矩的四次教师重放均通过完整物理门槛，
+所以不能把低成功率直接归为“30Hz不支持”或“SONIC v1.1普遍不可执行”。
+当前记录也不足以细分接近位置、逐指抓持力和视觉域差的各自贡献。
+本轮没有重新执行旧物理实验；证据沿用`failure_stage_audit.json`、`initial_action_coverage_audit_v1.json`、
+`source_control_comparison_audit.json`及`model_ablation_audit.json`。
+
+## 4090到A100的数据上行
+
+用户已授权上传固定验收的混合100条数据及DINO缓存。接收目标使用新目录：
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/handover_quality100_20261023`，
+先传到同名`.incoming`目录；既有50条数据、训练配置和checkpoint不覆盖、不重启。
+只有最终目录的`A100_DATASET_READY.json`存在且绑定通过，才表示本次迁移检查完成，
+不能把目录或原4090就绪文件存在当作A100迁移已完成。
+
+本次943项载荷文件合计12,843,060,775字节，包括完整`packed-quality100-v1/`、
+`dino-quality100-v1/`、原38k归一化统计、验收溯源和冻结CPU reader源码。
+不上传浏览器有损播放副本，也不重复上传原始采集队列的全部重放/失败大文件。
+本机`a100-transfer-v1/TRANSFER_MANIFEST.json` SHA为
+`29b39432955af7f53443d162ccfc4136749be6cfaac9a7cd8acd6f3593332e9c`。
+400项video/parquet/features/frames大文件沿用已验收收据中的SHA，并核对源size/纳秒mtime未变；
+其余元数据生成本次迁移SHA，接收端对全部943项实际读取计算SHA。
+这属于新传输的字节校验，不重复物理或数据数值验收。
+
+DINO原manifest绑定了4090绝对数据路径，不能只换目录后宣称可直接读取。
+接收端保持manifest和episode收据字节不变，建立本机兼容别名：
+`/var/tmp/cvpr-evaluation-zxc-handover-quality100-20261022`指向上述A100新目录。
+生产reader的`resolve()`因此仍能校验实际数据根；所需纳秒mtime仅在对应SHA通过后恢复。
+原位置若已存在则报错保留，不覆盖其它数据或改写原DINO身份。
+
+迁移校验使用A100现有Conda环境
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/envs/task-finetune-py311-cu126`，
+已预先只读确认Python3.11.15、NumPy1.26.4、Pillow11.3.0及图像profile匹配。
+全量SHA通过后，使用随包冻结的生产`dino_cache.py`读取全部100个episode及各首个合法`[6,5,1024]`历史，
+该CPU路径不导入Torch、不使用GPU。它不等于完整LeRobot训练batch、八卡DDP或新模型效果验收。
+失败只记录到本次已确认拥有的新目录，缺少READY时不自动重跑或标记成功。
+2026-10-23本次迁移已实际完成。本机`a100-transfer-v1/progress.json`为
+`A100_dataset_transfer_ready`，远端943项SHA全部通过，100个cache episode及各首个合法历史均读取成功。
+纳秒mtime原样保留，本次无需恢复任何文件mtime；Torch未导入、GPU未使用、训练未启动。
+最终`A100_DATASET_READY.json`已从远端原字节取回，SHA为
+`f73e6aac1a6a4a41798eb11f2ea5f77851cedfc101608dcb740e651e45445548`。
+
+A100实际读取路径：
+
+- 数据：`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/handover_quality100_20261023/packed-quality100-v1/train`。
+- DINO：`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/handover_quality100_20261023/dino-quality100-v1`。
+- 原统计：`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/handover_quality100_20261023/provenance/dataset_statistics.json`，
+  SHA仍为`931f2b536b2fd47e8d0964ad966202ccbda852d05ea88074be321987200a6ac4`。
+- 迁移就绪记录：上述根目录`A100_DATASET_READY.json`；本机副本在`a100-transfer-v1/`。
+
+本机已验收的混合100条选择没有替换；接收端检查范围是迁移字节及生产cache reader可读性，
+没有重新跑原物理/数据数值/GPU验收，也没有宣称新A100完整训练batch、八卡DDP或新模型物理测评通过。

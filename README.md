@@ -10,6 +10,8 @@ A100任务适配见[Handover50条、38k三专家初始化后微调20k步及损�
 [本次测评记录](docs/A100_SIMPLE_TASK50_FINETUNE.md#任务6000步导出与本机handover物理测评)。
 后续来源审计、抓取失败定位、同钟教师重放及100条新采集的实际进度见
 [Handover数据质量与重新采集](docs/HANDOVER_QUALITY100.md)。
+扩充原始动作来源、连续场景随机化及在线动作适配的新一轮重采入口见
+[随机化100条采集与严格准入](scripts/4090_simple/README_handover_random100.md)；候选和开发试采不等于验收完成。
 
 | 模块 | 当前用途 | 说明 |
 | --- | --- | --- |

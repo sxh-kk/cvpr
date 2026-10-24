@@ -37,6 +37,7 @@
 7. `diversity_handover_random100.py`：完整注册表的多样性验收和替换建议。
 8. `pack_handover_random100.py`：只打包全部通过的注册表，沿用原 checkpoint 归一化，不重新拟合。
 9. `verify_handover_random100.py`：真实 DINO 全量核对及生产数据读取器、RGB/action/state/history/collator 验证。
+10. `finalize_handover_random100.py prepare/upload`：完整采集、打包、DINO及本地生产读取均通过后冻结传输清单；上传后核验远端字节、显式重定位DINO metadata，并运行实际A100 CPU读取，全部通过才写独立 `RELEASE_READY.json`。
 
 各入口使用 `--help` 查看参数。默认资源根为 `/home/zxc/CVPR_Evaluation_runtime/resources`；本次运行根为 `/home/zxc/CVPR_Evaluation_runtime/handover_random100_20261024`，冻结标准见其中的 `REBUILD_REQUIREMENTS.json`。正式队列中的实际接纳注册表、独立验收和多样性报告共同决定进度；开发 pilot 不自动计数。
 

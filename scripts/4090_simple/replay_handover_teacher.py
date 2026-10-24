@@ -268,7 +268,13 @@ def read_candidate(plan_path, candidate_id):
     """Bind one immutable proposal, never treating the plan as acceptance."""
     plan_path = Path(plan_path).resolve(strict=True)
     plan = json.loads(plan_path.read_text())
-    if plan.get("contract") != "cvpr-handover-quality100-candidate-plan-v1":
+    supplement = plan.get("contract") == "cvpr-handover-train-supplement-plan-v1"
+    if supplement:
+        # A separately versioned, TRAIN-only small-batch protocol. Its source
+        # bindings and expanded reset bounds do not relax the old100 contract.
+        from collect_handover_supplement import load_plan
+        plan = load_plan(plan_path)
+    elif plan.get("contract") != "cvpr-handover-quality100-candidate-plan-v1":
         raise ValueError("Unrecognized candidate plan contract")
     matches = [item for item in plan["candidates"] if item["candidate_id"] == candidate_id]
     if len(matches) != 1:
@@ -290,8 +296,9 @@ def read_candidate(plan_path, candidate_id):
     for role, delta in deltas.items():
         xy = vector(delta["xy_delta_m"], 2, role + " XY delta")
         yaw = delta["world_z_yaw_delta_rad"]
+        xy_bound, yaw_bound = (.03, .10) if supplement else (.01, .05)
         if (not isinstance(yaw, (int, float)) or not math.isfinite(yaw)
-                or np.max(np.abs(xy)) > .01 + 1e-12 or abs(yaw) > .05 + 1e-12):
+                or np.max(np.abs(xy)) > xy_bound + 1e-12 or abs(yaw) > yaw_bound + 1e-12):
             raise ValueError("Candidate initial pose proposal exceeds registered small bounds")
     return {"plan_path": str(plan_path), "plan_sha256": file_sha256(plan_path),
         "candidate_id": candidate_id, "candidate_spec_sha256": candidate["candidate_spec_sha256"],

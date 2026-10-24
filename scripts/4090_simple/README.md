@@ -312,3 +312,19 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 不继承前一次本地300步模型或optimizer。实际两步GPU资格、完整300步及独立CPU审计通过；
 三初态物理结果为原source4/8成功、新source9失败，总计2/3，细节与追溯限制见LiftBoxHold记录。
 `compare_liftbox_eval.py`按准备记录核对TEST9，并要求source4/8/9前后结果齐全，不能只报告成功初态。
+
+
+## 停止采集后的已有数据精选合并
+
+`select_handover_curated.py` 仅读取已验收记录：保留全部新14条，原100先按相同的
+真实完整碰撞投影final50门筛选，再按质量优先和实际运动近重复去重；不启动仿真。
+`pack_handover_curated.py` 创建可变数量的独立LeRobot包，新视频无损编码、旧视频
+原字节复用，只重排旧Parquet的三项索引，38k统计和动作标签保持。
+`curate_handover_dino_cache.py` 将已真实提取的新特征与旧特征显式重编号、绑定新视频和元数据，
+保留原manifest/receipt，复制数组字节；`verify_handover_curated.py` 验证真实DINO、
+生产Dataset/MotionHistoryIndex/collator和所有标签/history/future。它们使用独立curated合同，
+不放宽原exact100/至少50来源工具。
+
+本次实例目录：`/home/zxc/CVPR_Evaluation_runtime/handover_curated_merge_20261024`。
+筛选结果28条（新14+旧14），原100中25条满足更严格完整投影门，另去11条近重复。
+正式可用状态以该目录的`CURATED_DATASET_READY.json`与生产读取记录为准；不自动训练或同步A100。

@@ -18,19 +18,21 @@ PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 *{box-sizing:border-box}body{margin:0;background:#080e15;color:#edf2f8;font:16px system-ui}
 header{height:56px;display:flex;align-items:center;gap:22px;padding:0 24px;background:#142130}
 h1{font-size:18px;margin:0}#state{color:#a5d7b9}a{color:#b2d5ff;margin-left:auto}
-main{height:calc(100vh - 104px);display:grid;place-items:center}img{width:100%;height:100%;object-fit:contain}
-footer{height:48px;padding:12px 24px;color:#aebdcc;background:#142130}#error{color:#ffb9ac}
+main{height:calc(100vh - 136px);display:grid;place-items:center}img{width:100%;height:100%;object-fit:contain}
+footer{height:80px;padding:10px 24px;color:#aebdcc;background:#142130}#error{color:#ffb9ac}
 button{font:inherit;padding:5px 12px;color:#eaf3ff;background:#294260;border:0;border-radius:5px}
 </style><header><h1>4090 · SIMPLE 实时相机</h1><span id="state">连接中</span>
 <button id="full">全屏画面</button><a href="http://127.0.0.1:43100/" target="_blank">打开采集控制面板</a></header>
 <main><img src="/stream.mjpg" alt="G1真实仿真相机画面"></main>
-<footer>X 标定　Y 跟随／暂停　A 录制／保存　左右扳机抓握　<span id="error"></span></footer>
+<footer>X 标定　Y 跟随／暂停　A 录制／保存　左右前扳机或侧握键抓握　<span id="error"></span><p id="grasp">等待抓握反馈</p></footer>
 <script>
 document.querySelector('#full').onclick=()=>document.documentElement.requestFullscreen();
 async function refresh(){try{const response=await fetch('/status.json',{cache:'no-store'});if(!response.ok)throw Error('采集服务未连接');const v=await response.json();const s=v.status;
 const labels={paused:'已暂停',following:'正在跟随',saving:'已暂停，正在保存',stopped:'采集已结束'};
 const phase=s.recording==='recording'?'正在录制':s.recording==='warmup'?'保持姿势一秒':labels[s.status]??'等待采集状态';
 document.querySelector('#state').textContent=phase+' · '+(s.tracking?.valid?'追踪正常':'等待有效追踪')+' · '+(s.calibrated?'已标定':'需要标定');
+const h=s.hand_control;const pct=x=>Number.isFinite(x)?Math.round(x*100)+'%':'未下发';
+document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
 document.querySelector('#error').textContent=s.error??'';}catch(e){document.querySelector('#state').textContent='采集服务未连接';}}
 refresh();setInterval(refresh,500);
 </script></html>'''

@@ -25,6 +25,6 @@ while [[ $# -gt 0 ]]; do
 done
 cd "$task_repo"
 "$task_python" scripts/4090_simple/pico_simple_teleop.py \
-  --output "$task_output" --headset-video "${task_arguments[@]}"
+  --output "$task_output" "${task_arguments[@]}"
 # Run expensive RTX only after the live collector exits, preserving real time.
 "$task_python" scripts/4090_simple/finish_pico_session.py "$task_output"

@@ -364,5 +364,7 @@ PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoC
 不额外订阅PICO。双目 H.264 可另回传指定 PICO，实际头显显示仍待验收。
 设备设置、按键与校准、实时失败处理、独立数据验收
 及实际验证边界见[采集说明](../../docs/PICO_SIMPLE_TELEOP.md)。
+手指使用显式 SONIC v1.1 middle-close 对握姿态，前扳机或侧握键控制；界面区分原始输入、
+下发目标和实际关节闭合程度。闭合不等同于成功抓取，仍须检查实际接触和任务结果。
 `audit_pico_teleop_episode.py EPISODE_DIR` 独立审计原始录制；回放／固定姿态诊断
 不增加人类示范数量，通过审计后仍需特征与训练协议打包。

@@ -39,7 +39,8 @@ button:hover{background:#3b516b}button:disabled{opacity:.5;cursor:wait}.primary{
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}details{margin-top:20px}#phase{font-weight:600}
 </style><h1>PICO 遥操作采集</h1><div class="muted">当前状态：<span id="phase">等待电脑状态</span></div>
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
-<p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右扳机抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
+<p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
+<p id="grasp" role="status">等待抓握反馈</p>
 <div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" alt="当前仿真相机画面" hidden></div>
 <div class="bar">
 <button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>
@@ -56,6 +57,8 @@ async function refresh(){try{
  if(s.recording==='warmup')phase='请保持姿势，正在记录起始状态';
  else if(s.recording==='recording')phase='正在录制';
  document.querySelector('#phase').textContent=labels[phase]??phase;
+ const h=s.hand_control;const pct=x=>Number.isFinite(x)?Math.round(x*100)+'%':'未下发';
+ document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
  document.querySelector('#details').textContent=JSON.stringify(s,null,2);
  const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
  if(v.image_available&&v.image_version!==version){version=v.image_version;camera.src='/latest.jpg?v='+version;camera.hidden=false;document.querySelector('#placeholder').hidden=true;}

@@ -174,6 +174,7 @@ class SonicV11OnnxController:
         self._body_target = None
         self.decoder_calls = 0
         self.clipped_torque_elements = 0
+        self._pd_binding = None
 
     def hold(self, observation):
         state = dict(zip(observation["joint_names"], observation["joint_qpos"]))
@@ -232,23 +233,92 @@ class SonicV11OnnxController:
                 self._body_target = body_targets(np.asarray(raw_action)[0])
                 self._last_raw_action = np.asarray(raw_action[0], dtype=np.float32).copy()
                 self.decoder_calls += 1
-        # G1Sonic body and hand actuator indices may differ from both training
-        # and policy order. Resolve their actual transmission joint by name.
-        targets = dict(zip(BODY_JOINT_NAMES, self._body_target))
-        targets.update(hand_targets)
-        gains = dict(zip(BODY_JOINT_NAMES, zip(self.body_kp, self.body_kd)))
-        gains.update({name: (5.0 if "thumb" in name else 2.5, 1.0) for name in SIMPLE_HAND_JOINT_NAMES})
+        self._apply_named_pd(model, data, hand_targets)
+
+    def _pd_indices(self, model, data, names):
+        """Cache named indexes, while detecting in-place model structure edits.
+
+        Gains, target values, control limits and hand profiles deliberately do
+        not belong in this cache. Revalidate changed transmission/gear/name or
+        coordinate addresses before writing a torque to the corresponding data.
+        """
+        fields = ("actuator_trntype", "actuator_trnid", "actuator_gear",
+                  "jnt_qposadr", "jnt_dofadr", "name_jntadr")
+        binding = self._pd_binding
+        if (binding is not None and binding["model"] is model and binding["data"] is data
+                and binding["names"] == names and binding["model_names"] == model.names
+                and all(np.array_equal(getattr(model, field), binding[field]) for field in fields)):
+            return binding
+        import mujoco
+        self._pd_binding = None
+        requested = set(names)
         joint_to_actuator = {}
         for aid in range(model.nu):
             if model.actuator_trntype[aid] == mujoco.mjtTrn.mjTRN_JOINT:
                 jid = int(model.actuator_trnid[aid, 0])
                 name = model.joint(jid).name
-                if name in targets:
+                if name in requested:
                     if name in joint_to_actuator or not np.allclose(model.actuator_gear[aid], [1, 0, 0, 0, 0, 0]):
                         raise ValueError("SONIC adapter requires one unit-gear torque motor per named joint")
                     joint_to_actuator[name] = aid
-        if set(joint_to_actuator) != set(targets):
+        if set(joint_to_actuator) != requested:
             raise ValueError("SIMPLE model does not expose all 43 named SONIC torque actuators")
+        joints = [model.joint(name).id for name in names]
+        binding = {"model": model, "data": data, "names": names, "model_names": model.names,
+            "actuator": np.asarray([joint_to_actuator[name] for name in names], dtype=np.intp),
+            "qpos": np.asarray(model.jnt_qposadr[joints], dtype=np.intp).copy(),
+            "qvel": np.asarray(model.jnt_dofadr[joints], dtype=np.intp).copy(),
+            "mapping": joint_to_actuator,
+            "hand": np.asarray([name in SIMPLE_HAND_JOINT_NAMES for name in names]),
+            "hand_cap": np.asarray([2.45 if "thumb_0" in name else .7 for name in names])}
+        if (np.any(binding["qpos"] < 0) or np.any(binding["qpos"] >= model.nq)
+                or np.any(binding["qvel"] < 0) or np.any(binding["qvel"] >= model.nv)):
+            raise ValueError("SONIC named joint coordinate address lies outside the physical model")
+        binding.update({field: np.asarray(getattr(model, field)).copy() for field in fields})
+        self._pd_binding = binding
+        return binding
+
+    def _apply_named_pd(self, model, data, hand_targets):
+        # Preserve scalar target/gain semantics and the actual incoming named
+        # order. The fast path batches only independent per-joint arithmetic.
+        targets = dict(zip(BODY_JOINT_NAMES, self._body_target))
+        targets.update(hand_targets)
+        gains = dict(zip(BODY_JOINT_NAMES, zip(self.body_kp, self.body_kd)))
+        gains.update({name: (5.0 if "thumb" in name else 2.5, 1.0) for name in SIMPLE_HAND_JOINT_NAMES})
+        names = tuple(targets)
+        binding = self._pd_indices(model, data, names)
+        joint_to_actuator = binding["mapping"]
+        if not set(names).issubset(gains):
+            return self._apply_named_pd_scalar(model, data, targets, gains, joint_to_actuator)
+        target = np.asarray(list(targets.values()))
+        gain = np.asarray([gains[name] for name in names])
+        # Direct callers with unusual scalar types retain their original math;
+        # normal controller targets/gains are <=float64, matching MuJoCo mjtNum.
+        if (data.model is not model or target.dtype.kind not in "bifu"
+                or gain.dtype.kind not in "bifu" or target.dtype.itemsize > 8 or gain.dtype.itemsize > 8):
+            return self._apply_named_pd_scalar(model, data, targets, gains, joint_to_actuator)
+        target, gain = target.astype(np.float64, copy=False), gain.astype(np.float64, copy=False)
+        torque = gain[:, 0] * (target - data.qpos[binding["qpos"]]) - gain[:, 1] * data.qvel[binding["qvel"]]
+        if not np.isfinite(torque).all():
+            # No ctrl/count has been written. Re-run the original scalar order
+            # so a nonfinite later channel preserves the same failure prefix.
+            return self._apply_named_pd_scalar(model, data, targets, gains, joint_to_actuator)
+        actuator = binding["actuator"]
+        limited = model.actuator_ctrllimited[actuator].astype(bool)
+        lower = np.where(limited, model.actuator_ctrlrange[actuator, 0], -np.inf)
+        upper = np.where(limited, model.actuator_ctrlrange[actuator, 1], np.inf)
+        if self.hand_torque_profile == "recording_0p7_nm":
+            hand, cap = binding["hand"], binding["hand_cap"]
+            lower[hand] = np.maximum(lower[hand], -cap[hand])
+            upper[hand] = np.minimum(upper[hand], cap[hand])
+        clip = np.isfinite(lower) | np.isfinite(upper)
+        bounded = torque.copy()
+        bounded[clip] = np.clip(torque[clip], lower[clip], upper[clip])
+        self.clipped_torque_elements += int(np.count_nonzero(bounded != torque))
+        data.ctrl[actuator] = bounded
+
+    def _apply_named_pd_scalar(self, model, data, targets, gains, joint_to_actuator):
+        """Original ordered fallback for exceptional/nonfinite scalar inputs."""
         for name, target in targets.items():
             aid = joint_to_actuator[name]
             joint = data.joint(name)

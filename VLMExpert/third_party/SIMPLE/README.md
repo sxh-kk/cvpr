@@ -43,6 +43,13 @@ the pinned C++ gains. Optional `--pd-profile official_v1_1_ankle_pitch_1_5`
 checks the official README identity and applies its extra 1.5× ankle-pitch KP/KD
 scales; actual gains and all boundaries are recorded with each run.
 
+The 200 Hz PD hook caches validated named actuator/coordinate bindings and
+batches independent torque arithmetic. It checks model transmission, gear and
+coordinate structure for edits; current gains, limits and hand torque profile
+are still read on every call. Decoder samples, history, gains and torque limits
+are unchanged. This reduces repeated Python mapping work for live PICO capture;
+it does not by itself certify wall-clock real-time control or task success.
+
 The optional consumer flag `--warmup-control live_pose_sonic_v1_1` requires
 `--sync-observations`. After ten real proprioception samples it uses the fixed
 official encoder to hold the first live pose with the unchanged SONIC decoder

@@ -25,6 +25,7 @@ import numpy as np
 from pico_live_input import PicoReceiver, parse_tracking, validate_frame
 from pico_sonic_reference import PicoSonicReference, WRIST_NAMES, GEAR, body24_to_smpl
 from pico_teleop_recording import AsyncTrainingCapture, CommandLedger, RecordingState
+from pico_hand_control import named_hand_targets, profile_receipt, hand_feedback
 from replay_handover_teacher import (MODEL_HAND_NAMES, RENDERER_LINKS, applied_force_state,
     bound_calibration_assets, calibration_source_identities, capture_tick_index,
     file_sha256, json_text, write_json)
@@ -60,21 +61,6 @@ class RecordedInput:
             raise EOFError('Recorded input ended; refusing to repeat or extrapolate it')
         index = max(0, int(np.searchsorted(self.times, elapsed, side='right'))-1)
         return replace(self.frames[index], host_received_s=time.monotonic()-(elapsed-self.times[index]))
-
-
-def named_hand_targets(robot, frame):
-    """Declared analogue trigger profile, mapped by names and real joint limits."""
-    targets = {}
-    for side in ('left', 'right'):
-        config = getattr(robot.controller_cfg, side+'_eef_cfg')
-        amount = float(frame.inputs[side+'_trigger'])
-        if not np.isfinite(amount) or not 0 <= amount <= 1:
-            raise ValueError('Trigger outside [0,1]')
-        for name, opened, closed in zip(config.joint_names, config.init_qpos, config.close_qpos):
-            targets[name] = float(opened+(closed-opened)*amount)
-    if set(targets) != set(MODEL_HAND_NAMES):
-        raise ValueError('Hand profile does not supply exactly the fourteen named joints')
-    return targets
 
 
 def root_pose(model, data):
@@ -130,7 +116,8 @@ def source_code_identities():
     names = ('pico_simple_teleop.py','pico_live_input.py','pico_sonic_reference.py',
              'pico_teleop_recording.py','pico_teleop_ui.py','pico_deferred_capture.py',
              'render_deferred_pico.py','finish_pico_session.py','audit_pico_teleop_episode.py',
-             'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py')
+             'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py',
+             'pico_hand_control.py')
     directory = Path(__file__).resolve().parent
     return {name:file_sha256(directory/name) for name in names}
 
@@ -706,6 +693,7 @@ def run(args):
                 'sim_time_s':float(raw.mujoco.mjData.time)}
         raw._get_obs = selective_obs
         model, data = raw.mujoco.mjModel, raw.mujoco.mjData
+        result['hand_control_profile'] = profile_receipt()
         if not np.isclose(model.opt.timestep,.005) or raw.control_decimal != 4 or not np.array_equal(model.opt.gravity,[0,0,-9.81]):
             raise ValueError('Require true 200Hz gravity physics / 50Hz controller')
         result['initialization'] = initialize_pose(raw, DEFAULT_ANGLES, BODY_JOINT_NAMES)
@@ -782,6 +770,7 @@ def run(args):
         replay_calibrated = False
         started_wall = time.monotonic()
         command = None
+        hands = None
         last_step_wall = None
         quality = {'valid':False,'reasons':['waiting_for_input']}
         initial_z = float(raw.mujoco.mj_objects['target'].xpos[2])
@@ -983,7 +972,7 @@ def run(args):
                         initial_z = float(raw.mujoco.mj_objects['target'].xpos[2])
                         metadata = {**result,'episodes':[],
                             'human_demo_uuid':episode.human_demo_uuid,'pico_calibration':reference.calibration,
-                            'hand_profile':'simple_named_analogue_trigger_open_to_config_close',
+                            'hand_profile':result['hand_control_profile']['profile_id'],
                             'physics_seed':args.seed,'initial_target_z_m':initial_z,
                             'mujoco_object_body_names':{role:obj.name for role,obj in raw.mujoco.mj_objects.items()},
                             'object_body_names':{role:model.body(raw.mujoco.mj_objects[role].id).name
@@ -1061,6 +1050,7 @@ def run(args):
                     active_local = None
                     control_trace.write(json_text({'phase':'pico_follow','tick50':global_tick,
                         'source_sequence':frame.sequence,'source_device_timestamp_ns':frame.device_timestamp_ns,
+                        'source_inputs':dict(frame.inputs),'named_hand_targets':dict(hands),
                         'new_command30':new_command,'reference':reference_evidence if new_command else None,
                         'timing_s':{'reference_encode':encode_seconds,'environment_step':step_seconds,
                             'control_tick_before_trace':time.perf_counter()-control_tick_started},
@@ -1097,8 +1087,20 @@ def run(args):
             else:
                 wall_deadline=None; last_step_wall=None
                 time.sleep(.01)
+            feedback = None
+            feedback_error = None
+            if frame is not None:
+                try:
+                    feedback = hand_feedback(frame,
+                        {name:float(data.joint(name).qpos[0]) for name in MODEL_HAND_NAMES},
+                        hands,following=following)
+                except (ValueError, TypeError) as invalid_feedback:
+                    # Tracking/physics guards already reject invalid control.
+                    # Invalid telemetry must not shut down the operator UI.
+                    feedback_error = str(invalid_feedback)
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
+                'hand_control':feedback,'hand_feedback_error':feedback_error,
                 'recording':episode.status if episode else None,'episode_count':len(result['episodes']),
                 'sim_time_s':float(data.time),'decoder_calls':controller.decoder_calls,
                 'maximum_lag_s':max_lateness,'output':str(output),'accepted_new_dataset':False,
@@ -1117,7 +1119,16 @@ def run(args):
                         'raw_packet':frame.raw_payload})
                 result.update(status='following' if following else 'paused',decoder_calls=controller.decoder_calls,
                     simulated_control_ticks=global_tick,maximum_lag_s=max_lateness,last_error=error_text)
-                write_json(output/'result.json',result)
+                # The full receipt grows with saved/rejected episodes. Serialize
+                # it only while paused; real-time control writes a bounded status.
+                if following:
+                    write_json(output/'live_status.json',{
+                        'status':'following','decoder_calls':controller.decoder_calls,
+                        'simulated_control_ticks':global_tick,'maximum_lag_s':max_lateness,
+                        'last_error':error_text,'hand_control':feedback,
+                        'accepted_new_dataset':False})
+                else:
+                    write_json(output/'result.json',result)
                 last_result_write_wall = time.monotonic()
         result['status']='stopped'
     except BaseException as error:

@@ -85,18 +85,19 @@ class EntryGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'strictly increase'):
                 self.replay([raw_packet(t) for t in timestamps])
 
-    def test_trigger_mapping_uses_real_eef_cfg_and_named_hand_order(self):
+    def test_hand_mapping_uses_official_close_by_name_in_entry(self):
         names = entry.MODEL_HAND_NAMES
         config = lambda values: SimpleNamespace(joint_names=values,
             init_qpos=np.zeros(len(values)),close_qpos=np.arange(1,len(values)+1))
         robot = SimpleNamespace(controller_cfg=SimpleNamespace(
             left_eef_cfg=config(names[:7]),right_eef_cfg=config(names[7:])))
-        frame = SimpleNamespace(inputs={'left_trigger':.25,'right_trigger':.75})
+        frame = SimpleNamespace(inputs={'left_trigger':.25,'right_trigger':.75,
+                                        'left_grip':0.,'right_grip':0.})
         target = entry.named_hand_targets(robot,frame)
-        for i,name in enumerate(names[:7]):
-            self.assertEqual(target[name],(i+1)*.25)
-        for i,name in enumerate(names[7:]):
-            self.assertEqual(target[name],(i+1)*.75)
+        self.assertEqual(target['left_hand_thumb_1_joint'],.7*.25)
+        self.assertEqual(target['left_hand_index_0_joint'],-.25)
+        self.assertEqual(target['right_hand_thumb_1_joint'],-.7*.75)
+        self.assertEqual(target['right_hand_middle_1_joint'],1.5*.75)
         frame.inputs['right_trigger'] = float('nan')
         with self.assertRaises(ValueError):
             entry.named_hand_targets(robot,frame)
@@ -142,7 +143,7 @@ class EntryGuardTests(unittest.TestCase):
 
     def test_source_identity_covers_executed_entry_components(self):
         identities = entry.source_code_identities()
-        self.assertEqual(set(identities),{'pico_simple_teleop.py','pico_live_input.py',
+        self.assertEqual(set(identities),{'pico_simple_teleop.py','pico_live_input.py','pico_hand_control.py',
             'pico_sonic_reference.py','pico_teleop_recording.py','pico_teleop_ui.py',
             'pico_deferred_capture.py','render_deferred_pico.py','finish_pico_session.py',
             'audit_pico_teleop_episode.py','start_pico_teleop.sh',

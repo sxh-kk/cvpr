@@ -6,10 +6,7 @@ keeps its single PICO subscription and continues serving the control panel.
 from __future__ import annotations
 
 import argparse
-import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import time
-import urllib.error
 import urllib.request
 
 
@@ -62,24 +59,13 @@ def serve(port, collector_port):
                 except OSError:
                     self.send_error(503,'Collector unavailable')
             elif route=='/stream.mjpg':
-                self.send_response(200)
-                self.send_header('Content-Type','multipart/x-mixed-replace; boundary=frame')
-                self.send_header('Cache-Control','no-store');self.end_headers()
-                try:
-                    while True:
-                        started=time.monotonic()
-                        try:
-                            with urllib.request.urlopen(origin+'/latest.jpg',timeout=2) as response:
-                                frame=response.read(8*1024*1024)
-                        except (urllib.error.URLError, TimeoutError, http.client.HTTPException):
-                            time.sleep(.2)
-                            continue
-                        self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '+
-                            str(len(frame)).encode()+b'\r\n\r\n'+frame+b'\r\n')
-                        self.wfile.flush()
-                        time.sleep(max(0.,.05-(time.monotonic()-started)))
-                except (BrokenPipeError,ConnectionResetError,TimeoutError):
-                    pass
+                # Consume the collector's new-frame stream directly. Avoid a
+                # second polling/encoding path and its previous 20fps ceiling.
+                self.send_response(302)
+                self.send_header('Location',origin+'/stream.mjpg')
+                self.send_header('Cache-Control','no-store')
+                self.send_header('Content-Length','0')
+                self.end_headers()
             else:
                 self.send_error(404)
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler)

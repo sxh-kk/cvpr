@@ -281,6 +281,39 @@ def read_live_frame(receiver):
                      f' {type(error).__name__}: {str(error)[:500]}')
 
 
+def wait_fresh_command_frame(receiver, previous, last_timestamp_ns, deadline_s, *,
+                             now=time.monotonic, sleep=time.sleep):
+    """Wait within the existing lateness budget; never pad a new command.
+
+    A short catch-up step may inspect the same 90 Hz packet twice. Waiting for
+    its successor is valid; recording the repeated packet as a new 30 Hz sample
+    is not. Malformed/invalid successors still fail immediately.
+    """
+    while now() < deadline_s:
+        candidate, error = read_live_frame(receiver)
+        if error:
+            raise ValueError(error)
+        if now() >= deadline_s:
+            break
+        if candidate is not None:
+            quality = validate_frame(candidate, previous=previous, now=now())
+            if not quality['valid']:
+                raise ValueError('Tracking rejected while waiting: '+','.join(quality['reasons']))
+            if (candidate.device_timestamp_ns != last_timestamp_ns and quality['recordable']
+                    and now() < deadline_s):
+                return candidate, quality
+            previous = candidate
+        remaining = deadline_s-now()
+        if remaining > 0:
+            sleep(min(.0015, remaining))
+    raise RuntimeError('等待新的PICO动作包超时，已暂停；不会重复动作包充当新采集帧')
+
+
+def rising_operator_commands(buttons, last_buttons):
+    return [action for key, action in (('X','calibrate'),('Y','toggle_follow'),('A','toggle_record'))
+        if buttons.get(key,False) and not last_buttons.get(key,False)]
+
+
 def prepare_deferred_cache(prepare_function, output, index, *, model, objects, joint_names):
     """Do model I/O and verifier allocation before live control or recording."""
     directory = Path(output)/'prepared_models'/f'{index:04d}'
@@ -760,6 +793,7 @@ def run(args):
             video_bridge.update(obs)
         frame = previous = None
         last_buttons = {}
+        pending_input_commands = []
         following = False
         error_text = None
         global_tick = 0
@@ -778,6 +812,7 @@ def run(args):
         calibration_fresh = False
         physics_ready = True
         last_result_write_wall = 0.
+        last_preview_time = None
         last_snapshot_error = None
 
         def invalidate_calibration():
@@ -826,14 +861,13 @@ def run(args):
                     last_snapshot_error = snapshot_error
                 else:
                     last_snapshot_error = None
-            commands = ui.commands()
+            commands, pending_input_commands = pending_input_commands, []
+            commands.extend(ui.commands())
             if frame:
                 quality = validate_frame(frame,previous=previous)
                 if previous is None or frame.sequence != previous.sequence:
                     if quality['valid']:
-                        for key, action in (('X','calibrate'),('Y','toggle_follow'),('A','toggle_record')):
-                            if frame.buttons[key] and not last_buttons.get(key,False):
-                                commands.append(action)
+                        commands.extend(rising_operator_commands(frame.buttons,last_buttons))
                         last_buttons = dict(frame.buttons)
                     previous = frame
                 if replay and not replay_calibrated:
@@ -942,7 +976,9 @@ def run(args):
                         result['prepared_quality_geometry_caches'].append(prepared_geometry_cache)
                         raw.mujoco.step = measured_step
                         substeps=0; global_tick=0; command=None; previous=None
+                        last_preview_time=None
                         physics_ready=True; last_buttons={}; reference_evidence=None
+                        pending_input_commands=[]
                         wall_deadline=None; last_step_wall=None
                     else:
                         raise ValueError('Unknown command: '+action)
@@ -997,11 +1033,22 @@ def run(args):
                     due = capture_tick_index(global_tick) is not None
                     control_tick_started = time.perf_counter()
                     encode_seconds = 0.
+                    input_wait_seconds = 0.
                     actual_before = physical_snapshot(model,data,BODY_JOINT_NAMES)
                     new_command = due or command is None
                     if new_command:
                         if reference.last_timestamp_ns == frame.device_timestamp_ns:
-                            raise ValueError('No new PICO frame for a new30Hz command')
+                            if replay:
+                                raise ValueError('No new recorded PICO frame for a new30Hz command')
+                            wait_started = time.perf_counter()
+                            frame, quality = wait_fresh_command_frame(receiver, frame,
+                                reference.last_timestamp_ns, wall_deadline+args.max_lateness)
+                            # A short button press in this inspected packet must
+                            # survive even if the next callback is its release.
+                            pending_input_commands.extend(rising_operator_commands(frame.buttons,last_buttons))
+                            last_buttons = dict(frame.buttons)
+                            previous = frame
+                            input_wait_seconds = time.perf_counter()-wait_started
                         encode_started = time.perf_counter()
                         token, evidence = reference.encode(frame.body24x7,root_pose(model,data),frame.device_timestamp_ns)
                         encode_seconds = time.perf_counter()-encode_started
@@ -1053,6 +1100,7 @@ def run(args):
                         'source_inputs':dict(frame.inputs),'named_hand_targets':dict(hands),
                         'new_command30':new_command,'reference':reference_evidence if new_command else None,
                         'timing_s':{'reference_encode':encode_seconds,'environment_step':step_seconds,
+                            'fresh_input_wait':input_wait_seconds,
                             'control_tick_before_trace':time.perf_counter()-control_tick_started},
                         'actual_before_step':actual_before,
                         'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES),
@@ -1098,6 +1146,13 @@ def run(args):
                     # Tracking/physics guards already reject invalid control.
                     # Invalid telemetry must not shut down the operator UI.
                     feedback_error = str(invalid_feedback)
+            preview_rgb = obs.get('head_stereo_left')
+            preview_time = (id(model),float(obs.get('sim_time_s',data.time)))
+            if preview_rgb is not None:
+                if last_preview_time == preview_time:
+                    preview_rgb = None
+                else:
+                    last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
                 'hand_control':feedback,'hand_feedback_error':feedback_error,
@@ -1107,7 +1162,7 @@ def run(args):
                 'render_engine':result['render_engine'],
                 'headset_video':{'enabled':True,**video_bridge.status} if video_bridge else {'enabled':False},
                 'note':('MuJoCo实时预览；保存后待RTX同状态补图及独立验收，尚非训练数据' if deferred
-                        else '保存后仍需独立物理、图像和数据验收；不会自动标为成功数据')},obs.get('head_stereo_left'))
+                        else '保存后仍需独立物理、图像和数据验收；不会自动标为成功数据')},preview_rgb)
             if time.monotonic()-last_result_write_wall >= 1.:
                 if not following and frame is not None:
                     # One bounded latest packet from this same SDK consumer.

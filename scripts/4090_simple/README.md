@@ -360,11 +360,13 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoCo、
 50Hz decoder、30Hz实际状态和命令录制。默认实时MuJoCo EGL双目预览，退出后
 以同一归档状态补渲染RTX训练图像并独立审计，不重跑物理。电脑面板只监听127.0.0.1，
-`pico_desktop_preview.py` 在本机43101提供只读相机大画面，复用43100现有帧及状态，
+`pico_desktop_preview.py` 在本机43101提供只读相机大画面，复用43100连续MJPEG视频流及状态，
 不额外订阅PICO。双目 H.264 可另回传指定 PICO，实际头显显示仍待验收。
 设备设置、按键与校准、实时失败处理、独立数据验收
 及实际验证边界见[采集说明](../../docs/PICO_SIMPLE_TELEOP.md)。
 手指使用显式 SONIC v1.1 middle-close 对握姿态，前扳机或侧握键控制；界面区分原始输入、
 下发目标和实际关节闭合程度。闭合不等同于成功抓取，仍须检查实际接触和任务结果。
+控制页面也使用连续视频流；状态每500ms刷新不再限制画面帧率。暂停时不重复发布同一仿真帧，
+短暂等新PICO包仍受原100ms限额约束，不用重复包充当新采集数据。
 `audit_pico_teleop_episode.py EPISODE_DIR` 独立审计原始录制；回放／固定姿态诊断
 不增加人类示范数量，通过审计后仍需特征与训练协议打包。

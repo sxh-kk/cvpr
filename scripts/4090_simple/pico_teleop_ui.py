@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 import queue
+import select
 import socket
 import struct
 import threading
@@ -41,7 +42,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
 <p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
 <p id="grasp" role="status">等待抓握反馈</p>
-<div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" alt="当前仿真相机画面" hidden></div>
+<div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" src="/stream.mjpg" alt="当前仿真相机画面" hidden></div>
 <div class="bar">
 <button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>
 <button class="primary" data-command="record">开始录制</button><button class="primary" data-command="save">保存本条</button>
@@ -49,9 +50,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 </div><div id="message" role="status"></div><div id="error" role="alert"></div>
 <details><summary>查看运行详情</summary><pre id="details"></pre></details>
 <script>
-const camera=document.querySelector('#camera');let version=-1;
+const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true;
+function reconnectStream(){if(streamRetry!==null)return;streamRetry=setTimeout(()=>{streamRetry=null;camera.src='/stream.mjpg?retry='+Date.now();},500);}
+camera.onerror=reconnectStream;
+camera.onload=()=>{camera.hidden=false;document.querySelector('#placeholder').hidden=true;};
 async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
+ if(!statusConnected)reconnectStream();statusConnected=true;
  let phase=s.phase??s.state??s.status??'等待运行';if(typeof phase==='object')phase=phase.status??JSON.stringify(phase);
  const labels={paused:'已暂停',following:'正在跟随',saving:'已暂停仿真，正在保存',stopped:'采集已结束'};
  if(s.recording==='warmup')phase='请保持姿势，正在记录起始状态';
@@ -61,8 +66,8 @@ async function refresh(){try{
  document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
  document.querySelector('#details').textContent=JSON.stringify(s,null,2);
  const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
- if(v.image_available&&v.image_version!==version){version=v.image_version;camera.src='/latest.jpg?v='+version;camera.hidden=false;document.querySelector('#placeholder').hidden=true;}
- }catch(e){document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#error').textContent=e.message;}
+ if(v.image_available){camera.hidden=false;document.querySelector('#placeholder').hidden=true;}
+ }catch(e){statusConnected=false;document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#error').textContent=e.message;}
 }
 for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{b.disabled=true;try{
  const r=await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:b.dataset.command})});
@@ -131,7 +136,9 @@ class LocalTeleopUI:
         self._host, self._requested_port = str(address), port
         self._ipv6 = address.version == 6
         self._lock = threading.Lock()
+        self._frame_changed = threading.Condition(self._lock)
         self._encode_lock = threading.Lock()
+        self._stream_connections = set()
         self._commands = queue.Queue(maxsize=64)
         self._status = {"status": "等待仿真", "accepted_new_dataset": False}
         self._rgb = None
@@ -197,6 +204,8 @@ class LocalTeleopUI:
                     self._send(200, _PAGE.encode("utf-8"), "text/html; charset=utf-8")
                 elif path == "/status.json":
                     self._json(200, ui._status_snapshot())
+                elif path == "/stream.mjpg":
+                    self._stream_images()
                 elif path == "/latest.jpg":
                     try:
                         encoded = ui._latest_jpeg()
@@ -209,6 +218,66 @@ class LocalTeleopUI:
                         self._send(200, encoded, "image/jpeg")
                 else:
                     self._json(404, {"error": "Unknown local UI endpoint"})
+
+            def _stream_peer_connected(self):
+                # A stream with no new images must still notice browser close,
+                # rather than retain a non-daemon request thread indefinitely.
+                try:
+                    readable, _, _ = select.select([self.connection], [], [], 0.)
+                    return not readable or bool(self.connection.recv(1, socket.MSG_PEEK))
+                except OSError:
+                    return False
+
+            def _stream_images(self):
+                with ui._lock:
+                    if ui._closed:
+                        return
+                    ui._stream_connections.add(self.connection)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    previous, next_send = -1, 0.
+                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n")
+                    while True:
+                        with ui._frame_changed:
+                            if ui._closed:
+                                return
+                            delay = next_send - time.monotonic()
+                            ready = ui._rgb is not None and ui._image_version != previous
+                            if not ready or delay > 0:
+                                ui._frame_changed.wait(timeout=min(.1, delay) if ready and delay > 0 else .1)
+                                ready = False
+                        if not self._stream_peer_connected():
+                            return
+                        if not ready:
+                            continue
+                        encoded, version = ui._latest_jpeg_snapshot()
+                        if encoded is None or version == previous:
+                            continue
+                        with ui._lock:
+                            if ui._closed:
+                                return
+                        # A paused camera may have only one frame. Finish its
+                        # MIME part now so browsers display it without waiting
+                        # for a second simulator frame to start the next part.
+                        self.wfile.write(encoded + b"\r\n--frame\r\nContent-Type: image/jpeg\r\n\r\n")
+                        self.wfile.flush()
+                        previous, next_send = version, time.monotonic() + 1. / 30
+                except (OSError, ValueError):
+                    # Disconnect, socket timeout and server shutdown are normal
+                    # stream endings. The browser reconnects without trace spam.
+                    return
+                except Exception:
+                    # An encoder failure ends this response; /latest.jpg still
+                    # provides a bounded diagnostic and the image may be retried.
+                    return
+                finally:
+                    with ui._lock:
+                        ui._stream_connections.discard(self.connection)
 
             def do_POST(self):
                 if not self._valid_host():
@@ -306,6 +375,7 @@ class LocalTeleopUI:
             if pixels is not None:
                 self._rgb = pixels
                 self._image_version += 1
+                self._frame_changed.notify_all()
 
     def _status_snapshot(self):
         with self._lock:
@@ -322,23 +392,35 @@ class LocalTeleopUI:
         return stream.getvalue()
 
     def _latest_jpeg(self):
+        return self._latest_jpeg_snapshot()[0]
+
+    def _latest_jpeg_snapshot(self):
         with self._encode_lock:
             with self._lock:
                 pixels, version = self._rgb, self._image_version
                 if pixels is None:
-                    return None
+                    return None, version
                 if self._jpeg_version == version:
-                    return self._jpeg
+                    return self._jpeg, version
             encoded = self._encode_jpeg(pixels)
             with self._lock:
                 self._jpeg, self._jpeg_version = encoded, version
-            return encoded
+            return encoded, version
 
     def close(self):
         with self._lock:
             if self._closed:
                 return
             self._closed = True
+            self._frame_changed.notify_all()
+            streams = tuple(self._stream_connections)
+        # Interrupt a client that stopped reading, rather than waiting for its
+        # socket send timeout while server_close joins non-daemon workers.
+        for connection in streams:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()

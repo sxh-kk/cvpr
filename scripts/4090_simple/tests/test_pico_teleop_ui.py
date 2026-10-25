@@ -1,5 +1,6 @@
 """Loopback-only HTTP tests; no SDK, model, or simulation is constructed."""
 import http.client
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ import sys
 import threading
 import socket
 import struct
+import time
 import unittest
 from urllib.parse import urlsplit
 
@@ -118,6 +120,160 @@ class LocalUITests(unittest.TestCase):
         with self.assertRaises(ValueError): self.ui.update({}, np.zeros((5, 5, 3), dtype=np.float32))
         self.ui.update({"loss": float("nan")})
         self.assertIsNone(json.loads(self.request("GET", "/status.json")[2])["status"]["loss"])
+
+    def open_stream(self):
+        client = http.client.HTTPConnection(self.address.hostname, self.address.port, timeout=3)
+        client.request("GET", "/stream.mjpg")
+        response = client.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "multipart/x-mixed-replace; boundary=frame")
+        return client, response
+
+    def read_stream_frame(self, response):
+        def read_headers():
+            result = {}
+            while True:
+                line = response.readline(1024)
+                if line == b"\r\n":
+                    return result
+                if not line:
+                    raise EOFError("Incomplete MJPEG headers")
+                key, value = line.decode("ascii").split(":", 1)
+                result[key.lower()] = value.strip()
+        headers = getattr(response, "_mjpeg_pending_headers", None)
+        if headers is None:
+            boundary = response.readline(1024)
+            if not boundary:
+                raise EOFError("MJPEG connection closed")
+            self.assertEqual(boundary, b"--frame\r\n")
+            headers = read_headers()
+        self.assertEqual(headers["content-type"], "image/jpeg")
+        # Multipart image boundaries, rather than per-part Content-Length,
+        # determine completion. Include the next complete part header in this
+        # read, because Chromium needs it before submitting the previous JPEG.
+        body, marker = bytearray(), b"\r\n--frame\r\n"
+        while not body.endswith(marker):
+            value = response.read(1)
+            if not value:
+                raise EOFError("Incomplete MJPEG image boundary")
+            body.extend(value)
+            self.assertLess(len(body), 8 * 1024 * 1024)
+        del body[-len(marker):]
+        response._mjpeg_pending_headers = read_headers()
+        self.assertEqual(response._mjpeg_pending_headers["content-type"], "image/jpeg")
+        return hashlib.sha256(body).hexdigest(), np.asarray(Image.open(io.BytesIO(body)))
+
+    def test_real_mjpeg_two_distinct_frames_cache_and_commands_continue_independently(self):
+        rgb = np.zeros((24, 32, 3), np.uint8); rgb[..., 0] = 255
+        self.ui.update({"status": "following"}, rgb)
+        calls = []
+        real_encode = self.ui._encode_jpeg
+        def encode(frame):
+            calls.append(threading.get_ident())
+            return real_encode(frame)
+        self.ui._encode_jpeg = encode
+        client, response = self.open_stream()
+        result, failure, received = [], [], threading.Event()
+        def read_next():
+            try:
+                result.append(self.read_stream_frame(response))
+            except Exception as error:
+                failure.append(error)
+            finally:
+                received.set()
+        reader = None
+        try:
+            first_hash, pixels = self.read_stream_frame(response)
+            self.assertGreater(pixels[..., 0].mean(), 245)
+            latest = self.request("GET", "/latest.jpg")[2]
+            self.assertEqual(first_hash, hashlib.sha256(latest).hexdigest())
+            self.assertEqual(len(calls), 1)  # The stream shares the existing cache.
+            reader = threading.Thread(target=read_next)
+            reader.start()
+            self.assertFalse(received.wait(.08))  # No duplicated frames while idle.
+            self.assertEqual(self.post("pause")[0], 202)
+            self.assertEqual(self.ui.commands(), ["pause"])
+            rgb[:] = 0; rgb[..., 1] = 255
+            self.ui.update({"status": "paused"}, rgb)
+            rgb[:] = 0
+            self.assertTrue(received.wait(2))
+            self.assertEqual(failure, [])
+            self.assertNotEqual(result[0][0], first_hash)
+            self.assertGreater(result[0][1][..., 1].mean(), 245)
+            self.assertEqual(len(calls), 2)
+            page = self.request("GET", "/")[2].decode()
+            self.assertIn('src="/stream.mjpg"', page)
+            self.assertNotIn("camera.src='/latest.jpg", page)
+            self.assertIn("setInterval(refresh,500)", page)
+            self.assertIn("camera.onerror=reconnectStream", page)
+            self.assertEqual(self.request("GET", "/stream.mjpg", headers={"Host":"evil.example"})[0], 403)
+        finally:
+            response.close(); client.close()
+            if reader is not None:
+                reader.join(timeout=2)
+                self.assertFalse(reader.is_alive())
+
+    def test_mjpeg_throttles_fast_producer_to_at_most_thirty_frames_per_second(self):
+        self.ui.update({}, np.zeros((12, 16, 3), np.uint8))
+        client, response = self.open_stream()
+        producer = None
+        try:
+            self.read_stream_frame(response)
+            def publish():
+                for index in range(40):
+                    self.ui.update({}, np.full((12, 16, 3), index + 1, np.uint8))
+                    time.sleep(.004)
+            started = time.monotonic()
+            producer = threading.Thread(target=publish)
+            producer.start()
+            second, _ = self.read_stream_frame(response)
+            third, _ = self.read_stream_frame(response)
+            self.assertNotEqual(third, second)
+            self.assertGreaterEqual(time.monotonic() - started, .05)
+        finally:
+            response.close(); client.close()
+            if producer is not None:
+                producer.join(timeout=2)
+                self.assertFalse(producer.is_alive())
+
+    def test_idle_mjpeg_client_disconnect_and_server_close_release_workers(self):
+        client, response = self.open_stream()  # No fake initial image is produced.
+        response.close(); client.close()
+        deadline = time.monotonic() + 1.
+        while time.monotonic() < deadline:
+            with self.ui._lock:
+                if not self.ui._stream_connections:
+                    break
+            time.sleep(.01)
+        with self.ui._lock:
+            self.assertEqual(len(self.ui._stream_connections), 0)
+        # A fresh stream may connect after the disconnected browser.
+        client, response = self.open_stream()
+        started = time.monotonic()
+        self.ui.close()  # Wakes an idle frame wait and joins its request thread.
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(response.read(), b"--frame\r\nContent-Type: image/jpeg\r\n\r\n")
+        response.close(); client.close()
+        self.assertFalse(self.ui._thread.is_alive())
+        with self.ui._lock:
+            self.assertEqual(len(self.ui._stream_connections), 0)
+
+    def test_paused_single_image_immediately_completes_next_part_headers_without_a_second_image(self):
+        rgb = np.zeros((24, 32, 3), np.uint8); rgb[..., 2] = 255
+        self.ui.update({"status": "paused"}, rgb)
+        started = time.monotonic()
+        client, response = self.open_stream()
+        try:
+            digest, pixels = self.read_stream_frame(response)
+            self.assertLess(time.monotonic() - started, .75)
+            self.assertGreater(pixels[..., 2].mean(), 245)
+            self.assertEqual(response._mjpeg_pending_headers, {"content-type": "image/jpeg"})
+            status = json.loads(self.request("GET", "/status.json")[2])
+            self.assertEqual(status["status"]["status"], "paused")
+            self.assertEqual(status["image_version"], 1)  # No second update/image.
+            self.assertEqual(digest, hashlib.sha256(self.request("GET", "/latest.jpg")[2]).hexdigest())
+        finally:
+            response.close(); client.close()
 
 
 def receive_exact(sock, length):

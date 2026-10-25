@@ -102,6 +102,70 @@ class EntryGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             entry.named_hand_targets(robot,frame)
 
+    def test_live_command_wait_uses_successor_without_repeating_source(self):
+        clock = [0.]
+        old = SimpleNamespace(device_timestamp_ns=100)
+        new = SimpleNamespace(device_timestamp_ns=200)
+        def quality(frame, **kwargs):
+            return {'valid':True,'recordable':frame is new,'reasons':[]}
+        with patch.object(entry,'read_live_frame',side_effect=[(old,None),(new,None)]), \
+             patch.object(entry,'validate_frame',side_effect=quality):
+            actual,q = entry.wait_fresh_command_frame(object(),old,100,.01,
+                now=lambda:clock[0],sleep=lambda dt:clock.__setitem__(0,clock[0]+dt))
+        self.assertIs(actual,new)
+        self.assertTrue(q['recordable'])
+        self.assertGreater(clock[0],0.)
+        self.assertLess(clock[0],.01)
+
+    def test_live_command_wait_times_out_without_padding(self):
+        clock = [0.]
+        old = SimpleNamespace(device_timestamp_ns=100)
+        with patch.object(entry,'read_live_frame',return_value=(old,None)), \
+             patch.object(entry,'validate_frame',return_value={'valid':True,'recordable':False}):
+            with self.assertRaisesRegex(RuntimeError,'不会重复'):
+                entry.wait_fresh_command_frame(object(),old,100,.005,
+                    now=lambda:clock[0],sleep=lambda dt:clock.__setitem__(0,clock[0]+dt))
+        self.assertAlmostEqual(clock[0],.005)
+
+    def test_live_command_wait_rejects_malformed_successor(self):
+        with patch.object(entry,'read_live_frame',return_value=(None,'bad packet')):
+            with self.assertRaisesRegex(ValueError,'bad packet'):
+                entry.wait_fresh_command_frame(object(),None,100,1.,now=lambda:0.)
+
+    def test_live_command_wait_does_not_accept_packet_after_deadline(self):
+        clock=[0.]
+        def slow_read(receiver):
+            clock[0]=.011
+            return SimpleNamespace(device_timestamp_ns=200),None
+        with patch.object(entry,'read_live_frame',side_effect=slow_read):
+            with self.assertRaisesRegex(RuntimeError,'不会重复'):
+                entry.wait_fresh_command_frame(object(),None,100,.01,now=lambda:clock[0])
+
+    def test_waited_button_press_stays_queued_after_release_without_duplicate(self):
+        pressed={'X':False,'Y':True,'A':True}
+        pending=entry.rising_operator_commands(pressed,{})
+        self.assertEqual(pending,['toggle_follow','toggle_record'])
+        self.assertEqual(entry.rising_operator_commands(pressed,pressed),[])
+        released={'X':False,'Y':False,'A':False}
+        pending.extend(entry.rising_operator_commands(released,pressed))
+        self.assertEqual(pending,['toggle_follow','toggle_record'])
+
+    def test_live_command_wait_rejects_validation_that_crossed_deadline(self):
+        clock=[0.]
+        def slow_validation(frame, **kwargs):
+            clock[0]=.011
+            return {'valid':True,'recordable':True}
+        with patch.object(entry,'read_live_frame',return_value=(SimpleNamespace(device_timestamp_ns=200),None)), \
+             patch.object(entry,'validate_frame',side_effect=slow_validation):
+            with self.assertRaisesRegex(RuntimeError,'不会重复'):
+                entry.wait_fresh_command_frame(object(),None,100,.01,now=lambda:clock[0])
+
+    def test_live_command_wait_rejects_invalid_tracking_instead_of_holding(self):
+        with patch.object(entry,'read_live_frame',return_value=(object(),None)), \
+             patch.object(entry,'validate_frame',return_value={'valid':False,'reasons':['app_not_focused']}):
+            with self.assertRaisesRegex(ValueError,'app_not_focused'):
+                entry.wait_fresh_command_frame(object(),None,100,1.,now=lambda:0.)
+
     def test_standing_warmup_rejects_fall_tilt_or_nonfinite_state(self):
         before = {'pelvis_z_m':.78}
         after = {'pelvis_z_m':.76,'pelvis_tilt_deg':4.,'state_finite':True}

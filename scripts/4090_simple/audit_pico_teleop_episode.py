@@ -84,6 +84,72 @@ def _owned(root, name):
     return path
 
 
+def _strict_json_equal(left, right):
+    """Compare JSON structure and scalar types, including true versus 1."""
+    return json.dumps(left, sort_keys=True, allow_nan=False, separators=(",", ":")) == json.dumps(
+        right, sort_keys=True, allow_nan=False, separators=(",", ":"))
+
+
+def _source_roles(paths):
+    """Unique basenames identify the pinned files within one source group."""
+    require(isinstance(paths, dict), "Source identity requires a path/SHA map")
+    roles = {}
+    for name, digest in paths.items():
+        require(isinstance(name, str) and Path(name).is_absolute(),
+                "Recorded source identity must use an absolute original path")
+        role = Path(name).name
+        require(role and role not in roles, "Duplicate source file role: " + role)
+        require(isinstance(digest, str) and len(digest) == 64
+                and all(c in "0123456789abcdef" for c in digest), "Invalid source SHA: " + role)
+        roles[role] = (name, digest)
+    return roles
+
+
+def _recorded_source_identity(supplied, checked, bindings):
+    """Bind recorded files to pinned roles across checkouts, retaining paths.
+
+    Only the two SHA-map path keys may differ. Every other identity field is
+    compared exactly, and every original recorded file must still exist with
+    the same pinned bytes. This never substitutes the current checkout's files
+    for missing or mutated recorded sources.
+    """
+    require(isinstance(supplied, dict) and isinstance(checked, dict)
+            and isinstance(supplied.get("official_gather"), dict)
+            and isinstance(checked.get("official_gather"), dict), "Incomplete encoder/FK/gather source identity")
+    normalized_supplied, normalized_checked = dict(supplied), dict(checked)
+    normalized_supplied["official_gather"] = dict(supplied["official_gather"])
+    normalized_checked["official_gather"] = dict(checked["official_gather"])
+    rehashed = {}
+    for group in (None, "official_gather"):
+        actual_parent = supplied if group is None else supplied[group]
+        expected_parent = checked if group is None else checked[group]
+        actual = _source_roles(actual_parent.get("source_sha256"))
+        expected = _source_roles(expected_parent.get("source_sha256"))
+        require(set(actual) == set(expected)
+                and all(actual[role][1] == expected[role][1] for role in expected),
+                "Actual local encoder/FK/gather source roles or pinned digests differ")
+        for normalized, roles in ((normalized_supplied, actual), (normalized_checked, expected)):
+            parent = normalized if group is None else normalized[group]
+            parent["source_sha256"] = {role:digest for role, (_, digest) in roles.items()}
+        for role, (name, expected_digest) in actual.items():
+            original = Path(name)
+            path = original.resolve(strict=True)
+            require(path.is_file(), "Recorded source is not a file: " + name)
+            before = path.stat()
+            actual_digest = sha(path)
+            after = path.stat()
+            require(original.resolve(strict=True) == path
+                    and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                    "Recorded source changed while rehashing: " + name)
+            require(actual_digest == expected_digest, "Original recorded source bytes changed: " + role)
+            rehashed[name] = actual_digest
+    require(_strict_json_equal(normalized_supplied, normalized_checked),
+            "Actual local encoder/FK/gather non-path identity fields differ")
+    bindings.update(rehashed)
+    return supplied
+
+
 def _bound_identities(metadata, bindings):
     controller = metadata["controller_identity"]
     require(controller["body_token_version"] == "body_token_v1_1"
@@ -102,19 +168,17 @@ def _bound_identities(metadata, bindings):
     humans = [Path(name) for name in paths if Path(name).name == "human_joints_info.pkl"]
     require(len(humans) == 1, "A single fixed human FK skeleton must be bound")
     checked = verify_runtime_sources(resources, humans[0])
-    require(supplied == checked, "Actual local encoder/FK/gather source identities differ")
+    recorded = _recorded_source_identity(supplied, checked, bindings)
     compatibility = Path(controller["compatibility_evidence"]).resolve(strict=True)
     evidence = _read(compatibility)
     require(evidence.get("body_token_version") == "body_token_v1_1"
             and evidence.get("decoder_sha256") == DECODER_SHA256
             and evidence.get("compatibility_verified") is True
-            and evidence.get("evidence", {}).get("encoder_identity") == checked,
+            and _strict_json_equal(evidence.get("evidence", {}).get("encoder_identity"), recorded),
             "Actual encoder/decoder producer binding is incomplete")
     for path in (provenance, decoder, compatibility):
         bindings[str(path)] = sha(path)
-    bindings.update(checked["source_sha256"])
-    bindings.update(checked["official_gather"]["source_sha256"])
-    return checked
+    return recorded
 
 
 def _check_renderer(event, world_reference):

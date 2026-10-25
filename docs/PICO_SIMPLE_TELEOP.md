@@ -194,6 +194,8 @@ EGL证据位于`/home/zxc/CVPR_Evaluation_runtime/pico_async_preview_20261025/eg
 仅 `eligible_for_packing=true` 的示例可进入后续打包；仍需生成 clean DINO 特征、
 训练元数据和模型协议检查，才可交给当前联合 checkpoint 微调。
 录制完成、审计完成和训练数据包完成是三个不同状态。
+固定90条真人候选的补图、独立核定、无损LeRobot转换、DINO和A100交付流程见
+[数据核定与交付](PICO_DATASET_ADMISSION.md)。用户继续采集期间只做CPU准备，GPU处理等待采集真正退出。
 
 `--pico-replay`／`--diagnostic-record` 只用于软件诊断；固定姿态或已有 PICO 包回放
 永远不能冒充新的人类示范，不增加高质量数据条数。

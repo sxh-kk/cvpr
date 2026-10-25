@@ -407,6 +407,25 @@ class AdmissionTests(unittest.TestCase):
         (self.root/"fixtures/model_decoder.onnx").write_bytes(b"changed")
         self.assertIn("Actual local decoder SHA changed",self.check_rejected())
 
+    def test_different_checkout_paths_keep_recorded_identity_for_compatibility_and_commands(self):
+        current=self.root/'current-checkout'; current.mkdir()
+        checked=deepcopy(self.identities)
+        checked['source_sha256']={}
+        for original,digest in self.identities['source_sha256'].items():
+            path=current/Path(original).name; path.write_bytes(Path(original).read_bytes())
+            checked['source_sha256'][str(path)]=digest
+        self.assertNotEqual(checked,self.identities)
+        with patch.object(audit,'verify_runtime_sources',return_value=checked):
+            result=audit.audit_episode(self.root)
+        self.assertTrue(result['eligible_for_packing'],result['errors'])
+        for original,digest in self.identities['source_sha256'].items():
+            self.assertEqual(result['bindings'][original],digest)
+        # A receipt from a different producer is still wrong even if its
+        # corresponding files have the same pinned bytes in another checkout.
+        self.rewrite('fixtures/binding.json',lambda v:v['evidence'].update(encoder_identity=checked))
+        with patch.object(audit,'verify_runtime_sources',return_value=checked):
+            self.assertIn('producer binding is incomplete',self.check_rejected())
+
     def test_stale_initial_height_cannot_exaggerate_measured_lift(self):
         self.rewrite("metadata.json",lambda v:v.update(initial_target_z_m=.1))
         self.assertIn("Initial target height",self.check_rejected())
@@ -669,6 +688,67 @@ class AdmissionTests(unittest.TestCase):
                     audit._check_preview_protocol({"preview_protocol":{**base,key:value}})
         self.assertFalse(audit._check_preview_protocol({}))
         self.assertTrue(audit._check_preview_protocol({"preview_protocol":base}))
+
+
+class SourceIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name)
+        self.checked={'source_sha256':{},'official_gather':{'source_sha256':{},'official_sources_rehashed':True}}
+        self.recorded=deepcopy(self.checked)
+        for group,roles in ((None,('model_encoder.onnx','human_joints_info.pkl')),
+                            ('official_gather',('g1_deploy.cpp','math_utils.hpp'))):
+            for role in roles:
+                for checkout,identity in (('current',self.checked),('recorded',self.recorded)):
+                    path=self.root/checkout/role; path.parent.mkdir(exist_ok=True)
+                    path.write_bytes(('pinned-fixture-bytes:'+role).encode())
+                    parent=identity if group is None else identity[group]
+                    parent['source_sha256'][str(path)]=audit.sha(path)
+
+    def test_same_path_and_different_checkout_both_rehash_original_source_groups(self):
+        for supplied in (self.checked,self.recorded):
+            with self.subTest(same_path=supplied is self.checked):
+                bindings={}
+                result=audit._recorded_source_identity(supplied,self.checked,bindings)
+                self.assertIs(result,supplied)
+                expected={**supplied['source_sha256'],**supplied['official_gather']['source_sha256']}
+                self.assertEqual(bindings,expected)
+
+    def test_original_missing_or_changed_cannot_fall_back_to_current_checkout(self):
+        path=Path(next(iter(self.recorded['source_sha256'])))
+        original=path.read_bytes()
+        path.write_bytes(b'mutated-recorded-file')
+        with self.assertRaisesRegex(ValueError,'Original recorded source bytes changed'):
+            audit._recorded_source_identity(self.recorded,self.checked,{})
+        path.write_bytes(original); path.unlink()
+        with self.assertRaises(FileNotFoundError):
+            audit._recorded_source_identity(self.recorded,self.checked,{})
+
+    def test_fake_sha_missing_duplicate_or_relative_file_role_is_rejected(self):
+        for group in (None,'official_gather'):
+            for variant in ('fake-sha','missing','duplicate','relative'):
+                with self.subTest(group=group,variant=variant):
+                    supplied=deepcopy(self.recorded)
+                    parent=supplied if group is None else supplied[group]
+                    paths=parent['source_sha256']; name=next(iter(paths)); digest=paths[name]
+                    if variant=='fake-sha': paths[name]='f'*64
+                    if variant=='missing': del paths[name]
+                    if variant=='duplicate': paths[str(self.root/'extra'/Path(name).name)]=digest
+                    if variant=='relative': del paths[name]; paths[Path(name).name]=digest
+                    with self.assertRaises(ValueError):
+                        audit._recorded_source_identity(supplied,self.checked,{})
+
+    def test_all_nonpath_metadata_and_scalar_types_remain_exact(self):
+        variants=[lambda v:v.update(unrecognized_flag=True),
+                  lambda v:v['official_gather'].update(unrecognized_flag=True),
+                  lambda v:v['official_gather'].update(official_sources_rehashed=False),
+                  lambda v:v['official_gather'].update(official_sources_rehashed=1),
+                  lambda v:v['official_gather'].pop('official_sources_rehashed')]
+        for index,mutate in enumerate(variants):
+            with self.subTest(variant=index):
+                supplied=deepcopy(self.recorded); mutate(supplied)
+                with self.assertRaisesRegex(ValueError,'non-path identity fields differ'):
+                    audit._recorded_source_identity(supplied,self.checked,{})
 
 
 if __name__=="__main__":

@@ -385,6 +385,11 @@ PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoC
 RTX补图与完整独立审计仍待完成；丢弃记录被补图和审计入口拦截。
 `audit_pico_teleop_episode.py EPISODE_DIR` 独立审计原始录制；回放／固定姿态诊断
 不增加人类示范数量，通过审计后仍需特征与训练协议打包。
+`process_pico_dataset.py`只处理用户冻结的90条候选，等所有采集／自动补图退出才占用GPU。
+`pack_pico_handover.py`保留真实v1.1 token／手指／时钟并无损转换，`verify_pico_handover.py`
+检查真实DINO和CPU生产读取，`upload_pico_handover.py`只传通过的独立包并核对远端字节。
+独立A100路径重绑和CPU复验后才写远端就绪标记，不修改或启动训练，见
+[固定90条数据核定及交付](../../docs/PICO_DATASET_ADMISSION.md)。
 
 独立新增人体骨盆平移→planner意图、异步CPU planner和零SDK物理诊断入口，默认不接当前采集。
 `replay_pico_locomotion_intent.py` 仅读封存动作包，`diagnose_pico_locomotion.py` 仅在独立进程

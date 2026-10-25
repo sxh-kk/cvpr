@@ -1,0 +1,656 @@
+"""Local-only PICO teleoperation display and queued operator intentions.
+
+HTTP threads never access an SDK, model, or simulator. ``update`` copies image
+pixels without JPEG work; request threads encode the latest immutable snapshot.
+"""
+from __future__ import annotations
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
+import ipaddress
+import json
+import math
+from pathlib import Path
+import queue
+import socket
+import struct
+import threading
+import time
+from urllib.parse import urlsplit
+
+import numpy as np
+
+
+COMMANDS = frozenset({"calibrate", "follow", "pause", "record", "save", "discard", "reset", "quit"})
+
+
+_PAGE = """<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PICO 遥操作采集</title><style>
+:root{font-family:system-ui,sans-serif;color:#e8eef7;background:#101722;color-scheme:dark}
+body{max-width:1240px;margin:auto;padding:24px}h1{font-size:24px;margin:0 0 8px}.muted{color:#acbacd}
+.notice{background:#263749;color:#e7d69c;padding:12px 16px;border-radius:10px;margin:18px 0}
+.view{background:#070b11;border:1px solid #344255;border-radius:14px;min-height:260px;display:grid;place-items:center;overflow:hidden}
+img{display:block;width:100%;max-height:65vh;object-fit:contain}img[hidden]{display:none}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:18px 0}
+button{font:inherit;background:#26384d;border:1px solid #52677f;border-radius:9px;color:white;padding:11px 16px;cursor:pointer}
+button:hover{background:#3b516b}button:disabled{opacity:.5;cursor:wait}.primary{background:#23568f}.danger{border-color:#b26363}
+#error{color:#ffb3ac;white-space:pre-wrap}#message{min-height:24px;color:#afcdef}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}details{margin-top:20px}#phase{font-weight:600}
+</style><h1>PICO 遥操作采集</h1><div class="muted">当前状态：<span id="phase">等待电脑状态</span></div>
+<div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
+<p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · B 头显相机 · 左右扳机抓握。开始录制后先保持姿势 1 秒。</p>
+<div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" alt="当前仿真相机画面" hidden></div>
+<div class="bar">
+<button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>
+<button class="primary" data-command="record">开始录制</button><button class="primary" data-command="save">保存本条</button>
+<button data-command="discard">丢弃本条</button><button data-command="reset">重置场景</button><button class="danger" data-command="quit">退出</button>
+</div><div id="message" role="status"></div><div id="error" role="alert"></div>
+<details><summary>查看运行详情</summary><pre id="details"></pre></details>
+<script>
+const camera=document.querySelector('#camera');let version=-1;
+async function refresh(){try{
+ const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
+ let phase=s.phase??s.state??s.status??'等待运行';if(typeof phase==='object')phase=phase.status??JSON.stringify(phase);
+ const labels={paused:'已暂停',following:'正在跟随',saving:'已暂停仿真，正在保存',stopped:'采集已结束'};
+ if(s.recording==='warmup')phase='请保持姿势，正在记录起始状态';
+ else if(s.recording==='recording')phase='正在录制';
+ document.querySelector('#phase').textContent=labels[phase]??phase;
+ document.querySelector('#details').textContent=JSON.stringify(s,null,2);
+ const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
+ if(v.image_available&&v.image_version!==version){version=v.image_version;camera.src='/latest.jpg?v='+version;camera.hidden=false;document.querySelector('#placeholder').hidden=true;}
+ }catch(e){document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#error').textContent=e.message;}
+}
+for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{b.disabled=true;try{
+ const r=await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:b.dataset.command})});
+ const v=await r.json();if(!r.ok)throw Error(v.error??'提交失败');document.querySelector('#message').textContent='已提交，等待电脑执行：'+b.textContent;
+ }catch(e){document.querySelector('#error').textContent=e.message;}finally{b.disabled=false;}});
+refresh();setInterval(refresh,500);
+</script></html>"""
+
+
+def _copy_status(value):
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("UI status keys must be strings")
+        return {key: _copy_status(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_copy_status(item) for item in value]
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise TypeError("UI status cannot contain object arrays")
+        return value.copy()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"UI status cannot contain {type(value).__name__}")
+
+
+def _json_status(value):
+    if isinstance(value, np.ndarray):
+        return _json_status(value.tolist())
+    if isinstance(value, dict):
+        return {key: _json_status(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_status(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None  # Show invalid telemetry as missing, never valid JSON NaN.
+    return value
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = False
+    block_on_close = True
+    allow_reuse_address = True
+
+
+class _Server6(_Server):
+    address_family = socket.AF_INET6
+
+
+class LocalTeleopUI:
+    """An HTTP display that only queues intentions for the owning main loop."""
+
+    def __init__(self, host="127.0.0.1", port=43100):
+        if host == "localhost":
+            host = "127.0.0.1"
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as error:
+            raise ValueError("The teleoperation UI must bind a literal loopback address") from error
+        if not address.is_loopback:
+            raise ValueError("The teleoperation UI must remain on loopback")
+        if type(port) is not int or not 0 <= port <= 65535:
+            raise ValueError("Invalid local UI port")
+        self._host, self._requested_port = str(address), port
+        self._ipv6 = address.version == 6
+        self._lock = threading.Lock()
+        self._encode_lock = threading.Lock()
+        self._commands = queue.Queue(maxsize=64)
+        self._status = {"status": "等待仿真", "accepted_new_dataset": False}
+        self._rgb = None
+        self._image_version = 0
+        self._jpeg_version = -1
+        self._jpeg = None
+        self._server = self._thread = None
+        self._closed = False
+
+    @property
+    def url(self):
+        if self._server is None:
+            raise RuntimeError("Start the local UI before requesting its URL")
+        host = f"[{self._host}]" if self._ipv6 else self._host
+        return f"http://{host}:{self._server.server_address[1]}/"
+
+    def start(self):
+        if self._closed:
+            raise RuntimeError("A closed UI cannot be restarted")
+        if self._server is not None:
+            return self
+        ui = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(1.)
+
+            def log_message(self, *args):
+                pass
+
+            def _send(self, code, body, content_type="application/json; charset=utf-8"):
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                    pass
+
+            def _json(self, code, value):
+                self._send(code, json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+
+            def _valid_host(self):
+                values = self.headers.get_all("Host", [])
+                if len(values) != 1 or values[0] not in ui._authorities():
+                    self._json(403, {"error": "Only the local UI host is allowed"})
+                    return False
+                return True
+
+            def do_GET(self):
+                if not self._valid_host():
+                    return
+                path = urlsplit(self.path).path
+                if path == "/":
+                    self._send(200, _PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                elif path == "/status.json":
+                    self._json(200, ui._status_snapshot())
+                elif path == "/latest.jpg":
+                    try:
+                        encoded = ui._latest_jpeg()
+                    except Exception as error:
+                        self._json(500, {"error": f"Preview encoding failed: {type(error).__name__}"})
+                        return
+                    if encoded is None:
+                        self._json(404, {"error": "No real camera frame has arrived"})
+                    else:
+                        self._send(200, encoded, "image/jpeg")
+                else:
+                    self._json(404, {"error": "Unknown local UI endpoint"})
+
+            def do_POST(self):
+                if not self._valid_host():
+                    return
+                origins = self.headers.get_all("Origin", [])
+                if origins and (len(origins) != 1 or origins[0] not in ui._origins()):
+                    self._json(403, {"error": "Cross-origin control requests are forbidden"})
+                    return
+                if self.headers.get("Sec-Fetch-Site", "") == "cross-site":
+                    self._json(403, {"error": "Cross-site control requests are forbidden"})
+                    return
+                if urlsplit(self.path).path not in ("/command", "/commands"):
+                    self._json(404, {"error": "Unknown control endpoint"})
+                    return
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    self._json(415, {"error": "Control requests require application/json"})
+                    return
+                lengths = self.headers.get_all("Content-Length", [])
+                try:
+                    if len(lengths) != 1 or self.headers.get("Transfer-Encoding"):
+                        raise ValueError("An explicit body length is required")
+                    length = int(lengths[0])
+                    if not 0 < length <= 1024:
+                        raise ValueError("Control request body is too large or empty")
+                    body = self.rfile.read(length)
+                    if len(body) != length:
+                        raise ValueError("Incomplete control request body")
+                    value = json.loads(body)
+                    if (not isinstance(value, dict) or set(value) != {"command"}
+                            or not isinstance(value["command"], str) or value["command"] not in COMMANDS):
+                        raise ValueError("Unknown operator command")
+                except (ValueError, UnicodeDecodeError) as error:
+                    self._json(400, {"error": str(error)})
+                    return
+                except (TimeoutError, OSError):
+                    self._json(408, {"error": "Control request body timed out"})
+                    return
+                try:
+                    ui._queue_command(value["command"])
+                except (queue.Full, RuntimeError):
+                    self._json(503, {"error": "Control queue is full or the UI is closing"})
+                    return
+                self._json(202, {"queued": value["command"], "executed": False, "accepted_new_dataset": False})
+
+            def do_OPTIONS(self):
+                self._json(403, {"error": "Cross-origin control is not enabled"})
+
+        server_cls = _Server6 if self._ipv6 else _Server
+        self._server = server_cls((self._host, self._requested_port), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever,
+            kwargs={"poll_interval": .1}, name="PicoLocalTeleopUI", daemon=False)
+        self._thread.start()
+        return self
+
+    def _authorities(self):
+        port = self._server.server_address[1]
+        host = f"[{self._host}]" if self._ipv6 else self._host
+        return {f"{host}:{port}", f"localhost:{port}"}
+
+    def _origins(self):
+        return {"http://" + authority for authority in self._authorities()}
+
+    def _queue_command(self, command):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("The UI is closing")
+            self._commands.put_nowait(command)
+
+    def commands(self):
+        result = []
+        while True:
+            try:
+                result.append(self._commands.get_nowait())
+                self._commands.task_done()
+            except queue.Empty:
+                return result
+
+    def update(self, status, rgb=None):
+        if not isinstance(status, dict):
+            raise TypeError("UI status must be a dictionary")
+        copied_status = _copy_status(status)
+        copied_status["accepted_new_dataset"] = False
+        pixels = None
+        if rgb is not None:
+            pixels = np.asarray(rgb)
+            if (pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 3
+                    or min(pixels.shape[:2]) <= 0 or max(pixels.shape[:2]) > 4096):
+                raise ValueError("Preview requires actual uint8 RGB HxWx3 pixels")
+            pixels = pixels.copy(order="C")
+            pixels.flags.writeable = False
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("The UI is closed")
+            self._status = copied_status
+            if pixels is not None:
+                self._rgb = pixels
+                self._image_version += 1
+
+    def _status_snapshot(self):
+        with self._lock:
+            status, version, available = self._status, self._image_version, self._rgb is not None
+        return {"status": _json_status(status), "image_version": version,
+                "image_available": available, "accepted_new_dataset": False,
+                "data_label": "原始数据：待独立验收", "queued_commands": self._commands.qsize()}
+
+    @staticmethod
+    def _encode_jpeg(pixels):
+        from PIL import Image
+        stream = io.BytesIO()
+        Image.fromarray(pixels).save(stream, format="JPEG", quality=85)
+        return stream.getvalue()
+
+    def _latest_jpeg(self):
+        with self._encode_lock:
+            with self._lock:
+                pixels, version = self._rgb, self._image_version
+                if pixels is None:
+                    return None
+                if self._jpeg_version == version:
+                    return self._jpeg
+            encoded = self._encode_jpeg(pixels)
+            with self._lock:
+                self._jpeg, self._jpeg_version = encoded, version
+            return encoded
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._thread.join()
+
+
+class HeadsetVideoBridge:
+    """Optional real stereo-camera return path, independent of SDK/physics.
+
+    The PICO app sends OPEN_CAMERA to ``host:port`` using its existing binary
+    protocol. Frames come only from ``update``; this class never renders or
+    fabricates them. The expected headset IP is explicit for both incoming
+    control and outgoing video. H.264 is supported; unverified MV-HEVC requests
+    are rejected rather than silently changing their codec.
+    """
+
+    def __init__(self, *, expected_peer_ip, host="0.0.0.0", port=13579, fps=30,
+                 connect_timeout=1., send_timeout=.5):
+        peer = ipaddress.ip_address(expected_peer_ip)
+        bind = ipaddress.ip_address(host)
+        if peer.version != 4 or bind.version != 4 or peer.is_unspecified or peer.is_multicast:
+            raise ValueError("Camera transport requires explicit IPv4 headset/bind addresses")
+        if type(port) is not int or not 0 <= port <= 65535 or type(fps) is not int or not 1 <= fps <= 60:
+            raise ValueError("Invalid camera port or frame rate")
+        if not 0 < connect_timeout <= 5 or not 0 < send_timeout <= 5:
+            raise ValueError("Camera connect/send timeouts must be finite and <=5 seconds")
+        self.expected_peer_ip, self.host, self.port, self.fps = str(peer), str(bind), port, fps
+        self.connect_timeout, self.send_timeout = float(connect_timeout), float(send_timeout)
+        self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._server = self._streaming = self._frame_buffer = None
+        self._components = None
+        self._closed = False
+        self._status = {"listening": False, "streaming": False, "frames_submitted": 0,
+                        "frames_encoded": 0, "video_bytes_sent": 0, "error": None,
+                        "codec": "h264", "expected_peer_ip": self.expected_peer_ip,
+                        "headset_display_verified": False}
+
+    @property
+    def status(self):
+        with self._lock:
+            return _copy_status(self._status)
+
+    def _set_status(self, **values):
+        with self._lock:
+            self._status.update(values)
+
+    def start(self):
+        if self._closed:
+            raise RuntimeError("A closed headset bridge cannot be restarted")
+        if self._server is not None:
+            return self
+        # Lazy imports: importing this module and using LocalTeleopUI does not
+        # import SIMPLE, PyAV, Unitree, or any tracking SDK.
+        from simple.teleop.pico.tcp_server import TCPControlServer
+        from simple.teleop.pico.tcp_video_sender import TCPVideoSender
+        from simple.teleop.pico.streaming import FrameBuffer, StreamingThread
+
+        bridge = self
+
+        class PeerControlServer(TCPControlServer):
+            def _run(self):
+                try:
+                    while not self._stop_event.is_set():
+                        try:
+                            conn, address = self.listener.accept()
+                        except socket.timeout:
+                            continue
+                        except OSError:
+                            break
+                        if address[0] != bridge.expected_peer_ip:
+                            conn.close()
+                            bridge._set_status(error="Camera control peer IP rejected")
+                            continue
+                        try:
+                            self._handle_client(conn)
+                        except Exception as error:
+                            bridge._set_status(error=f"Camera control failed: {type(error).__name__}: {error}")
+                finally:
+                    self.listener.close()
+
+            def _read_framed(self, conn):
+                header = self._recv_exactly(conn, 4)
+                if header is None:
+                    return None
+                length, = struct.unpack(">I", header)
+                if not 8 <= length <= 8192:
+                    bridge._set_status(error="Camera control frame length rejected")
+                    return None
+                return self._recv_exactly(conn, length, deadline=time.monotonic() + 2.)
+
+            def _recv_exactly(self, conn, length, deadline=None):
+                chunks = bytearray()
+                while len(chunks) < length and not self._stop_event.is_set():
+                    if deadline is not None and time.monotonic() > deadline:
+                        bridge._set_status(error="Partial camera control frame timed out")
+                        return None
+                    try:
+                        chunk = conn.recv(length - len(chunks))
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        return None
+                    if not chunk:
+                        return None
+                    if deadline is None:
+                        deadline = time.monotonic() + 2.
+                    chunks.extend(chunk)
+                return bytes(chunks) if len(chunks) == length else None
+
+            def stop(self):
+                worker = self._thread
+                self._stop_event.set()
+                self.listener.close()
+                conn = self._current_conn
+                if conn is not None:
+                    try:
+                        conn.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                super().stop()
+                if worker is not None and worker.is_alive():
+                    worker.join()
+
+        class DeadlineVideoSender(TCPVideoSender):
+            def __init__(self, **parameters):
+                try:
+                    super().__init__(**parameters)
+                except BaseException:
+                    sock = getattr(self, "_sock", None)
+                    if sock is not None:
+                        sock.close()
+                        self._sock = None
+                    raise
+
+            def _connect(self):
+                self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._sock.settimeout(bridge.connect_timeout)
+                try:
+                    self._sock.connect((self._ip, self._port))
+                    self._sock.settimeout(bridge.send_timeout)
+                except BaseException:
+                    self._sock.close()
+                    self._sock = None
+                    raise
+
+            def publish_raw_frame(self, frame):
+                if self._closed:
+                    return
+                import av
+                # Resize each eye independently and preserve its aspect ratio.
+                # All resize/encode work runs in StreamingThread, not update.
+                if frame.shape[:2] != (self._height, self._width):
+                    source_h, source_w = frame.shape[0], frame.shape[1] // 2
+                    target_w = self._width // 2
+                    scale = min(target_w / source_w, self._height / source_h)
+                    width, height = max(1, int(source_w * scale)), max(1, int(source_h * scale))
+                    resized = np.zeros((self._height, self._width, 3), dtype=np.uint8)
+                    for eye in range(2):
+                        original = frame[:, eye * source_w:(eye + 1) * source_w]
+                        pixels = av.VideoFrame.from_ndarray(original, format="bgr24").reformat(
+                            width=width, height=height, format="bgr24").to_ndarray()
+                        y, x = (self._height - height) // 2, eye * target_w + (target_w - width) // 2
+                        resized[y:y + height, x:x + width] = pixels
+                    frame = resized
+                try:
+                    super().publish_raw_frame(frame)
+                    with bridge._lock:
+                        bridge._status["frames_encoded"] += 1
+                except Exception as error:
+                    bridge._set_status(streaming=False, error=f"Camera encode/send failed: {type(error).__name__}: {error}")
+                    raise
+
+            def _send_packets(self, packets):
+                for packet in packets:
+                    data = bytes(packet)
+                    if data and self._sock is not None:
+                        self._sock.sendall(struct.pack(">I", len(data)) + data)
+                        with bridge._lock:
+                            bridge._status["video_bytes_sent"] += len(data) + 4
+
+            def close(self):
+                if self._closed and self._sock is None:
+                    return
+                self._closed = True
+                try:
+                    if self._encoder is not None:
+                        self._send_packets(self._encoder.encode(None))
+                except Exception:
+                    pass
+                finally:
+                    if self._sock is not None:
+                        try:
+                            self._sock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        self._sock.close()
+                        self._sock = None
+
+        class PacedStreamingThread(StreamingThread):
+            def _run(self):
+                # Upstream StreamingThread uses fps only as a get() timeout;
+                # enforce the negotiated publication cap for a 50 Hz producer.
+                period, deadline = 1. / self._fps, time.monotonic()
+                try:
+                    while not self._stop_event.is_set():
+                        if self._stop_event.wait(max(0., deadline - time.monotonic())):
+                            break
+                        frame = self._frame_buffer.get(timeout=min(period, .1))
+                        if frame is None:
+                            deadline = time.monotonic()
+                            continue
+                        for publisher in self._publishers:
+                            publisher.publish_raw_frame(frame)
+                        deadline = max(deadline + period, time.monotonic())
+                except Exception as error:
+                    bridge._set_status(streaming=False, error=f"Camera streaming stopped: {type(error).__name__}: {error}")
+                finally:
+                    for publisher in self._publishers:
+                        publisher.close()
+                    if self._on_ended:
+                        self._on_ended()
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((self.host, self.port))
+            listener.listen(1)
+            listener.settimeout(.2)
+            self.port = listener.getsockname()[1]
+            control = PeerControlServer(f"{self.host}:{self.port}")
+            control.listener = listener
+            control.on_open_camera = self._open_camera
+            control.on_close_camera = self._close_camera
+            self._components = (DeadlineVideoSender, PacedStreamingThread)
+            self._frame_buffer = FrameBuffer()
+            self._server = control
+            control.start()
+            self._set_status(listening=True, control_address=f"{self.host}:{self.port}")
+        except BaseException:
+            listener.close()
+            raise
+        return self
+
+    def _open_camera(self, request):
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            if self._streaming is not None and self._streaming.is_running():
+                return
+            try:
+                if str(ipaddress.ip_address(request.get("ip", ""))) != self.expected_peer_ip:
+                    raise ValueError("Camera return IP does not match the connected headset")
+                values = {key: request[key] for key in ("width", "height", "fps", "bitrate", "port")}
+                if any(type(value) is not int for value in values.values()):
+                    raise ValueError("Camera dimensions/rate/port must be integers")
+                if (not 16 <= values["width"] <= 2560 or values["width"] % 2
+                        or not 16 <= values["height"] <= 1440 or values["height"] % 2
+                        or not 1 <= values["fps"] <= 60 or not 128000 <= values["bitrate"] <= 16000000
+                        or not 1 <= values["port"] <= 65535):
+                    raise ValueError("Camera request is outside bounded video limits")
+                if request.get("enableMvHevc"):
+                    raise ValueError("MV-HEVC is not verified; select H.264 for camera return")
+                sender_cls, streaming_cls = self._components
+                sender = sender_cls(ip=self.expected_peer_ip, port=values["port"],
+                    width=values["width"], height=values["height"], fps=min(values["fps"], self.fps),
+                    bitrate=values["bitrate"], hevc=False)
+                self._streaming = streaming_cls(self._frame_buffer, fps=min(values["fps"], self.fps),
+                                               publishers=[sender], on_ended=self._stream_ended)
+                self._set_status(streaming=True, error=None, requested_camera=_copy_status(request),
+                    output_fps=min(values["fps"], self.fps), output_shape=[values["height"], values["width"], 3])
+                self._streaming.start()
+            except Exception as error:
+                self._set_status(streaming=False, error=f"Camera open failed: {type(error).__name__}: {error}")
+
+    def _stream_ended(self):
+        self._set_status(streaming=False)
+        if self._server is not None:
+            self._server.close_client()
+
+    def _close_camera(self):
+        with self._lifecycle_lock:
+            if self._streaming is not None:
+                worker = self._streaming._thread
+                self._streaming.stop()
+                if worker is not None and worker.is_alive():
+                    worker.join()
+                self._streaming = None
+            self._set_status(streaming=False)
+
+    def update(self, left_rgb, right_rgb=None):
+        if self._closed or self._frame_buffer is None:
+            return False
+        if isinstance(left_rgb, dict) and right_rgb is None:
+            observation = left_rgb
+            left_rgb, right_rgb = observation.get("head_stereo_left"), observation.get("head_stereo_right")
+        left, right = np.asarray(left_rgb), np.asarray(right_rgb)
+        if (left.dtype != np.uint8 or right.dtype != np.uint8 or left.ndim != 3
+                or right.shape != left.shape or left.shape[2] != 3 or min(left.shape[:2]) <= 0
+                or max(left.shape[:2]) > 4096):
+            raise ValueError("Headset return requires the actual matching left/right uint8 RGB frames")
+        # Concatenation owns its pixels; the simulation can reuse both inputs.
+        stereo_bgr = np.concatenate([left[..., ::-1], right[..., ::-1]], axis=1)
+        self._frame_buffer.put(stereo_bgr)
+        with self._lock:
+            self._status["frames_submitted"] += 1
+            self._status["last_frame_monotonic_s"] = time.monotonic()
+        return True
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._server is not None:
+            self._server.stop()
+        self._close_camera()
+        self._set_status(listening=False, streaming=False)

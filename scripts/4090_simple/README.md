@@ -353,3 +353,14 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 每1000步保存并保留全部模型权重；仅本新run超过最近两份的optimizer/scheduler/RNG会移除，
 旧run和旧数据保留。实际更新2/20/最终步检查各卡有限性、参数探针一致性及内存，
 单次短检查不代表完整训练或策略成功率已通过。
+
+## PICO 仿真遥操作采集
+
+`bash scripts/4090_simple/start_pico_teleop.sh` 使用已有 Conda 仿真环境，接入
+PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoCo、
+50Hz decoder、30Hz实际状态和命令录制。默认实时MuJoCo EGL双目预览，退出后
+以同一归档状态补渲染RTX训练图像并独立审计，不重跑物理。电脑面板只监听127.0.0.1，
+双目 H.264 另回传指定 PICO。设备设置、按键与校准、实时失败处理、独立数据验收
+及实际验证边界见[采集说明](../../docs/PICO_SIMPLE_TELEOP.md)。
+`audit_pico_teleop_episode.py EPISODE_DIR` 独立审计原始录制；回放／固定姿态诊断
+不增加人类示范数量，通过审计后仍需特征与训练协议打包。

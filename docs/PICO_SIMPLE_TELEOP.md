@@ -21,6 +21,20 @@ bash scripts/4090_simple/start_pico_teleop.sh
 电脑控制面板为 `http://127.0.0.1:43100/`，只监听本机；端口冲突时传 `--port`。
 可用 `--output /绝对新目录` 指定录制位置，拒绝覆盖已有目录或写入 Git。
 
+需要在4090主机显示大画面时，另开终端启动只读预览：
+
+```bash
+cd /home/zxc/CVPR_Evaluation
+/home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
+  scripts/4090_simple/pico_desktop_preview.py
+```
+
+打开 `http://127.0.0.1:43101/`，可点击“全屏画面”。它复用采集器实际左眼 JPEG，
+显示追踪、标定、跟随与录制状态；不创建新的 SDK 订阅、仿真或录制器。
+默认画面为 MuJoCo EGL 操作反馈，训练用 RTX 图像仍在退出后补渲染。
+采集器使用其他端口时传 `--collector-port`，预览自身端口可用 `--port` 修改。
+PICO 仍须保持 XRoboToolkit 前台及 Send 开启，电脑看画面不需要打开头显 Camera。
+
 1. 戴好头显、站直、双脚落地，双手处于自然可跟踪姿态。先检查控制面板全身数据有效。
 2. 按左手柄 **X：校准**。校准使用实际机器人朝向和六个腕部关节；倾斜起始姿态会拒绝。
 3. 按左手柄 **Y：开始跟随／暂停**。先小幅左右移动双臂、屈伸腿，检查左右、方向及抓持。
@@ -40,9 +54,12 @@ source /home/zxc/CVPR_Evaluation_runtime/local.env.sh
   /home/zxc/CVPR_Evaluation_runtime/pico_human_demos/某次运行
 ```
 
-**B 留给 PICO 应用相机开关，不绑定仿真动作。** 启动脚本同时提供 TCP 13579
-双目 H.264 回传；PICO 中打开 Camera，关闭 MV-HEVC 模式。只有实际在头显中看到
-正确左右眼画面后，才算头显反馈验收完成。电脑网页也可查看实际左眼画面。
+**B 未绑定仿真动作，也不能作为 XRoboToolkit 1.1.1 的相机打开入口。**
+可选头显回传由启动脚本提供 TCP 13579 双目 H.264 服务。按已核对的官方
+1.1.1 客户端，Camera → Remote Vision → Listen 会请求 Camera Source IP，
+填写电脑局域网地址 `172.16.20.42`，关闭 MV-HEVC 模式；此窗口不填写端口。
+只有实际在头显中看到正确左右眼画面后，才算头显反馈验收完成。
+当前可直接使用上述电脑大画面进行显示，实际头显回传仍未验收。
 
 XRoboToolkit 的 PC SDK 只支持一个反馈消费者；不要同时启动上游 PicoManager、
 Unity Demo 的 SDK 订阅或其他接收诊断。本入口不结束这些外部进程，只取得一个本入口
@@ -114,6 +131,7 @@ loopback H.264 编解码测试。固定中立姿态诊断通过真实 MuJoCo／S
 已有600包真实 PICO 诊断的初始参考躯干倾角约50°，从站姿直接跟随会跌倒，故不能
 作为站直校准样本。此现象尚不能单独区分当时佩戴姿态与系统标定问题。
 本次机器可读记录：`/home/zxc/CVPR_Evaluation_runtime/pico_teleop_20261025/VALIDATION.json`。
-实际佩戴的标定、双手动作、头显显示和成功Handover仍须逐项验收；不能用上述诊断代替。
+实际佩戴后已接收24点全身骨架，站直标定通过；4090网页大画面已显示实际场景。
+双手跟随动作、真实录制和成功Handover仍须逐项验收；不能用上述诊断代替。
 当前真人接收端保留待机；原始输入仅由同一个SDK订阅读取，暂停时的最近原始包保存在
 运行目录`latest_pico_input.json`，避免启动第二个诊断客户端抢占订阅。

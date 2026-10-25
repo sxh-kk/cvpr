@@ -39,7 +39,7 @@ button:hover{background:#3b516b}button:disabled{opacity:.5;cursor:wait}.primary{
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}details{margin-top:20px}#phase{font-weight:600}
 </style><h1>PICO 遥操作采集</h1><div class="muted">当前状态：<span id="phase">等待电脑状态</span></div>
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
-<p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · B 头显相机 · 左右扳机抓握。开始录制后先保持姿势 1 秒。</p>
+<p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右扳机抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
 <div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" alt="当前仿真相机画面" hidden></div>
 <div class="bar">
 <button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>

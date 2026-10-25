@@ -26,6 +26,8 @@ from pico_live_input import PicoReceiver, parse_tracking, validate_frame
 from pico_sonic_reference import PicoSonicReference, WRIST_NAMES, GEAR, body24_to_smpl
 from pico_teleop_recording import AsyncTrainingCapture, CommandLedger, RecordingState
 from pico_hand_control import named_hand_targets, profile_receipt, hand_feedback
+from pico_cpu_runtime import configure_cpu_runtime
+from pico_capture_start import CaptureStartGate
 from replay_handover_teacher import (MODEL_HAND_NAMES, RENDERER_LINKS, applied_force_state,
     bound_calibration_assets, calibration_source_identities, capture_tick_index,
     file_sha256, json_text, write_json)
@@ -117,7 +119,8 @@ def source_code_identities():
              'pico_teleop_recording.py','pico_teleop_ui.py','pico_deferred_capture.py',
              'render_deferred_pico.py','finish_pico_session.py','audit_pico_teleop_episode.py',
              'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py',
-             'pico_hand_control.py','pico_episode_history.py','pico_episode_review.py')
+             'pico_hand_control.py','pico_episode_history.py','pico_episode_review.py',
+             'pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py')
     directory = Path(__file__).resolve().parent
     return {name:file_sha256(directory/name) for name in names}
 
@@ -129,7 +132,8 @@ EPISODE_SESSION_FIELDS = (
     'calibration_source_asset_sha256','source_code_sha256_at_session_start',
     'environment_config_source','replay_source_sha256','controller_identity','encoder_identity',
     'hand_control_profile','egl_backend_selection','actual_mujoco_gl_module',
-    'review_mode','review_collection_enabled')
+    'review_mode','review_collection_enabled','cpu_runtime','preview_protocol',
+    'capture_start_protocol','live_status_transport')
 
 
 def episode_session_identity(session_result):
@@ -366,10 +370,42 @@ def rising_operator_commands(buttons, last_buttons):
         if buttons.get(key,False) and not last_buttons.get(key,False)]
 
 
-def recording_command_guard(action, *, episode_active):
+def recording_command_guard(action, *, episode_active, episode_status=None):
     """A calibration request cannot alter or reject an unfinished demonstration."""
     if action == 'calibrate' and episode_active:
         return '当前示例尚未结束，请先保存后再校准；已忽略本次校准请求，录制继续。'
+    if action == 'save' and episode_active and episode_status in ('start_requested','warmup'):
+        return '正在准备起录或记录一秒起始姿势，请稍候再保存；本次提前保存已忽略，录制继续。'
+    return None
+
+
+def preview_receipt(frame):
+    return {'status':'ready','epoch':frame.epoch,'source_tick50':frame.source_tick50,
+        'sim_time_s':frame.sim_time_s,'frame_id':frame.frame_id,'request_id':frame.request_id,
+        'state_sha256':frame.state_sha256,'submitted_monotonic_s':frame.submitted_monotonic_s,
+        'received_monotonic_s':frame.received_monotonic_s,'age_s':frame.receive_age_s,
+        'render_wall_s':frame.render_wall_s,'training_observation':False,'max_age_s':.1,
+        'delivery_scope':'collector poll only; no browser/headset viewing acknowledgement',
+        'paused_render_request':frame.evidence.get('paused_render_request',False),
+        'repeated_physical_source':frame.evidence.get('repeated_physical_source',False),
+        'state_restoration':{key:frame.evidence.get(key) for key in
+            ('full_integration_state_unchanged','physics_steps','forward_dynamics_calls','model_sha256')}}
+
+
+def current_preview_feedback(receipt, *, following, now=None):
+    feedback = copy.deepcopy(receipt or {'status':'waiting'})
+    if receipt and following:
+        feedback['age_s'] = (time.monotonic() if now is None else now)-receipt['submitted_monotonic_s']
+        if feedback['age_s']>.1:
+            feedback['status']='waiting'
+    return feedback
+
+
+def capture_preparation_interrupt(commands):
+    """Act on operator stop intentions before the first command is committed."""
+    for action in ('quit','discard','reset','pause','toggle_follow'):
+        if action in commands:
+            return action
     return None
 
 
@@ -796,6 +832,7 @@ def run(args):
     if args.diagnostic_record and (not args.pico_replay or args.render_mode == 'none'):
         raise ValueError('Diagnostic capture requires recorded input and an explicit preview/capture mode')
     output.mkdir(parents=True)
+    cpu_runtime = configure_cpu_runtime()
     resources = args.sonic_resources.resolve(strict=True)
     data_root, asset_shas = bound_calibration_assets(args.data_root, calibration_source_identities())
     environment_state = environment_receipt = None
@@ -818,8 +855,14 @@ def run(args):
         'source_code_sha256_at_session_start':source_code_identities(),
         'environment_config_source':environment_receipt,
         'replay_source_sha256':file_sha256(args.pico_replay) if replay else None}
+    result.update(cpu_runtime=cpu_runtime.receipt,
+        capture_start_protocol='cvpr-pico-frozen-capture-start-v1' if deferred else None,
+        live_status_transport='localhost HTTP; periodic disk status only while paused')
     write_json(output/'result.json', result)
-    env = ui = receiver = video_bridge = render_profiler = None
+    env = ui = receiver = video_bridge = render_profiler = preview_worker = None
+    preview_epoch = -1
+    preview_frame_receipt = None
+    capture_start_receipt = None
     capture = ledger = None
     episode = None
     quality_stream = force_stream = control_trace = None
@@ -858,6 +901,7 @@ def run(args):
     def finalize(completed=False, reason=None):
         nonlocal capture, ledger, episode, quality_stream, force_stream, following
         nonlocal history_status, latest_finished_uuid, operator_message
+        nonlocal capture_start_receipt
         if episode is None:
             return
         closing_episode, closing_capture, closing_ledger = episode, capture, ledger
@@ -878,6 +922,12 @@ def run(args):
             outcome['quality_geometry_expected_cache_sha256'] = prepared_geometry_cache['sha256']
         directory = output/'episodes'/closing_episode.human_demo_uuid
         directory.mkdir(parents=True,exist_ok=True)
+        if capture_start_receipt is not None:
+            receipt_path = directory/'capture_start_receipt.json'
+            write_json(receipt_path,capture_start_receipt)
+            outcome['capture_start_receipt'] = {'path':receipt_path.name,
+                'sha256':file_sha256(receipt_path),'contract':capture_start_receipt['contract']}
+        capture_start_receipt = None
         write_json(directory/'episode.json', outcome)
         if review_queue is not None and capture_started:
             # The raw evidence is immutable from here. The independent worker
@@ -935,6 +985,10 @@ def run(args):
             result['saved_scene_manager_binding'] = bind_saved_scene_manager(raw.task,environment_state)
         if args.render_mode == 'none':
             raw.task.sensor_cfgs = {}
+            raw._render_frame = lambda: {}
+        elif deferred:
+            # Operator feedback is a private no-step renderer. The control
+            # process still observes/archives every original physical state.
             raw._render_frame = lambda: {}
         elif rendered:
             raw._render_frame = lambda: raw.isaac.render()
@@ -1026,18 +1080,67 @@ def run(args):
         write_json(output/'result.json',result)
         result['standing_warmup_readiness'] = require_standing_warmup(
             result['initial_physical_state'], result['post_warmup_physical_state'])
+        def configure_preview():
+            nonlocal preview_worker,preview_epoch,preview_frame_receipt
+            if not deferred:
+                return
+            from pico_async_preview import AsyncMujocoPreview, CONTRACT
+            if preview_worker is None:
+                cpus = sorted(os.sched_getaffinity(0)) if hasattr(os,'sched_getaffinity') else None
+                preview_worker = AsyncMujocoPreview(cpu_affinity=cpus[-2:-1] if cpus and len(cpus)>1 else cpus).start()
+            preview_epoch += 1
+            preview_frame_receipt = None
+            if ui:
+                ui.update({'status':'resetting','recording':None,
+                    'operator_message':'正在准备新场景相机，完成后再开始录制。',
+                    'preview_feedback':{'status':'waiting','epoch':preview_epoch}},clear_image=True)
+            cameras = {'head_stereo_left':(640,360)}
+            if args.headset_video:
+                cameras['head_stereo_right'] = (640,360)
+            status = preview_worker.configure(prepared_deferred.model_path,prepared_deferred.model_sha256,
+                int(mujoco.mjtState.mjSTATE_INTEGRATION),
+                mujoco.mj_stateSize(model,mujoco.mjtState.mjSTATE_INTEGRATION),
+                cameras=cameras,epoch=preview_epoch)
+            result['preview_protocol'] = {'contract':CONTRACT,'independent_process':True,
+                'physics_steps':0,'forward_dynamics_calls':0,'latest_only_feedback':True,
+                'training_observation':False,'cameras':cameras,
+                'worker_policy':status.get('worker'),'maximum_frame_delivery_age_s':.1}
+            initial_state = integration_state_snapshot(mujoco,model,data,float(data.time))
+            preview_worker.submit_paused(initial_state,float(data.time),preview_epoch,0)
+            # Initialization/reset is paused; require an actual camera frame
+            # before offering the next episode to the operator.
+            timeout = time.monotonic()+5.
+            retry_at = time.monotonic()+.15
+            while time.monotonic()<timeout:
+                ready = preview_worker.poll()
+                if ready is not None:
+                    preview_frame_receipt = preview_receipt(ready)
+                    ui.update({'status':'resetting','recording':None,
+                        'preview_feedback':preview_frame_receipt},ready.images['head_stereo_left'])
+                    if video_bridge:
+                        video_bridge.update({**ready.images,'sim_time_s':ready.sim_time_s})
+                    return
+                worker_status = preview_worker.status()
+                if worker_status.get('error'):
+                    raise RuntimeError('Preview worker: '+worker_status['error'])
+                if time.monotonic()>=retry_at:
+                    preview_worker.submit_paused(initial_state,float(data.time),preview_epoch,0)
+                    retry_at = time.monotonic()+.15
+                time.sleep(.002)
+            raise RuntimeError('相机预览未就绪，仿真保持暂停')
+
+        if args.headset_video:
+            from pico_teleop_ui import HeadsetVideoBridge
+            video_bridge = HeadsetVideoBridge(expected_peer_ip=args.pico_ip).start()
+            if 'head_stereo_left' in obs:
+                video_bridge.update(obs)
+        configure_preview()
         result.update(controller_identity=controller.identity,warmup=warmup.receipt,
             encoder_identity=reference.identities,status='waiting_for_calibration')
         session_identity = episode_session_identity(result)
         scene_metadata = current_scene_receipt(result['initialization'],result['standing_warmup_readiness'])
         if not replay:
             receiver = PicoReceiver().start()
-        if args.headset_video:
-            from pico_teleop_ui import HeadsetVideoBridge
-            video_bridge = HeadsetVideoBridge(expected_peer_ip=args.pico_ip).start()
-            # Let the operator see the paused initial scene before calibrating.
-            # The latest-frame buffer retains this until the camera connects.
-            video_bridge.update(obs)
         frame = previous = None
         last_buttons = {}
         pending_input_commands = []
@@ -1178,6 +1281,7 @@ def run(args):
             prepared_geometry_cache = prepare_quality_geometry(cache,output,geometry_cache_index)
             result['prepared_quality_geometry_caches'].append(prepared_geometry_cache)
             scene_metadata = current_scene_receipt(reset_initialization,reset_readiness)
+            configure_preview()
             raw.mujoco.step = measured_step
             substeps=0; global_tick=0; command=None; previous=None
             last_preview_time=None
@@ -1186,7 +1290,7 @@ def run(args):
             wall_deadline=None; last_step_wall=None
             hands=None; active_local=None
             quality={'valid':False,'reasons':['waiting_for_tracking_after_reset']}
-            if video_bridge:
+            if video_bridge and 'head_stereo_left' in obs:
                 video_bridge.update(obs)
             operator_message = '新场景已准备，请站直后重新校准，再开始下一条录制。'
 
@@ -1237,7 +1341,8 @@ def run(args):
                     action = 'pause' if following else 'follow'
                 if action == 'toggle_record':
                     action = 'save' if episode else 'record'
-                command_notice = recording_command_guard(action,episode_active=episode is not None)
+                command_notice = recording_command_guard(action,episode_active=episode is not None,
+                    episode_status=episode.status if episode else None)
                 if command_notice:
                     operator_message = command_notice
                     continue
@@ -1344,6 +1449,10 @@ def run(args):
                         continue
                     state = episode.on_tick(global_tick) if episode else None
                     if state and state['started']:
+                        setup_started_wall = time.monotonic()
+                        start_gate = CaptureStartGate(episode.human_demo_uuid,global_tick,
+                            float(data.time),substeps,
+                            integration_state_snapshot(mujoco,model,data,obs['sim_time_s']),frame) if deferred else None
                         directory = output/'episodes'/episode.human_demo_uuid
                         directory.mkdir(parents=True)
                         initial_z = float(raw.mujoco.mj_objects['target'].xpos[2])
@@ -1362,6 +1471,45 @@ def run(args):
                         ledger = CommandLedger(directory/'commands.jsonl',human_demo_uuid=episode.human_demo_uuid,metadata=metadata)
                         quality_stream=(directory/'raw_quality_samples.jsonl').open('x',buffering=1)
                         force_stream=(directory/'applied_force_samples.jsonl').open('w',buffering=1)
+                        if start_gate is not None:
+                            # Preparatory file I/O owns no physical samples.
+                            # Revalidate the same receiver without resetting the
+                            # encoder's last accepted pose/time or earlier lag.
+                            if replay:
+                                # Diagnostic source time advances through the
+                                # frozen boundary; these skipped input packets
+                                # are never represented as captured grid frames.
+                                source_elapsed += time.monotonic()-setup_started_wall
+                                after_frame = replay.at(source_elapsed)
+                            else:
+                                after_frame,_ = wait_fresh_command_frame(receiver,frame,
+                                    frame.device_timestamp_ns,setup_started_wall+.20)
+                            after_quality = validate_frame(after_frame,previous=frame)
+                            setup_commands = ui.commands()+rising_operator_commands(after_frame.buttons,last_buttons)
+                            last_buttons = dict(after_frame.buttons)
+                            interrupt = capture_preparation_interrupt(setup_commands)
+                            if interrupt == 'quit':
+                                break
+                            if interrupt is not None:
+                                reason = 'operator_discard' if interrupt == 'discard' else 'operator_'+interrupt+'_during_preparation'
+                                if interrupt == 'discard':
+                                    episode.discard(reason)
+                                reject_and_pause(reason)
+                                # A reset request is still honored when the
+                                # zero-frame raw attempt did not auto-reset.
+                                if interrupt == 'reset' and reset_generation == reset_generation_at_loop_start:
+                                    reset_scene(reason='operator_reset_during_preparation')
+                                continue
+                            pending_input_commands.extend(setup_commands)
+                            wall_deadline,capture_start_receipt = start_gate.finish(wall_deadline,
+                                after_global_tick=global_tick,after_sim_time=float(data.time),after_substeps=substeps,
+                                after_state=integration_state_snapshot(mujoco,model,data,obs['sim_time_s']),
+                                frame=after_frame,quality=after_quality,event_count=capture.count,
+                                ledger_event_count=ledger._count,quality_bytes=quality_stream.tell(),
+                                force_bytes=force_stream.tell(),max_lateness=args.max_lateness)
+                            frame = previous = after_frame
+                            quality = after_quality
+                            lateness = time.monotonic()-wall_deadline
                     due = capture_tick_index(global_tick) is not None
                     control_tick_started = time.perf_counter()
                     encode_seconds = 0.
@@ -1395,7 +1543,9 @@ def run(args):
                             ledger.append('command',physical_tick50=state['local_tick50'],sim_time_s=float(data.time),
                                 source_sequence=frame.sequence,device_timestamp_ns=frame.device_timestamp_ns,
                                 source_host_received_s=frame.host_received_s,source_raw_packet=frame.raw_payload,
-                                body_token64=token,named_hand_targets=hands,reference_evidence=evidence)
+                                body_token64=token,named_hand_targets=hands,reference_evidence=evidence,
+                                operator_preview_feedback=current_preview_feedback(preview_frame_receipt,following=True) if deferred else None,
+                                **({'capture_start_receipt':capture_start_receipt} if state['local_tick50']==0 and capture_start_receipt else {}))
                     if capture and state['capture_due']:
                         pelvis=model.body('pelvis').id; root_joint=int(model.body_jntadr[pelvis]); dof=int(model.jnt_dofadr[root_joint])
                         capture_values = dict(tick50=state['local_tick50'],sim_time_s=float(data.time),
@@ -1409,16 +1559,20 @@ def run(args):
                         if deferred:
                             integration_state = integration_state_snapshot(mujoco,model,data,obs['sim_time_s'])
                             capture.append(**capture_values,integration_state=integration_state,
-                                preview_rgb=obs['head_stereo_left'],source_fields={
+                                preview_rgb=None,source_fields={
                                     'source_raw_packet':frame.raw_payload,
                                     'source_host_received_s':frame.host_received_s,
                                     'source_sequence':frame.sequence,'device_timestamp_ns':frame.device_timestamp_ns,
+                                    'operator_preview_feedback':current_preview_feedback(preview_frame_receipt,following=True),
                                     'reference_evidence':reference_evidence,
                                     'observation_sim_time_s':obs['sim_time_s']})
                         else:
                             capture.enqueue(**capture_values,rgb=obs['head_stereo_left'],
                                 renderer_pose_diagnostics=getattr(raw.isaac,'last_observation_pose_diagnostics',None),
                                 renderer_authoritative_poses=actual_renderer_poses(model,data),observation_sim_time_s=obs['sim_time_s'])
+                    if preview_worker and due:
+                        preview_state = integration_state_snapshot(mujoco,model,data,obs['sim_time_s'])
+                        preview_worker.submit(preview_state,float(data.time),preview_epoch,global_tick)
                     active_local = state['local_tick50'] if state and state['recording'] else None
                     render_next = capture_tick_index(global_tick+1) is not None
                     if render_profiler:
@@ -1430,6 +1584,7 @@ def run(args):
                     control_trace.write(json_text({'phase':'pico_follow','tick50':global_tick,
                         'source_sequence':frame.sequence,'source_device_timestamp_ns':frame.device_timestamp_ns,
                         'source_inputs':dict(frame.inputs),'named_hand_targets':dict(hands),
+                        'latest_delivered_preview':current_preview_feedback(preview_frame_receipt,following=True) if deferred else None,
                         'new_command30':new_command,'reference':reference_evidence if new_command else None,
                         'timing_s':{'reference_encode':encode_seconds,'environment_step':step_seconds,
                             'fresh_input_wait':input_wait_seconds,
@@ -1500,6 +1655,19 @@ def run(args):
                     feedback_error = str(invalid_feedback)
             preview_rgb = obs.get('head_stereo_left')
             preview_time = (id(model),float(obs.get('sim_time_s',data.time)))
+            preview_feedback = None
+            if preview_worker:
+                ready = preview_worker.poll()
+                if ready is not None:
+                    preview_rgb = ready.images['head_stereo_left']
+                    preview_time = (ready.epoch,ready.frame_id)
+                    preview_frame_receipt = preview_receipt(ready)
+                    if video_bridge:
+                        video_bridge.update({**ready.images,'sim_time_s':ready.sim_time_s})
+                preview_feedback = current_preview_feedback(preview_frame_receipt,following=following)
+                worker_status = preview_worker.status()
+                if worker_status.get('error'):
+                    preview_feedback.update(status='error',error=worker_status['error'])
             if preview_rgb is not None:
                 if last_preview_time == preview_time:
                     preview_rgb = None
@@ -1514,6 +1682,7 @@ def run(args):
                 'sim_time_s':float(data.time),'decoder_calls':controller.decoder_calls,
                 'maximum_lag_s':max_lateness,'output':str(output),'accepted_new_dataset':False,
                 'render_engine':result['render_engine'],
+                'preview_feedback':preview_feedback,
                 'headset_video':{'enabled':True,**video_bridge.status} if video_bridge else {'enabled':False},
                 'note':('MuJoCo实时预览；保存后待RTX同状态补图及独立验收，尚非训练数据' if deferred
                         else '保存后仍需独立物理、图像和数据验收；不会自动标为成功数据')},preview_rgb)
@@ -1531,14 +1700,7 @@ def run(args):
                     simulated_control_ticks=global_tick,maximum_lag_s=max_lateness,last_error=error_text)
                 # The full receipt grows with saved/rejected episodes. Serialize
                 # it only while paused; real-time control writes a bounded status.
-                if following:
-                    write_json(output/'live_status.json',{
-                        'status':'following','decoder_calls':controller.decoder_calls,
-                        'simulated_control_ticks':global_tick,'maximum_lag_s':max_lateness,
-                        'last_error':error_text,'hand_control':feedback,
-                        'previous_loop_wall_timing':last_loop_wall_timing,
-                        'accepted_new_dataset':False})
-                else:
+                if not following:
                     write_json(output/'result.json',result)
                 last_result_write_wall = time.monotonic()
             last_loop_wall_timing = loop_timer.finish()
@@ -1563,7 +1725,7 @@ def run(args):
             except Exception as review_close_error:
                 result.setdefault('cleanup_errors',{})['background_review'] = repr(review_close_error)
         for name, component in (('receiver',receiver),('headset_video',video_bridge),
-                                ('ui',ui),('control_trace',control_trace),('render_profiler',render_profiler)):
+                                ('preview_worker',preview_worker),('ui',ui),('control_trace',control_trace),('render_profiler',render_profiler)):
             if component:
                 try:
                     component.close()
@@ -1581,6 +1743,7 @@ def run(args):
                 decoder_calls=controller.decoder_calls,last_error=error_text)
         result['environment_close_requested'] = env is not None
         write_json(output/'result.json',result)
+        cpu_runtime.close()
         if env:
             env.close()
     return result

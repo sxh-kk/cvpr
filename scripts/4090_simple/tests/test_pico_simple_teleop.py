@@ -149,6 +149,45 @@ class EntryGuardTests(unittest.TestCase):
         for action in ('pause','save','discard','reset','record','follow'):
             self.assertIsNone(entry.recording_command_guard(action,episode_active=True))
 
+    def test_early_save_during_real_warmup_does_not_reject_the_attempt(self):
+        episode=entry.RecordingState()
+        episode.request_start()
+        for status in ('start_requested','warmup'):
+            if status=='warmup':
+                episode.on_tick(0)
+            state,events=self.operator_loop(['save'],episode)
+            self.assertEqual(events,[])
+            self.assertIs(state['episode'],episode)
+            self.assertEqual(episode.status,status)
+            self.assertTrue(state['following'])
+            self.assertIn('提前保存已忽略',state['operator_message'])
+
+    def test_preparation_honors_stop_intentions_before_first_physical_command(self):
+        for action in ('quit','discard','reset','pause','toggle_follow'):
+            self.assertEqual(entry.capture_preparation_interrupt(['calibrate',action,'save']),action)
+        self.assertEqual(entry.capture_preparation_interrupt(['reset','quit']),'quit')
+        self.assertIsNone(entry.capture_preparation_interrupt(['calibrate','save']))
+
+    def test_preview_receipt_preserves_physical_source_instead_of_current_control_clock(self):
+        frame=SimpleNamespace(epoch=3,source_tick50=45,sim_time_s=1.9,frame_id=17,request_id=19,
+            state_sha256='a'*64,submitted_monotonic_s=10.,received_monotonic_s=10.03,
+            receive_age_s=.03,render_wall_s=.012,evidence={})
+        receipt=entry.preview_receipt(frame)
+        self.assertEqual(receipt['source_tick50'],45)
+        self.assertEqual(receipt['sim_time_s'],1.9)
+        self.assertEqual(receipt['state_sha256'],'a'*64)
+        self.assertEqual(receipt['age_s'],.03)
+        self.assertFalse(receipt['training_observation'])
+
+    def test_async_preview_age_is_recomputed_when_logged_or_displayed(self):
+        old={'status':'ready','submitted_monotonic_s':10.,'age_s':.02}
+        following=entry.current_preview_feedback(old,following=True,now=10.2)
+        self.assertEqual(following['status'],'waiting')
+        self.assertAlmostEqual(following['age_s'],.2)
+        paused=entry.current_preview_feedback(old,following=False,now=10.2)
+        self.assertEqual(paused,old)
+        self.assertEqual(old['age_s'],.02)
+
     def test_actual_operator_loop_ignores_ui_and_x_calibration_without_rejecting_recording(self):
         for commands in (['calibrate'],entry.rising_operator_commands({'X':True},{})):
             episode=self.active_episode()
@@ -386,7 +425,7 @@ class EntryGuardTests(unittest.TestCase):
             'pico_deferred_capture.py','render_deferred_pico.py','finish_pico_session.py',
             'audit_pico_teleop_episode.py','start_pico_teleop.sh',
             'handover_contact_quality.py','handover_geometry_quality.py','pico_episode_history.py',
-            'pico_episode_review.py'})
+            'pico_episode_review.py','pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py'})
         self.assertTrue(all(len(digest)==64 for digest in identities.values()))
 
     def test_instance_rate_limits_record_before_after_without_clock_changes(self):

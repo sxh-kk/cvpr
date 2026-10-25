@@ -43,6 +43,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
 <p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
 <p id="grasp" role="status">等待抓握反馈</p>
+<p id="preview-feedback" role="status">等待相机</p>
 <p id="last-episode" role="status">上一条：暂无已完成录制</p>
 <div id="review-panel"><p id="review-status" role="status">后台复核：准备中</p><p id="review-result" role="status">最近完成：暂无</p><details><summary>最近复核结果</summary><ul id="review-results"></ul></details></div>
 <div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" src="/stream.mjpg" alt="当前仿真相机画面" hidden></div>
@@ -53,14 +54,17 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 </div><div id="message" role="status"></div><div id="error" role="alert"></div>
 <details><summary>查看运行详情</summary><pre id="details"></pre></details>
 <script>
-const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true,lastOperatorMessage=null;
-function reconnectStream(){if(streamRetry!==null)return;streamRetry=setTimeout(()=>{streamRetry=null;camera.src='/stream.mjpg?retry='+Date.now();},500);}
+const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true,lastOperatorMessage=null,imageAvailable=false,cameraReady=false,lastImageEpoch=null;
+function showCamera(){camera.hidden=!(imageAvailable&&cameraReady);document.querySelector('#placeholder').hidden=!camera.hidden;}
+function reconnectStream(){if(streamRetry!==null||!imageAvailable)return;cameraReady=false;showCamera();streamRetry=setTimeout(()=>{streamRetry=null;if(imageAvailable)camera.src='/stream.mjpg?retry='+Date.now();},500);}
+function updateCameraAvailability(available,version,epoch){if(Number.isInteger(epoch)){if(lastImageEpoch!==null&&epoch<lastImageEpoch)return;if(lastImageEpoch!==null&&epoch!==lastImageEpoch){cameraReady=false;camera.removeAttribute('src');if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}}lastImageEpoch=epoch;}const next=available===true;if(!next){imageAvailable=false;cameraReady=false;if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}camera.removeAttribute('src');}else{const restart=!imageAvailable||!camera.getAttribute('src');imageAvailable=true;if(restart){cameraReady=false;camera.src='/stream.mjpg?version='+version;}}showCamera();}
+function previewFeedbackText(feedback,available){if(feedback?.error||feedback?.status==='error')return '相机异常';if(!feedback)return available?'相机预览':'等待相机';const limit=Number.isFinite(feedback.max_age_s)&&feedback.max_age_s>0?Math.min(.1,feedback.max_age_s):.1;return available&&['ready','fresh','ok'].includes(feedback.status)&&Number.isFinite(feedback.age_s)&&feedback.age_s>=0&&feedback.age_s<=limit?'相机预览':'等待相机';}
 
 function episodeText(v){if(!v?.uuid)return '暂无';const id=v.number!=null?String(v.number).padStart(3,'0'):'待编号（'+v.uuid.slice(0,8)+'）';const state=v.status==='pending_discard'?'已申请丢弃，后台处理中':v.discarded||v.disposition==='discarded'?'已丢弃':v.disposition==='kept'?'物理验收通过，已保留':v.status==='running'?'复核中':v.status==='error'?'复核异常':v.pending?'待复核':v.collection_enabled===false?'诊断已完成（不计真人数据）':'待审核';return id+' · '+state+((v.reasons??[]).length?' · 原因：'+v.reasons.join('；'):'')+(v.error?' · '+v.error:'');}
 function renderReview(q){const labels={starting:'正在准备',idle:'空闲',working:'正在复核',recovering:'正在恢复任务',error:'复核异常'};document.querySelector('#review-status').textContent='后台复核：'+(q?(labels[q.status]??q.status)+' · 未完成 '+(q.pending_count??0)+' 条'+(q.error?' · '+q.error:''):'准备中');document.querySelector('#review-result').textContent='最近完成：'+episodeText(q?.latest_completed);const list=document.querySelector('#review-results');if(list){list.replaceChildren();for(const v of (q?.latest_results??[])){const row=document.createElement('li');row.textContent=episodeText(v);list.appendChild(row);}}}
 
 camera.onerror=reconnectStream;
-camera.onload=()=>{camera.hidden=false;document.querySelector('#placeholder').hidden=true;};
+camera.onload=()=>{cameraReady=imageAvailable;showCamera();};
 async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
  if(!statusConnected)reconnectStream();statusConnected=true;
@@ -78,7 +82,8 @@ async function refresh(){try{
  if(s.operator_message&&s.operator_message!==lastOperatorMessage){document.querySelector('#message').textContent=s.operator_message;lastOperatorMessage=s.operator_message;}
  document.querySelector('#details').textContent=JSON.stringify(s,null,2);
  const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
- if(v.image_available){camera.hidden=false;document.querySelector('#placeholder').hidden=true;}
+ updateCameraAvailability(v.image_available,v.image_version,v.image_epoch);
+ document.querySelector('#preview-feedback').textContent=previewFeedbackText(s.preview_feedback,v.image_available);
  }catch(e){statusConnected=false;document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#error').textContent=e.message;}
 }
 for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{b.disabled=true;try{
@@ -155,6 +160,7 @@ class LocalTeleopUI:
         self._status = {"status": "等待仿真", "accepted_new_dataset": False}
         self._rgb = None
         self._image_version = 0
+        self._image_epoch = 0
         self._jpeg_version = -1
         self._jpeg = None
         self._server = self._thread = None
@@ -372,9 +378,11 @@ class LocalTeleopUI:
             except queue.Empty:
                 return result
 
-    def update(self, status, rgb=None):
+    def update(self, status, rgb=None, *, clear_image=False):
         if not isinstance(status, dict):
             raise TypeError("UI status must be a dictionary")
+        if type(clear_image) is not bool:
+            raise TypeError("clear_image must be a boolean")
         copied_status = _copy_status(status)
         copied_status["accepted_new_dataset"] = False
         pixels = None
@@ -395,15 +403,22 @@ class LocalTeleopUI:
                 if "quit" in pending:
                     self._commands.put_nowait("quit")
             self._status = copied_status
+            if clear_image:
+                # Never wait for JPEG encoding or a streaming socket to retire
+                # the earlier scene. In-flight encoders check the generation.
+                self._rgb = self._jpeg = None
+                self._jpeg_version = -1
+                self._image_epoch += 1
             if pixels is not None:
                 self._rgb = pixels
+            if clear_image or pixels is not None:
                 self._image_version += 1
                 self._frame_changed.notify_all()
 
     def _status_snapshot(self):
         with self._lock:
-            status, version, available = self._status, self._image_version, self._rgb is not None
-        return {"status": _json_status(status), "image_version": version,
+            status, version, epoch, available = self._status, self._image_version, self._image_epoch, self._rgb is not None
+        return {"status": _json_status(status), "image_version": version, "image_epoch": epoch,
                 "image_available": available, "accepted_new_dataset": False,
                 "data_label": "原始数据：待独立验收", "queued_commands": self._commands.qsize()}
 
@@ -427,6 +442,10 @@ class LocalTeleopUI:
                     return self._jpeg, version
             encoded = self._encode_jpeg(pixels)
             with self._lock:
+                if self._closed or self._image_version != version or self._rgb is not pixels:
+                    # Clear/reset or a newer scene wins over an old encoding.
+                    # HTTP callers may retry; never republish an obsolete JPEG.
+                    return None, self._image_version
                 self._jpeg, self._jpeg_version = encoded, version
             return encoded, version
 

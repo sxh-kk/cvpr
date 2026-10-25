@@ -358,7 +358,7 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 
 `bash scripts/4090_simple/start_pico_teleop.sh` 使用已有 Conda 仿真环境，接入
 PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoCo、
-50Hz decoder、30Hz实际状态和命令录制。默认实时MuJoCo EGL双目预览，退出后
+50Hz decoder、30Hz实际状态和命令录制。默认由独立进程渲染MuJoCo EGL左眼预览，退出后
 以同一归档状态补渲染RTX训练图像并独立审计，不重跑物理。电脑面板只监听127.0.0.1，
 `pico_desktop_preview.py` 在本机43101提供只读相机大画面，复用43100连续MJPEG视频流及状态，
 不额外订阅PICO。双目 H.264 可另回传指定 PICO，实际头显显示仍待验收。
@@ -370,6 +370,11 @@ PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoC
 短暂等新PICO包仍受原100ms限额约束，不用重复包充当新采集数据。
 新版本录制中忽略重新标定请求，只提示先保存；起录只绑定当前示例必要身份和场景，
 不复制全会话历史，并记录完整循环耗时以定位实时中断。正在运行的旧进程不热更新。
+启动前限制本进程Torch／OpenCV／BLAS线程为1（Conda需`threadpoolctl==3.6.0`）；
+相机只接收最新真实积分状态，不调用物理步进或forward，后台预览丢帧不等于采集丢帧。
+每条首帧之前的建档准备单独记录，检查状态与物理时钟冻结、新PICO端点连续后只排除准备耗时，
+保留原先累计lag；首帧及之后仍受原100ms迟延门槛。跟随状态只经localhost HTTP更新，
+普通状态文件在暂停时写盘，命令／真实状态／原始外力证据仍完整写入。
 每条结束只等待原始写入封存，随后重置场景并暂停，下一条重新标定、开始跟随。
 独立CPU后台进程完成几何复算和物理预验收，按集合内顺序编号为001等，分到 `kept/编号/` 或
 `discarded/编号/` 并记录中文失败原因；不占用GPU、SDK或采集线程的归档锁。

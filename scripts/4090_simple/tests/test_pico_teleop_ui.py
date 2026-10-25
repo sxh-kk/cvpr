@@ -3,7 +3,10 @@ import http.client
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import threading
 import socket
@@ -16,7 +19,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pico_teleop_ui import COMMANDS, HeadsetVideoBridge, LocalTeleopUI
+from pico_teleop_ui import COMMANDS, HeadsetVideoBridge, LocalTeleopUI, _PAGE
 
 
 class LocalUITests(unittest.TestCase):
@@ -95,6 +98,149 @@ class LocalUITests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.ui.update({"status": "paused"})
         self.assertEqual(json.loads(self.request("GET", "/status.json")[2])["image_version"], 1)
+
+    def test_clear_image_retires_cached_jpeg_without_encoding_or_changing_commands(self):
+        rgb = np.full((12, 16, 3), 80, dtype=np.uint8)
+        self.ui.update({"status": "following"}, rgb)
+        self.assertEqual(self.request("GET", "/latest.jpg")[0], 200)
+        self.assertEqual(self.post("pause")[0], 202)
+        calls = []
+        self.ui._encode_jpeg = lambda pixels: calls.append(pixels)
+        self.ui.update({"status": "paused", "preview_feedback": {"status": "waiting"}}, clear_image=True)
+        status = json.loads(self.request("GET", "/status.json")[2])
+        self.assertFalse(status["image_available"])
+        self.assertEqual(status["image_version"], 2)
+        self.assertEqual(status["image_epoch"], 1)
+        self.assertEqual(self.request("GET", "/latest.jpg")[0], 404)
+        self.assertEqual(calls, [])
+        self.assertIsNone(self.ui._rgb)
+        self.assertIsNone(self.ui._jpeg)
+        self.assertEqual(self.ui._jpeg_version, -1)
+        self.assertEqual(self.ui.commands(), ["pause"])
+        self.ui.update({"status": "paused"}, clear_image=True)
+        self.assertEqual(self.ui._image_version, 3)
+        self.assertEqual(self.ui._status_snapshot()["image_epoch"], 2)
+        with self.assertRaises(TypeError):
+            self.ui.update({}, clear_image=1)
+
+    def test_clear_notifies_waiters_and_does_not_wait_for_inflight_encoder(self):
+        red = np.zeros((12, 16, 3), dtype=np.uint8); red[..., 0] = 255
+        green = np.zeros_like(red); green[..., 1] = 255
+        self.ui.update({}, red)
+        entered, release, changed = threading.Event(), threading.Event(), threading.Event()
+        real_encode = self.ui._encode_jpeg
+        results, failures = [], []
+        def blocked_encode(pixels):
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError("Test encoder release missing")
+            return real_encode(pixels)
+        def encode():
+            try:
+                results.append(self.ui._latest_jpeg_snapshot())
+            except Exception as error:
+                failures.append(error)
+        waiter_ready = threading.Event()
+        def wait_for_clear():
+            with self.ui._frame_changed:
+                old = self.ui._image_version
+                waiter_ready.set()
+                if self.ui._frame_changed.wait_for(lambda: self.ui._image_version != old, timeout=1):
+                    changed.set()
+        self.ui._encode_jpeg = blocked_encode
+        encoder = threading.Thread(target=encode)
+        waiter = threading.Thread(target=wait_for_clear)
+        encoder.start(); waiter.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(waiter_ready.wait(1))
+            # The encoder owns _encode_lock; clearing only takes the short UI
+            # lock and must return before that encoder can finish.
+            self.ui.update({"status": "resetting"}, clear_image=True)
+            self.assertFalse(release.is_set())
+            self.assertTrue(changed.wait(1))
+            self.assertFalse(self.ui._status_snapshot()["image_available"])
+            self.ui.update({"status": "paused"}, green)
+        finally:
+            release.set()
+            encoder.join(timeout=2); waiter.join(timeout=2)
+        self.assertFalse(encoder.is_alive())
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(results, [(None, 3)])
+        self.assertIsNone(self.ui._jpeg)  # The old red encoder did not refill it.
+        self.ui._encode_jpeg = real_encode
+        code, _, body = self.request("GET", "/latest.jpg")
+        self.assertEqual(code, 200)
+        pixels = np.asarray(Image.open(io.BytesIO(body)))
+        self.assertGreater(pixels[..., 1].mean(), 245)
+        self.assertLess(pixels[..., 0].mean(), 10)
+
+    def test_clear_with_a_new_frame_publishes_one_new_generation(self):
+        self.ui.update({}, np.zeros((12, 16, 3), np.uint8))
+        self.request("GET", "/latest.jpg")
+        self.ui.update({"status": "paused"}, np.full((12, 16, 3), 200, np.uint8), clear_image=True)
+        status = self.ui._status_snapshot()
+        self.assertTrue(status["image_available"])
+        self.assertEqual(status["image_version"], 2)
+        self.assertEqual(status["image_epoch"], 1)
+        self.assertIsNone(self.ui._jpeg)
+        self.assertEqual(self.request("GET", "/latest.jpg")[0], 200)
+
+    def test_frontend_clears_old_scene_load_events_and_reports_camera_state(self):
+        node = os.environ.get("PICO_UI_TEST_NODE") or shutil.which("node")
+        if node is None:
+            self.skipTest("Node is needed to execute the actual page state handlers")
+        version = subprocess.run([node, "--version"], text=True, capture_output=True, timeout=3)
+        if version.returncode or int(version.stdout.strip().lstrip("v").split(".", 1)[0]) < 18:
+            self.skipTest("Node 18+ is needed for the page's modern browser syntax")
+        script = _PAGE.split("<script>", 1)[1].split("</script>", 1)[0]
+        runner = r"""
+const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
+const pageScript=fs.readFileSync(0,'utf8');
+const elements=new Map();
+function element(name){if(!elements.has(name))elements.set(name,{hidden:true,src:name==='#camera'?'/stream.mjpg':undefined,replaceChildren(){},appendChild(){},removeAttribute(key){delete this[key];},getAttribute(key){return this[key]??null;}});return elements.get(name);}
+const context={document:{querySelector:element,querySelectorAll:()=>[],createElement:()=>({})},
+setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>{},
+fetch:async()=>({ok:true,json:async()=>({status:{status:'paused'},image_available:false,image_version:0})})};
+vm.createContext(context);vm.runInContext(pageScript,context);
+(async()=>{await new Promise(setImmediate);
+const camera=element('#camera'),placeholder=element('#placeholder');
+vm.runInContext('updateCameraAvailability(false,2)',context);
+assert.equal(camera.hidden,true);assert.equal(placeholder.hidden,false);assert.equal(camera.getAttribute('src'),null);
+camera.onload();assert.equal(camera.hidden,true); // An old buffered load cannot show the old scene.
+vm.runInContext('updateCameraAvailability(true,3)',context);
+assert.equal(camera.hidden,true);assert.ok(camera.src.includes('version=3'));
+camera.onload();assert.equal(camera.hidden,false);assert.equal(placeholder.hidden,true);
+vm.runInContext('updateCameraAvailability(false,4)',context);
+camera.onload();assert.equal(camera.hidden,true);assert.equal(placeholder.hidden,false);
+vm.runInContext('updateCameraAvailability(true,5,0)',context);
+camera.onload();assert.equal(camera.hidden,false);
+// A whole clear/ready transition can occur between 500ms status polls. The
+// explicit epoch still retires the old bitmap before showing the new stream.
+vm.runInContext('updateCameraAvailability(true,9,1)',context);
+assert.equal(camera.hidden,true);assert.equal(placeholder.hidden,false);assert.ok(camera.src.includes('version=9'));
+camera.onload();assert.equal(camera.hidden,false);
+vm.runInContext('updateCameraAvailability(false,6,0)',context);
+assert.equal(camera.hidden,false); // An older response cannot undo a newer epoch.
+for(const [feedback,available,expected] of [
+ [{status:'ready',error:null,age_s:.02},true,'相机预览'],
+ [{status:'ready',error:null,age_s:.11},true,'等待相机'],
+ [{status:'stale',error:null,age_s:.02},true,'等待相机'],
+ [{status:'waiting',age_s:null},false,'等待相机'],
+ [{status:'ready',age_s:.02},false,'等待相机'],
+ [{status:'error',error:null},false,'相机异常'],
+ [{status:'ready',error:'worker failed',age_s:.02},true,'相机异常'],
+ [{status:'ready',age_s:-.01},true,'等待相机']]){
+ context.sample=feedback;context.available=available;
+ assert.equal(vm.runInContext('previewFeedbackText(sample,available)',context),expected);
+}
+assert.ok(elements.has('#preview-feedback'));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run([node, "-e", runner], input=script, text=True,
+            capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     def test_no_fake_image_bounded_commands_and_graceful_close(self):
         self.assertEqual(self.request("GET", "/latest.jpg")[0], 404)

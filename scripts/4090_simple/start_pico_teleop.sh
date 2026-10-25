@@ -9,6 +9,13 @@ if [[ ! -f "$task_runtime/local.env.sh" || ! -x "$task_python" ]]; then
   exit 1
 fi
 source "$task_runtime/local.env.sh"
+# Set before either collector or finisher Python imports native CPU libraries.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
 export OMNI_KIT_ACCEPT_EULA=YES
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1

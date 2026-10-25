@@ -149,7 +149,39 @@ def make_episode(root):
     return identities,decoder_sha
 
 
-def convert_to_deferred(root):
+def add_capture_start(root):
+    """Produce boundary evidence only; all files remain explicit CPU fixtures."""
+    from pico_capture_start import CaptureStartGate
+    metadata=json.loads((root/"metadata.json").read_text())
+    metadata["capture_start_protocol"]=audit.CAPTURE_START_CONTRACT
+    write(root/"metadata.json",metadata)
+    ledger=[json.loads(row) for row in (root/"commands.jsonl").read_text().splitlines()]
+    ledger[0]["metadata"]=metadata
+    command=ledger[1]
+    before=audit.parse_tracking(raw_packet(900_000_000),99.9,0)
+    after=audit.parse_tracking(command["source_raw_packet"],command["source_host_received_s"],command["source_sequence"])
+    clock=iter((99.9,100.))
+    state=np.arange(12,dtype=np.float64)
+    gate=CaptureStartGate(metadata["human_demo_uuid"],50,3.,400,state,before,clock=lambda:next(clock))
+    _,receipt=gate.finish(99.82,after_global_tick=50,after_sim_time=3.,after_substeps=400,
+        after_state=state,frame=after,quality=audit.validate_frame(after,now=100.,previous=before),
+        event_count=0,ledger_event_count=1,quality_bytes=0,force_bytes=0)
+    command["capture_start_receipt"]=receipt
+    write_rows(root/"commands.jsonl",ledger)
+    write(root/"capture_start_receipt.json",receipt)
+    for name in ("capture/capture.json","capture/async_capture.json"):
+        manifest=json.loads((root/name).read_text()); manifest.update(metadata); write(root/name,manifest)
+    outcome=json.loads((root/"episode.json").read_text())
+    outcome["state"]["start_tick50"]=50
+    outcome["capture"]=json.loads((root/"capture/async_capture.json").read_text())
+    outcome["ledger"]["sha256"]=audit.sha(root/"commands.jsonl")
+    outcome["capture_start_receipt"]={"contract":audit.CAPTURE_START_CONTRACT,
+        "path":"capture_start_receipt.json","sha256":audit.sha(root/"capture_start_receipt.json")}
+    write(root/"episode.json",outcome)
+    return receipt
+
+
+def convert_to_deferred(root, *, asynchronous_preview=False, preview_rgb_absent=False):
     """Archive a real CPU MjModel/full states, without any dynamics or RTX."""
     import mujoco
     from pico_deferred_capture import DeferredStateCapture
@@ -159,6 +191,10 @@ def convert_to_deferred(root):
     metadata=json.loads((root/"metadata.json").read_text())
     metadata.update(render_mode="mujoco_deferred",preview_engine="mujoco_egl",preview_is_training_rgb=False,
         training_rgb_engine="pending_offline_isaac_rtx",object_body_names={"target":"target","container":"container"})
+    if asynchronous_preview:
+        metadata["preview_protocol"]={"contract":audit.ASYNC_PREVIEW_CONTRACT,"independent_process":True,
+            "physics_steps":0,"forward_dynamics_calls":0,"latest_only_feedback":True,
+            "training_observation":False,"maximum_frame_delivery_age_s":.1}
     write(root/"metadata.json",metadata)
     events=[json.loads(row) for row in (root/"capture/events.jsonl").read_text().splitlines()]
     ledger=[json.loads(row) for row in (root/"commands.jsonl").read_text().splitlines()]
@@ -195,7 +231,8 @@ def convert_to_deferred(root):
             observed_joint_names=event["joint_names"],observed_qpos=event["state43"],
             physical_qpos=event["physical_joint_q43_float64"],physical_qvel=event["physical_joint_qvel43"],
             root_pose7=event["root_pose7"],root_qvel6=event["root_qvel6"],objects=event["objects"],
-            command=command,integration_state=state,source_fields=fields,preview_rgb=np.zeros((3,4,3),np.uint8))
+            command=command,integration_state=state,source_fields=fields,
+            preview_rgb=None if asynchronous_preview or preview_rgb_absent else np.zeros((3,4,3),np.uint8))
     original=capture.close(completed=True)
     outcome=json.loads((root/"episode.json").read_text())
     outcome.update(capture=original,status="pending_rtx",rtx_ready=False)
@@ -496,6 +533,142 @@ class AdmissionTests(unittest.TestCase):
         add_deferred_quality(self.root)
         self.rewrite("container_geometry_cache.json",lambda v:v.update(collision_geom_count=2))
         self.assertIn("immutable geometry cache SHA changed",self.check_rejected())
+
+    def test_capture_start_independently_binds_file_first_command_and_preserved_lag(self):
+        receipt=add_capture_start(self.root)
+        result=audit.audit_episode(self.root)
+        self.assertTrue(result["eligible_for_packing"],result["errors"])
+        boundary=result["capture_start_boundary"]
+        self.assertTrue(boundary["endpoint_packets_independently_revalidated"])
+        self.assertAlmostEqual(boundary["preserved_lateness_s"],.08)
+        self.assertFalse(boundary["all_intermediate_sdk_packets_inspected"])
+        self.assertFalse(boundary["first_full_integration_state_independently_verified"])
+        self.assertEqual(result["bindings"][str(self.root/"capture_start_receipt.json")],
+                         audit.sha(self.root/"capture_start_receipt.json"))
+        self.rewrite("capture_start_receipt.json",lambda v:v.update(single_use=False))
+        self.assertIn("receipt SHA changed",self.check_rejected())
+        write(self.root/"capture_start_receipt.json",receipt)
+        self.rewrite_rows("commands.jsonl",lambda rows:rows[1]["capture_start_receipt"].update(single_use=False),refresh=True)
+        self.assertIn("First command does not bind",self.check_rejected())
+
+    def test_capture_start_rejects_clock_exclusion_after_samples_and_nonfrozen_state(self):
+        original=add_capture_start(self.root)
+        metadata=json.loads((self.root/"metadata.json").read_text())
+        outcome=json.loads((self.root/"episode.json").read_text())
+        ledger=[json.loads(row) for row in (self.root/"commands.jsonl").read_text().splitlines()]
+        events=[json.loads(row) for row in (self.root/"capture/events.jsonl").read_text().splitlines()]
+        mutations={
+            "overlong setup":lambda v:v.update(setup_finished_monotonic_s=100.11,setup_wall_s=.21),
+            "old lag lost":lambda v:v.update(shifted_deadline_monotonic_s=100.,preserved_lateness_s=0.),
+            "original budget exceeded":lambda v:v.update(maximum_lateness_s=.101),
+            "old lag already invalid":lambda v:v.update(old_deadline_monotonic_s=99.79,old_lateness_s=.11,
+                shifted_deadline_monotonic_s=99.89,preserved_lateness_s=.11),
+            "started samples":lambda v:v["writer_counts_before_first_capture"].update(event_count=1),
+            "boolean sample count":lambda v:v["writer_counts_before_first_capture"].update(event_count=False),
+            "missing writer":lambda v:v["writer_counts_before_first_capture"].pop("force_bytes"),
+            "physics moved":lambda v:v.update(sim_time_s_after=3.005),
+            "tick moved":lambda v:v.update(global_tick50_after=55),
+            "solver advanced":lambda v:v.update(substeps_after=404),
+            "state changed":lambda v:v.update(integration_state_sha256_after="f"*64),
+            "unaligned boundary":lambda v:v.update(global_tick50_before=51,global_tick50_after=51),
+            "false callback coverage":lambda v:v.update(all_intermediate_sdk_packets_inspected=True),
+            "packet hash changed":lambda v:v["source_after"].update(raw_packet_sha256="f"*64),
+            "sequence delta lied":lambda v:v.update(source_sequence_delta=2),
+            "device delta lied":lambda v:v.update(source_device_delta_s=.05),
+            "quality lied":lambda v:v["source_endpoint_quality"].update(age_s=.01),
+        }
+        for label,mutate in mutations.items():
+            with self.subTest(label=label):
+                receipt=deepcopy(original); mutate(receipt)
+                write(self.root/"capture_start_receipt.json",receipt)
+                data=deepcopy(outcome); rows=deepcopy(ledger); rows[1]["capture_start_receipt"]=receipt
+                data["capture_start_receipt"]["sha256"]=audit.sha(self.root/"capture_start_receipt.json")
+                bindings={}
+                def read(name):
+                    path=self.root/name; bindings[str(path)]=audit.sha(path)
+                    return json.loads(path.read_text())
+                with self.assertRaises(ValueError):
+                    audit._check_capture_start(metadata,data,events,rows,read,bindings,self.root)
+
+    def test_capture_start_reparses_endpoint_continuity_even_when_receipt_claims_valid(self):
+        add_capture_start(self.root)
+        def corrupt(rows):
+            receipt=rows[1]["capture_start_receipt"]
+            endpoint=receipt["source_after"]
+            packet=endpoint["raw_packet"]
+            body=json.loads(packet["value"])
+            body["Body"]["joints"][0]["p"]="10,1,.1,0,0,0,1"
+            packet["value"]=json.dumps(body)
+            frame=audit.parse_tracking(packet,endpoint["host_received_s"],endpoint["sequence"])
+            endpoint["raw_packet_sha256"]=hashlib.sha256(frame._raw_json.encode()).hexdigest()
+            write(self.root/"capture_start_receipt.json",receipt)
+        self.rewrite_rows("commands.jsonl",corrupt,refresh=True)
+        self.rewrite("episode.json",lambda v:v["capture_start_receipt"].update(
+            sha256=audit.sha(self.root/"capture_start_receipt.json")))
+        self.assertIn("endpoint tracking continuity",self.check_rejected())
+
+    def test_capture_start_post_setup_packet_must_be_first_command_source(self):
+        add_capture_start(self.root)
+        self.rewrite_rows("commands.jsonl",lambda rows:rows[1].update(source_sequence=2),refresh=True)
+        self.assertIn("First command reused another source",self.check_rejected())
+
+    def test_capture_start_deferred_binds_actual_first_full_integration_state(self):
+        add_capture_start(self.root)
+        convert_to_deferred(self.root,asynchronous_preview=True)
+        first=np.ascontiguousarray(np.load(self.root/"deferred_capture/states.npy",allow_pickle=False)[0],dtype="<f8")
+        digest=hashlib.sha256(first.tobytes()).hexdigest()
+        def bind_actual(rows):
+            receipt=rows[1]["capture_start_receipt"]
+            receipt.update(integration_state_sha256_before=digest,integration_state_sha256_after=digest,
+                           integration_state_width=int(first.size))
+            write(self.root/"capture_start_receipt.json",receipt)
+        self.rewrite_rows("commands.jsonl",bind_actual,refresh=True)
+        self.rewrite("episode.json",lambda v:v["capture_start_receipt"].update(
+            sha256=audit.sha(self.root/"capture_start_receipt.json")))
+        result=audit.audit_episode(self.root)
+        self.assertTrue(result["eligible_for_packing"],result["errors"])
+        self.assertTrue(result["capture_start_boundary"]["first_full_integration_state_independently_verified"])
+        # A mutually consistent receipt/command hash is insufficient: bind to
+        # independently re-read states[0], not the producer's two equal strings.
+        def wrong_hash(rows):
+            receipt=rows[1]["capture_start_receipt"]
+            receipt.update(integration_state_sha256_before="f"*64,integration_state_sha256_after="f"*64)
+            write(self.root/"capture_start_receipt.json",receipt)
+        self.rewrite_rows("commands.jsonl",wrong_hash,refresh=True)
+        self.rewrite("episode.json",lambda v:v["capture_start_receipt"].update(
+            sha256=audit.sha(self.root/"capture_start_receipt.json")))
+        self.assertIn("First archived full integration state differs",self.check_rejected())
+
+    def test_unknown_capture_start_protocol_cannot_silently_use_legacy_admission(self):
+        self.rewrite("metadata.json",lambda v:v.update(capture_start_protocol="unknown"))
+        self.assertIn("Unknown capture-start protocol",self.check_rejected())
+
+    def test_asynchronous_preview_none_preserves_full_state_rtx_binding_and_limited_scope(self):
+        convert_to_deferred(self.root,asynchronous_preview=True)
+        result=audit.audit_episode(self.root)
+        self.assertTrue(result["eligible_for_packing"],result["errors"])
+        bridge=result["deferred_rtx_bridge"]
+        self.assertEqual(bridge["preview_protocol"],audit.ASYNC_PREVIEW_CONTRACT)
+        self.assertFalse(bridge["operator_preview_delivery_verified"])
+        self.assertFalse(bridge["operator_saw_every_recorded_state_verified"])
+        self.assertEqual(bridge["frames_bound"],90)
+        self.assertTrue(bridge["cpu_full_integration_state_verified"])
+
+    def test_legacy_preview_none_is_rejected_without_asynchronous_contract(self):
+        convert_to_deferred(self.root,preview_rgb_absent=True)
+        self.assertIn("Original preview must be recorded explicitly",self.check_rejected())
+
+    def test_asynchronous_preview_contract_does_not_allow_mislabelled_or_dynamic_preview(self):
+        base={"contract":audit.ASYNC_PREVIEW_CONTRACT,"independent_process":True,"physics_steps":0,
+              "forward_dynamics_calls":0,"latest_only_feedback":True,"training_observation":False}
+        for key,value in (("contract","unknown"),("independent_process",False),("physics_steps",1),
+                          ("physics_steps",False),("forward_dynamics_calls",1),
+                          ("latest_only_feedback",False),("training_observation",True)):
+            with self.subTest(key=key,value=value):
+                with self.assertRaisesRegex(ValueError,"preview protocol is invalid"):
+                    audit._check_preview_protocol({"preview_protocol":{**base,key:value}})
+        self.assertFalse(audit._check_preview_protocol({}))
+        self.assertTrue(audit._check_preview_protocol({"preview_protocol":base}))
 
 
 if __name__=="__main__":

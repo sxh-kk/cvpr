@@ -23,6 +23,7 @@ import numpy as np
 
 
 COMMANDS = frozenset({"calibrate", "follow", "pause", "record", "save", "discard", "reset", "quit"})
+BUSY_STATES = frozenset({"saving", "auditing", "resetting"})
 
 
 _PAGE = """<!doctype html>
@@ -42,15 +43,16 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
 <p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
 <p id="grasp" role="status">等待抓握反馈</p>
+<p id="last-episode" role="status">上一条：暂无已完成录制</p>
 <div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" src="/stream.mjpg" alt="当前仿真相机画面" hidden></div>
 <div class="bar">
 <button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>
 <button class="primary" data-command="record">开始录制</button><button class="primary" data-command="save">保存本条</button>
-<button data-command="discard">丢弃本条</button><button data-command="reset">重置场景</button><button class="danger" data-command="quit">退出</button>
+<button data-command="discard">丢弃上一条</button><button data-command="reset">重置场景</button><button class="danger" data-command="quit">退出</button>
 </div><div id="message" role="status"></div><div id="error" role="alert"></div>
 <details><summary>查看运行详情</summary><pre id="details"></pre></details>
 <script>
-const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true;
+const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true,lastOperatorMessage=null;
 function reconnectStream(){if(streamRetry!==null)return;streamRetry=setTimeout(()=>{streamRetry=null;camera.src='/stream.mjpg?retry='+Date.now();},500);}
 camera.onerror=reconnectStream;
 camera.onload=()=>{camera.hidden=false;document.querySelector('#placeholder').hidden=true;};
@@ -58,12 +60,17 @@ async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
  if(!statusConnected)reconnectStream();statusConnected=true;
  let phase=s.phase??s.state??s.status??'等待运行';if(typeof phase==='object')phase=phase.status??JSON.stringify(phase);
- const labels={paused:'已暂停',following:'正在跟随',saving:'已暂停仿真，正在保存',stopped:'采集已结束'};
+ const labels={paused:'已暂停',following:'正在跟随',saving:'正在保存并验收',auditing:'正在物理验收',resetting:'正在重置场景',stopped:'采集已结束'};
  if(s.recording==='warmup')phase='请保持姿势，正在记录起始状态';
  else if(s.recording==='recording')phase='正在录制';
  document.querySelector('#phase').textContent=labels[phase]??phase;
  const h=s.hand_control;const pct=x=>Number.isFinite(x)?Math.round(x*100)+'%':'未下发';
  document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
+ const last=s.last_episode;document.querySelector('#last-episode').textContent=last?.uuid?'上一条：'+(last.number!=null?String(last.number).padStart(3,'0'):last.uuid.slice(0,8))+' · '+(last.discarded||last.disposition==='discarded'?'已丢弃':last.disposition==='kept'?'物理验收通过，已保留':'待审核')+((last.reasons??[]).length?' · 原因：'+last.reasons.join('；'):''):'上一条：暂无已完成录制';
+ const discard=document.querySelector('button[data-command="discard"]');discard.textContent=s.recording?'丢弃当前录制':'丢弃上一条';
+ const busy=['saving','auditing','resetting'].includes(s.status);for(const b of document.querySelectorAll('button[data-command]'))b.disabled=busy;
+ if(!busy&&!s.recording)discard.disabled=!last?.available;
+ if(s.operator_message&&s.operator_message!==lastOperatorMessage){document.querySelector('#message').textContent=s.operator_message;lastOperatorMessage=s.operator_message;}
  document.querySelector('#details').textContent=JSON.stringify(s,null,2);
  const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
  if(v.image_available){camera.hidden=false;document.querySelector('#placeholder').hidden=true;}
@@ -317,8 +324,11 @@ class LocalTeleopUI:
                     return
                 try:
                     ui._queue_command(value["command"])
-                except (queue.Full, RuntimeError):
-                    self._json(503, {"error": "Control queue is full or the UI is closing"})
+                except queue.Full:
+                    self._json(503, {"error": "Control queue is full"})
+                    return
+                except RuntimeError as error:
+                    self._json(503, {"error": str(error)})
                     return
                 self._json(202, {"queued": value["command"], "executed": False, "accepted_new_dataset": False})
 
@@ -344,6 +354,8 @@ class LocalTeleopUI:
         with self._lock:
             if self._closed:
                 raise RuntimeError("The UI is closing")
+            if self._status.get("status") in BUSY_STATES and command != "quit":
+                raise RuntimeError("正在保存、验收或重置，请等待操作完成后再点击")
             self._commands.put_nowait(command)
 
     def commands(self):
@@ -371,6 +383,12 @@ class LocalTeleopUI:
         with self._lock:
             if self._closed:
                 raise RuntimeError("The UI is closed")
+            if copied_status.get("status") in BUSY_STATES and self._status.get("status") not in BUSY_STATES:
+                # Commands issued against the previous episode must not act on
+                # the newly archived episode after its automatic reset.
+                pending = self.commands()
+                if "quit" in pending:
+                    self._commands.put_nowait("quit")
             self._status = copied_status
             if pixels is not None:
                 self._rgb = pixels

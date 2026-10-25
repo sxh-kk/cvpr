@@ -23,6 +23,25 @@ def finish(session):
         item={'episode':str(episode),'status':'skipped_unsaved_or_rejected'}
         report['episodes'].append(item)
         try:
+            excluded = False
+            for name in ('operator_discard.json','collection_record.json'):
+                marker = episode/name
+                if marker.is_symlink():
+                    raise ValueError('Discard/collection record must not be a symbolic link')
+                if not marker.exists():
+                    continue
+                state=json.loads(marker.read_text())
+                if not isinstance(state,dict):
+                    raise ValueError('Invalid discard/collection record')
+                if name == 'operator_discard.json' or state.get('disposition') == 'discarded':
+                    item.update(status='skipped_discarded',eligible_for_packing=False,
+                        reasons=state.get('reasons',[state.get('reason','operator discard')]))
+                    excluded=True
+                    break
+                if state.get('disposition') != 'kept':
+                    raise ValueError('Invalid collection disposition')
+            if excluded:
+                continue
             outcome=json.loads((episode/'episode.json').read_text())
             if outcome.get('status')=='pending_rtx':
                 receipt=episode/'rtx_completion.json'

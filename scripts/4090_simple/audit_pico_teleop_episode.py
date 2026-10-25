@@ -302,6 +302,18 @@ def audit_episode(directory, *, write_report=True):
             report["errors"].append(message)
             return None
     try:
+        for marker_name in ('operator_discard.json','collection_record.json'):
+            marker = root/marker_name
+            require(not marker.is_symlink(), 'Discard/collection record must not be a symbolic link')
+            if not marker.exists():
+                continue
+            disposition = read(marker_name)
+            require(isinstance(disposition,dict), 'Invalid discard/collection record')
+            if marker_name == 'operator_discard.json':
+                raise ValueError('Operator discarded this episode: '+str(disposition.get('reason','manual discard')))
+            require(disposition.get('disposition') in ('kept','discarded'), 'Invalid collection disposition')
+            if disposition['disposition'] == 'discarded':
+                raise ValueError('Episode collection rejected this recording: '+str(disposition.get('reasons',[])))
         metadata = read("metadata.json")
         outcome = read("episode.json")
         manifest = read("capture/capture.json")

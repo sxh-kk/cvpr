@@ -121,6 +121,22 @@ class LocalUITests(unittest.TestCase):
         self.ui.update({"loss": float("nan")})
         self.assertIsNone(json.loads(self.request("GET", "/status.json")[2])["status"]["loss"])
 
+    def test_busy_phase_drops_stale_commands_and_rejects_controls_until_complete(self):
+        self.ui.update({"status": "paused"})
+        self.assertEqual(self.post("discard")[0], 202)
+        self.assertEqual(self.post("calibrate")[0], 202)
+        self.ui.update({"status": "saving"})
+        self.assertEqual(self.ui.commands(), [])
+        for phase in ("saving", "auditing", "resetting"):
+            self.ui.update({"status": phase})
+            self.assertEqual(self.post("discard")[0], 503)
+            self.assertEqual(self.post("record")[0], 503)
+        self.assertEqual(self.post("quit")[0], 202)
+        self.ui.update({"status": "paused"})
+        self.assertEqual(self.ui.commands(), ["quit"])
+        self.assertEqual(self.post("discard")[0], 202)
+        self.assertEqual(self.ui.commands(), ["discard"])
+
     def open_stream(self):
         client = http.client.HTTPConnection(self.address.hostname, self.address.port, timeout=3)
         client.request("GET", "/stream.mjpg")
@@ -249,10 +265,12 @@ class LocalUITests(unittest.TestCase):
             self.assertEqual(len(self.ui._stream_connections), 0)
         # A fresh stream may connect after the disconnected browser.
         client, response = self.open_stream()
+        initial_part = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        self.assertEqual(response.read(len(initial_part)), initial_part)
         started = time.monotonic()
         self.ui.close()  # Wakes an idle frame wait and joins its request thread.
         self.assertLess(time.monotonic() - started, 1.5)
-        self.assertEqual(response.read(), b"--frame\r\nContent-Type: image/jpeg\r\n\r\n")
+        self.assertEqual(response.read(), b"")
         response.close(); client.close()
         self.assertFalse(self.ui._thread.is_alive())
         with self.ui._lock:

@@ -117,7 +117,7 @@ def source_code_identities():
              'pico_teleop_recording.py','pico_teleop_ui.py','pico_deferred_capture.py',
              'render_deferred_pico.py','finish_pico_session.py','audit_pico_teleop_episode.py',
              'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py',
-             'pico_hand_control.py')
+             'pico_hand_control.py','pico_episode_history.py')
     directory = Path(__file__).resolve().parent
     return {name:file_sha256(directory/name) for name in names}
 
@@ -312,6 +312,81 @@ def wait_fresh_command_frame(receiver, previous, last_timestamp_ns, deadline_s, 
 def rising_operator_commands(buttons, last_buttons):
     return [action for key, action in (('X','calibrate'),('Y','toggle_follow'),('A','toggle_record'))
         if buttons.get(key,False) and not last_buttons.get(key,False)]
+
+
+def scene_bound_commands(commands, transition_started):
+    """Never apply commands collected before a scene transition to its successor."""
+    for action in commands:
+        if transition_started():
+            return
+        yield action
+
+
+def episode_finalization_error(outcome, *, requested_complete):
+    """Keep technical writer/history failures visible after an automatic reset."""
+    problems = []
+    if outcome.get('finalization_errors'):
+        problems.append('写盘错误：'+json_text(outcome['finalization_errors']))
+    capture = outcome.get('capture') or {}
+    failure = capture.get('failure') or (capture.get('async_capture') or {}).get('failure')
+    if failure:
+        problems.append('采集写盘失败：'+str(failure))
+    if requested_complete and capture and capture.get('status') == 'partial_capture_rejected' and not failure:
+        problems.append('采集未完整写入，本条已拒收')
+    collection = outcome.get('collection') or {}
+    if collection.get('status') == 'error' or collection.get('error'):
+        problems.append('归档记录失败：'+str(collection.get('error') or 'unknown error'))
+    return '；'.join(problems) or None
+
+
+def end_episode_and_reset(finalize_callback, reset_callback, *, discard):
+    """Finish once, then reset once; never turn a writer failure into success."""
+    outcome = finalize_callback(completed=not discard,reason='operator_discard' if discard else None)
+    problem = episode_finalization_error(outcome,requested_complete=not discard)
+    try:
+        reset_callback()
+    except Exception as error:
+        prefix = (problem+'；') if problem else ''
+        raise RuntimeError(prefix+'本条已结束，但自动重置失败：'+str(error)) from error
+    return outcome,problem
+
+
+def completed_episode_message(action, collection):
+    number = collection.get('number')
+    prefix = '本条' if number is None else '第'+str(number).zfill(3)+'条'
+    if action == 'discard':
+        message = prefix+'已标记丢弃'
+    elif collection.get('disposition') == 'kept':
+        message = prefix+'已通过物理验收并归档，仍待图像和数据验收'
+    elif collection.get('disposition') == 'discarded':
+        reasons = '；'.join(map(str,collection.get('reasons') or []))
+        message = prefix+'未通过物理验收，已保留原始证据并归档到 discarded'+('：'+reasons if reasons else '')
+    else:
+        message = prefix+'原始证据已保存，尚未成为合格训练数据'
+    return message+'。新场景已准备，请站直后重新校准。'
+
+
+def episode_has_started_capture(episode, output):
+    return bool(episode is not None and episode.start_tick50 is not None and
+        (Path(output)/'episodes'/episode.human_demo_uuid).is_dir())
+
+
+def remember_finished_episode(history, directory, *, capture_started):
+    if history is None or not capture_started:
+        return None
+    try:
+        return history.remember(directory)
+    except Exception as error:
+        return {'status':'error','available':False,'path':str(directory),
+            'uuid':Path(directory).name,'error':repr(error)}
+
+
+def discard_previous_from_history(history, *, blocked_error=None):
+    if history is None:
+        return {'status':'disabled_diagnostic','available':False}
+    if blocked_error:
+        raise RuntimeError('上一条记账失败，已禁止回退丢弃更早记录：'+str(blocked_error))
+    return history.discard_previous()
 
 
 def prepare_deferred_cache(prepare_function, output, index, *, model, objects, joint_names):
@@ -574,6 +649,11 @@ def run(args):
     prepared_deferred = None
     deferred_prepare_index = 0
     geometry_cache_index = 0
+    history = None
+    history_status = {'status':'disabled_diagnostic' if replay else 'empty','available':False,
+        'path':None,'uuid':None,'discarded':False,'error':None}
+    history_error_latched = None
+    operator_message = '请戴好头显、站直并校准，再开始下一条录制。'
     reference = PicoSonicReference(resources, args.human_info)
     pairing = {'body_token_version':'body_token_v1_1','compatibility_verified':True,
         'decoder_sha256':'34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509',
@@ -583,19 +663,24 @@ def run(args):
 
     def finalize(completed=False, reason=None):
         nonlocal capture, ledger, episode, quality_stream, force_stream, quality_rows, following
+        nonlocal history_status, history_error_latched, operator_message
         if episode is None:
             return
         closing_episode, closing_capture, closing_ledger = episode, capture, ledger
+        capture_started = episode_has_started_capture(closing_episode,output)
         following = False
+        operator_message = '仿真已暂停，正在保存原始证据并计算物理几何。'
         if ui:
             ui.update({'status':'saving','recording':None,'accepted_new_dataset':False,
+                'operator_message':operator_message,'last_episode':history_status,
                 'note':'仿真已暂停，保存原始证据并计算几何；此后仍需RTX补图和独立验收'})
         streams = (quality_stream, force_stream)
         rows = quality_rows
         # Detach first: a writer failure must not reuse or close an episode twice.
         capture = ledger = episode = quality_stream = force_stream = None
         quality_rows = []
-        outcome = {'accepted_new_dataset':False,'source_kind':result['source_kind']}
+        outcome = {'accepted_new_dataset':False,'source_kind':result['source_kind'],
+            'capture_started':capture_started}
         errors = {}
         try:
             if reason:
@@ -650,11 +735,28 @@ def run(args):
         directory = output/'episodes'/closing_episode.human_demo_uuid
         directory.mkdir(parents=True,exist_ok=True)
         write_json(directory/'episode.json', outcome)
+        if history is not None and capture_started:
+            operator_message = '原始证据已保存，正在独立复核物理门槛并编号归档。'
+            if ui:
+                ui.update({'status':'auditing','recording':None,'accepted_new_dataset':False,
+                    'operator_message':operator_message,'last_episode':history_status})
+            history_status = remember_finished_episode(history,directory,capture_started=capture_started)
+            history_error_latched = (history_status.get('error') or 'history update failed') if history_status.get('status') == 'error' else None
+            outcome['collection'] = copy.deepcopy(history_status)
+            # remember() may move the directory while retaining its UUID alias.
+            # Do not rewrite episode evidence after the independent history
+            # operation has bound its hashes and collection classification.
         result['episodes'].append({'directory':str(directory),**outcome})
         write_json(output/'result.json', result)
         return outcome
 
     try:
+        if not replay:
+            from pico_episode_history import EpisodeHistory
+            history = EpisodeHistory(output.parent/'pico_episode_history.json')
+            history_status = history.status()
+            history_error_latched = history_status.get('error') if history_status.get('status') == 'error' else None
+            result['episode_history_index'] = str(output.parent/'pico_episode_history.json')
         if deferred:
             result['egl_backend_selection'] = configure_mujoco_egl(os.environ,
                 mujoco_already_loaded='mujoco' in sys.modules)
@@ -814,6 +916,7 @@ def run(args):
         last_result_write_wall = 0.
         last_preview_time = None
         last_snapshot_error = None
+        reset_generation = 0
 
         def invalidate_calibration():
             nonlocal following, command, calibration_fresh, reference_evidence
@@ -826,7 +929,8 @@ def run(args):
         def reject_and_pause(reason):
             # A bad episode or input cannot close the UI/receiver during live use.
             # A fresh calibration is required even for a short operator pause.
-            nonlocal error_text, active_local
+            nonlocal error_text, active_local, operator_message
+            had_started_capture = history is not None and episode_has_started_capture(episode,output)
             error_text = str(reason)
             active_local = None
             invalidate_calibration()
@@ -839,10 +943,103 @@ def run(args):
             except Exception as trace_error:
                 result['trace_write_error'] = repr(trace_error)
             try:
-                finalize(False,error_text)
+                outcome = finalize(False,error_text)
             except Exception as finalization_error:
                 result['episode_finalize_error'] = repr(finalization_error)
+                error_text += '；保存失败：'+repr(finalization_error)
+                return
+            if had_started_capture:
+                problem = episode_finalization_error(outcome,requested_complete=False)
+                if problem:
+                    error_text += '；'+problem
+                try:
+                    reset_scene(reason='after_rejected_capture')
+                    operator_note = completed_episode_message('save',outcome.get('collection') or {})
+                    operator_message=operator_note+' 原始拒收原因：'+str(reason)
+                except Exception as reset_error:
+                    # reset_scene already cleared readiness. Never recursively
+                    # call this rejection path to retry a failed reset.
+                    error_text += '；自动重置失败：'+str(reset_error)
+                    operator_message='本条已结束，自动重置失败；仿真保持暂停，请查看错误。'
+        def reset_scene(*, reason='operator_reset'):
+            nonlocal physics_ready,reference,render_next,obs,renderer_environment_config
+            nonlocal model,data,deferred_prepare_index,prepared_deferred,warmup_baseline,cache
+            nonlocal geometry_cache_index,prepared_geometry_cache,substeps,global_tick,command
+            nonlocal previous,last_preview_time,last_buttons,reference_evidence,pending_input_commands
+            nonlocal wall_deadline,last_step_wall,hands,active_local,quality,operator_message
+            nonlocal reset_generation
+            if episode is not None:
+                raise ValueError('Finish the current episode before resetting the scene')
+            # Invalidate old UI/handset commands even if reset fails partway.
+            reset_generation += 1
+            pending_input_commands=[]
+            operator_message = '仿真已暂停，正在重置新场景并预热控制器。'
+            if ui:
+                ui.update({'status':'resetting','recording':None,'accepted_new_dataset':False,
+                    'operator_message':operator_message,'last_episode':history_status,'error':error_text})
+            invalidate_calibration(); physics_ready = False
+            reference = PicoSonicReference(resources,args.human_info)
+            raw.mujoco.step = original_step
+            render_next = True
+            args.seed += 1
+            if render_profiler:
+                render_profiler.set_context('explicit_environment_reset',None,data.time)
+            reset_options = {'state_dict':copy.deepcopy(environment_state),'dr_level':None} if environment_state else None
+            obs, _ = env.reset(seed=args.seed,options=reset_options)
+            renderer_environment_config = copy.deepcopy(raw.task.state_dict())
+            if environment_state:
+                binding = environment_binding_receipt(environment_state,raw.task.state_dict())
+                result.setdefault('reset_environment_bindings',[]).append(binding)
+                if not binding['matched']:
+                    raise ValueError('Reset failed to reconstruct the bound saved environment')
+            if rendered:
+                result['instance_render_rate_limits'] = disable_instance_render_rate_limits(carb.settings.get_settings())
+                if args.disable_unrelated_viewport:
+                    result['unrelated_viewport'] = configure_unrelated_viewport(
+                        get_active_viewport(),raw.isaac.cameras,disable=True)
+            model, data = raw.mujoco.mjModel, raw.mujoco.mjData
+            reset_initialization = initialize_pose(raw,DEFAULT_ANGLES,BODY_JOINT_NAMES)
+            if deferred:
+                deferred_prepare_index += 1
+                prepared_deferred,preparation = prepare_deferred_cache(prepare_deferred_model,
+                    output,deferred_prepare_index,model=model,objects=raw.mujoco.mj_objects,
+                    joint_names=TRAINING_STATE_JOINT_NAMES)
+                result['prepared_deferred_models'].append(preparation)
+            reset_before = physical_snapshot(model,data,BODY_JOINT_NAMES)
+            warmup_baseline = reset_before
+            obs = raw_get_obs()
+            controller.reset(); warmup.reset()
+            for tick in range(50):
+                render_next = capture_tick_index(tick+1) is not None
+                if render_profiler:
+                    render_profiler.set_context('reset_warmup',tick,data.time)
+                obs, *_ = env.step(warmup.command(raw.task.robot,controller,obs))
+                control_trace.write(json_text({'phase':'reset_warmup','tick50':tick,
+                    'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES)})+'\n')
+            reset_after = physical_snapshot(model,data,BODY_JOINT_NAMES)
+            result.setdefault('resets',[]).append({'reason':reason,'initialization':reset_initialization,
+                'before':reset_before,'after':reset_after})
+            write_json(output/'result.json',result)
+            result['resets'][-1]['standing_warmup_readiness'] = require_standing_warmup(reset_before, reset_after)
+            cache = build_container_geometry_cache(model,data,container_body=raw.mujoco.mj_objects['container'].id,
+                target_body=raw.mujoco.mj_objects['target'].id)
+            geometry_cache_index += 1
+            prepared_geometry_cache = prepare_quality_geometry(cache,output,geometry_cache_index)
+            result['prepared_quality_geometry_caches'].append(prepared_geometry_cache)
+            raw.mujoco.step = measured_step
+            substeps=0; global_tick=0; command=None; previous=None
+            last_preview_time=None
+            physics_ready=True; last_buttons=dict(frame.buttons) if frame is not None else {}; reference_evidence=None
+            pending_input_commands=[]
+            wall_deadline=None; last_step_wall=None
+            hands=None; active_local=None
+            quality={'valid':False,'reasons':['waiting_for_tracking_after_reset']}
+            if video_bridge:
+                video_bridge.update(obs)
+            operator_message = '新场景已准备，请站直后重新校准，再开始下一条录制。'
+
         while True:
+            reset_generation_at_loop_start = reset_generation
             snapshot_error = None
             if args.seconds and time.monotonic()-started_wall >= args.seconds:
                 break
@@ -879,7 +1076,9 @@ def run(args):
                 commands.append('record'); diagnostic_started = True
             if 'quit' in commands:
                 break
-            for action in commands:
+            reset_this_batch = reset_generation != reset_generation_at_loop_start
+            for action in scene_bound_commands(commands,lambda:
+                    reset_this_batch or reset_generation != reset_generation_at_loop_start):
                 if action == 'toggle_follow':
                     action = 'pause' if following else 'follow'
                 if action == 'toggle_record':
@@ -900,6 +1099,7 @@ def run(args):
                         reference.calibration.update(human_readiness=human_readiness,
                             robot_readiness=robot_readiness)
                         following = False; error_text = None; calibration_fresh = True
+                        operator_message='校准完成，可以开始跟随，再按录制键开始新示例。'
                         write_json(output/'last_calibration.json',reference.calibration)
                     elif action == 'follow':
                         if not calibration_fresh or not reference.calibration or not quality['valid'] or not physics_ready:
@@ -909,81 +1109,68 @@ def run(args):
                             physical_snapshot(model,data,BODY_JOINT_NAMES))
                         following = True; wall_deadline = None; command = None
                         error_text = None
+                        operator_message='正在跟随；按录制键开始新示例。'
                     elif action == 'pause':
                         reject_and_pause('operator_pause')
                     elif action == 'record':
                         if episode or not following or not (rendered or deferred):
                             raise ValueError('Recording needs active calibrated control and an explicit rendering/capture mode')
                         episode = RecordingState(); episode.request_start()
+                        operator_message='正在准备录制；起录后先保持姿势一秒。'
                     elif action == 'save':
                         if not episode:
                             raise ValueError('No active episode')
-                        episode.request_save(); finalize(True); invalidate_calibration()
+                        episode.request_save()
+                        reset_this_batch=True
+                        outcome,problem = end_episode_and_reset(finalize,
+                            lambda:reset_scene(reason='after_save'),discard=False)
+                        error_text=problem
+                        operator_message=completed_episode_message('save',outcome.get('collection') or {})
+                        if problem:
+                            operator_message='本条未正常完成：'+problem+'。新场景已重置，原始失败证据保留。'
                     elif action == 'discard':
-                        finalize(False,'operator_discard'); invalidate_calibration()
+                        if episode is not None:
+                            reset_this_batch=True
+                            outcome,problem = end_episode_and_reset(finalize,
+                                lambda:reset_scene(reason='after_active_discard'),discard=True)
+                            error_text=problem
+                            operator_message=completed_episode_message('discard',outcome.get('collection') or {})
+                            if problem:
+                                operator_message+=' 写盘或归档问题：'+problem
+                        elif history is None:
+                            operator_message='诊断输入不操作真人历史记录；当前场景未重置。'
+                        else:
+                            if following:
+                                invalidate_calibration()
+                            blocked = history_error_latched
+                            if not blocked and history_status.get('status') == 'error':
+                                blocked = history_status.get('error') or 'history unavailable'
+                            history_status=discard_previous_from_history(history,blocked_error=blocked)
+                            if history_status.get('status') == 'error':
+                                history_error_latched=history_status.get('error') or 'history update failed'
+                                raise RuntimeError('丢弃上一条失败：'+str(history_error_latched))
+                            history_error_latched=None
+                            error_text=None
+                            if history_status.get('status') == 'empty':
+                                operator_message='目前没有可丢弃的上一条记录；当前场景未重置。'
+                            else:
+                                label='第'+str(history_status.get('number')).zfill(3)+'条' if history_status.get('number') is not None else '上一条记录'
+                                operator_message=label+'已标记丢弃，原始证据保留；当前场景未重置。'
+                            for item in reversed(result['episodes']):
+                                if (item.get('collection') or {}).get('uuid') == history_status.get('uuid') and history_status.get('uuid') is not None:
+                                    item['collection']=copy.deepcopy(history_status)
+                                    break
                     elif action == 'reset':
-                        if episode:
-                            raise ValueError('Discard or save before reset')
-                        # Reset is explicit, between demos only; control histories/calibration are cleared.
-                        invalidate_calibration(); physics_ready = False
-                        reference = PicoSonicReference(resources,args.human_info)
-                        raw.mujoco.step = original_step
-                        render_next = True
-                        args.seed += 1
-                        if render_profiler:
-                            render_profiler.set_context('explicit_environment_reset',None,data.time)
-                        reset_options = {'state_dict':copy.deepcopy(environment_state),'dr_level':None} if environment_state else None
-                        obs, _ = env.reset(seed=args.seed,options=reset_options)
-                        renderer_environment_config = copy.deepcopy(raw.task.state_dict())
-                        if environment_state:
-                            binding = environment_binding_receipt(environment_state,raw.task.state_dict())
-                            result.setdefault('reset_environment_bindings',[]).append(binding)
-                            if not binding['matched']:
-                                raise ValueError('Reset failed to reconstruct the bound saved environment')
-                        if rendered:
-                            result['instance_render_rate_limits'] = disable_instance_render_rate_limits(carb.settings.get_settings())
-                            if args.disable_unrelated_viewport:
-                                result['unrelated_viewport'] = configure_unrelated_viewport(
-                                    get_active_viewport(),raw.isaac.cameras,disable=True)
-                        model, data = raw.mujoco.mjModel, raw.mujoco.mjData
-                        reset_initialization = initialize_pose(raw,DEFAULT_ANGLES,BODY_JOINT_NAMES)
-                        if deferred:
-                            deferred_prepare_index += 1
-                            prepared_deferred,preparation = prepare_deferred_cache(prepare_deferred_model,
-                                output,deferred_prepare_index,model=model,objects=raw.mujoco.mj_objects,
-                                joint_names=TRAINING_STATE_JOINT_NAMES)
-                            result['prepared_deferred_models'].append(preparation)
-                        reset_before = physical_snapshot(model,data,BODY_JOINT_NAMES)
-                        warmup_baseline = reset_before
-                        obs = raw_get_obs()
-                        controller.reset(); warmup.reset()
-                        for tick in range(50):
-                            render_next = capture_tick_index(tick+1) is not None
-                            if render_profiler:
-                                render_profiler.set_context('reset_warmup',tick,data.time)
-                            obs, *_ = env.step(warmup.command(raw.task.robot,controller,obs))
-                            control_trace.write(json_text({'phase':'reset_warmup','tick50':tick,
-                                'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES)})+'\n')
-                        reset_after = physical_snapshot(model,data,BODY_JOINT_NAMES)
-                        result.setdefault('resets',[]).append({'initialization':reset_initialization,
-                            'before':reset_before,'after':reset_after})
-                        write_json(output/'result.json',result)
-                        result['resets'][-1]['standing_warmup_readiness'] = require_standing_warmup(reset_before, reset_after)
-                        cache = build_container_geometry_cache(model,data,container_body=raw.mujoco.mj_objects['container'].id,
-                            target_body=raw.mujoco.mj_objects['target'].id)
-                        geometry_cache_index += 1
-                        prepared_geometry_cache = prepare_quality_geometry(cache,output,geometry_cache_index)
-                        result['prepared_quality_geometry_caches'].append(prepared_geometry_cache)
-                        raw.mujoco.step = measured_step
-                        substeps=0; global_tick=0; command=None; previous=None
-                        last_preview_time=None
-                        physics_ready=True; last_buttons={}; reference_evidence=None
-                        pending_input_commands=[]
-                        wall_deadline=None; last_step_wall=None
+                        if not reset_this_batch:
+                            reset_this_batch=True
+                            reset_scene()
+                            error_text=None
                     else:
                         raise ValueError('Unknown command: '+action)
                 except Exception as error:
                     error_text = str(error)
+                    if action in ('save','discard','reset'):
+                        operator_message='操作未正常完成，仿真保持暂停；原始证据不会删除。'+error_text
                     if action in ('calibrate','follow','reset') or episode or following:
                         reject_and_pause(error_text)
                     if replay:
@@ -1154,6 +1341,7 @@ def run(args):
                 else:
                     last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
+                'operator_message':operator_message,'last_episode':history_status,
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
                 'hand_control':feedback,'hand_feedback_error':feedback_error,
                 'recording':episode.status if episode else None,'episode_count':len(result['episodes']),

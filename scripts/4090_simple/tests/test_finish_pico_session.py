@@ -62,6 +62,32 @@ class FinishPicoTests(unittest.TestCase):
             self.assertEqual(report['eligible_for_packing'],1)
             self.assertFalse(report['accepted_new_dataset'])
 
+    def test_operator_and_automatic_discards_never_render_or_audit(self):
+        for marker,value in [('operator_discard.json',{'reason':'operator requested'}),
+                             ('collection_record.json',{'disposition':'discarded','reasons':['no lifted handover']})]:
+            with self.subTest(marker=marker),tempfile.TemporaryDirectory() as directory:
+                path=self.episode(directory,'saved',{'status':'pending_rtx','state':{'status':'pending_audit'}})
+                (path/marker).write_text(json.dumps(value))
+                audit=mock.Mock()
+                with mock.patch('finish_pico_session.subprocess.run') as renderer, \
+                     mock.patch.dict(sys.modules,{'audit_pico_teleop_episode':types.SimpleNamespace(audit_episode=audit)}):
+                    report=finish(directory)
+                renderer.assert_not_called();audit.assert_not_called()
+                self.assertEqual(report['episodes'][0]['status'],'skipped_discarded')
+                self.assertEqual(report['eligible_for_packing'],0)
+
+    def test_original_episode_alias_to_numbered_kept_directory_still_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);actual=root/'kept'/'001';actual.mkdir(parents=True)
+            (actual/'episode.json').write_text(json.dumps({'state':{'status':'pending_audit'}}))
+            (actual/'collection_record.json').write_text(json.dumps({'disposition':'kept'}))
+            (root/'episodes').mkdir();alias=root/'episodes'/'original_uuid';alias.symlink_to(actual,target_is_directory=True)
+            audit=mock.Mock(return_value={'status':'eligible','eligible_for_packing':True})
+            with mock.patch.dict(sys.modules,{'audit_pico_teleop_episode':types.SimpleNamespace(audit_episode=audit)}):
+                report=finish(root)
+            audit.assert_called_once_with(alias)
+            self.assertEqual(report['eligible_for_packing'],1)
+
 
 if __name__=='__main__':
     unittest.main()

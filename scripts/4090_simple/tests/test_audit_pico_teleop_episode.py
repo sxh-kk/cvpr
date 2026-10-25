@@ -301,6 +301,15 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(result["physical_gate"]["eligible_physics"])
         self.assertEqual(json.loads((self.root/"admission.json").read_text()),result)
 
+    def test_operator_discard_blocks_even_previously_eligible_recording(self):
+        write(self.root/'operator_discard.json',{'reason':'operator requested previous episode discard'})
+        self.assertIn('Operator discarded',self.check_rejected())
+
+    def test_collection_physics_rejection_blocks_admission(self):
+        write(self.root/'collection_record.json',{'number':'002','disposition':'discarded',
+            'reasons':['未完成交接']})
+        self.assertIn('collection rejected',self.check_rejected())
+
     def test_recorded_replay_never_qualifies_despite_successful_physics(self):
         self.rewrite("metadata.json",lambda v:v.update(source_kind="recorded_pico_diagnostic"))
         self.assertIn("never eligible",self.check_rejected())

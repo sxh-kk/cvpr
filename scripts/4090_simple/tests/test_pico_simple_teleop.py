@@ -211,7 +211,7 @@ class EntryGuardTests(unittest.TestCase):
             'pico_sonic_reference.py','pico_teleop_recording.py','pico_teleop_ui.py',
             'pico_deferred_capture.py','render_deferred_pico.py','finish_pico_session.py',
             'audit_pico_teleop_episode.py','start_pico_teleop.sh',
-            'handover_contact_quality.py','handover_geometry_quality.py'})
+            'handover_contact_quality.py','handover_geometry_quality.py','pico_episode_history.py'})
         self.assertTrue(all(len(digest)==64 for digest in identities.values()))
 
     def test_instance_rate_limits_record_before_after_without_clock_changes(self):
@@ -481,6 +481,118 @@ class EntryGuardTests(unittest.TestCase):
                 (root/name).write_bytes(name.encode())
             receipt = entry.quality_geometry_source_identities(root)
             self.assertEqual(receipt,{key:hashlib.sha256(name.encode()).hexdigest() for key,name in names.items()})
+
+    def test_save_finishes_before_exactly_one_automatic_reset(self):
+        calls=[]
+        outcome={'capture':{'status':'raw_physics_capture_completed_pending_rtx'},
+            'collection':{'number':1,'disposition':'kept'}}
+        def finalize(**kwargs):
+            calls.append(('finalize',kwargs))
+            return outcome
+        result,problem=entry.end_episode_and_reset(finalize,lambda:calls.append(('reset',{})),discard=False)
+        self.assertIs(result,outcome)
+        self.assertIsNone(problem)
+        self.assertEqual(calls,[('finalize',{'completed':True,'reason':None}),('reset',{})])
+
+    def test_stale_command_batch_cannot_discard_after_save_or_scene_reset(self):
+        # These commands arrived together for the old recording. Saving it,
+        # rejecting it, or failing a reset must not apply discard to its successor.
+        for first,fail in (('save',False),('active_discard',False),
+                           ('active_rejection',False),('reset',True)):
+            with self.subTest(first=first,fail=fail):
+                state={'transition':False,'generation':0}
+                applied=[]
+                for action in entry.scene_bound_commands([first,'discard','record'],lambda:
+                        state['transition'] or state['generation'] != 0):
+                    applied.append(action)
+                    if action in ('save','active_discard'):
+                        state['transition']=True  # before finalize can fail
+                    else:
+                        state['generation']+=1  # before reset can fail
+                    if fail:
+                        try:
+                            raise RuntimeError('reset warmup failed')
+                        except RuntimeError:
+                            pass
+                self.assertEqual(applied,[first])
+        self.assertEqual(list(entry.scene_bound_commands(['discard'],lambda:True)),[])
+        self.assertEqual(list(entry.scene_bound_commands(['calibrate','follow'],lambda:False)),
+            ['calibrate','follow'])
+
+    def test_active_discard_finishes_with_reason_before_reset(self):
+        calls=[]
+        def finalize(**kwargs):
+            calls.append(('finalize',kwargs))
+            return {'capture':{'status':'partial_capture_rejected'}}
+        _,problem=entry.end_episode_and_reset(finalize,lambda:calls.append(('reset',{})),discard=True)
+        self.assertIsNone(problem)
+        self.assertEqual(calls,[('finalize',{'completed':False,'reason':'operator_discard'}),('reset',{})])
+
+    def test_automatic_reset_does_not_hide_a_writer_or_history_failure(self):
+        calls=[]
+        outcome={'capture':{'status':'partial_capture_rejected','failure':'disk full'},
+            'collection':{'status':'error','error':'index unavailable'}}
+        result,problem=entry.end_episode_and_reset(lambda **kwargs:outcome,
+            lambda:calls.append('reset'),discard=False)
+        self.assertIs(result,outcome)
+        self.assertEqual(calls,['reset'])
+        self.assertIn('disk full',problem)
+        self.assertIn('index unavailable',problem)
+
+    def test_finalize_failure_does_not_reset_and_failed_reset_is_not_retried(self):
+        calls=[]
+        def failed_finalize(**kwargs):
+            raise OSError('cannot preserve evidence')
+        with self.assertRaisesRegex(OSError,'cannot preserve evidence'):
+            entry.end_episode_and_reset(failed_finalize,lambda:calls.append('reset'),discard=False)
+        self.assertEqual(calls,[])
+        def failed_reset():
+            calls.append('reset')
+            raise ValueError('warmup not ready')
+        with self.assertRaisesRegex(RuntimeError,'disk full.*warmup not ready'):
+            entry.end_episode_and_reset(lambda **kwargs:{'capture':{'failure':'disk full'}},
+                failed_reset,discard=False)
+        self.assertEqual(calls,['reset'])
+
+    def test_history_only_remembers_started_capture_and_never_diagnostics(self):
+        remembered=[]
+        history=SimpleNamespace(remember=lambda directory:remembered.append(directory) or {'status':'ready'})
+        episode=entry.RecordingState()
+        episode.request_start()
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)
+            path=output/'episodes'/episode.human_demo_uuid
+            self.assertFalse(entry.episode_has_started_capture(episode,output))
+            self.assertIsNone(entry.remember_finished_episode(history,path,capture_started=False))
+            episode.on_tick(0)
+            self.assertFalse(entry.episode_has_started_capture(episode,output))
+            path.mkdir(parents=True)
+            episode.reject('failed tracking')
+            self.assertTrue(entry.episode_has_started_capture(episode,output))
+            entry.remember_finished_episode(history,path,capture_started=True)
+            self.assertEqual(remembered,[path])
+            self.assertIsNone(entry.remember_finished_episode(None,path,capture_started=True))
+            self.assertEqual(remembered,[path])
+
+    def test_no_active_discard_only_marks_history_and_error_never_falls_back(self):
+        calls=[]
+        history=SimpleNamespace(discard_previous=lambda:calls.append('discard') or
+            {'status':'discarded','uuid':'same-attempt','number':2,'already_discarded':True})
+        status=entry.discard_previous_from_history(history)
+        self.assertEqual(status['number'],2)
+        self.assertEqual(calls,['discard'])
+        with self.assertRaisesRegex(RuntimeError,'禁止回退'):
+            entry.discard_previous_from_history(history,blocked_error='latest remember failed')
+        self.assertEqual(calls,['discard'])
+        self.assertEqual(entry.discard_previous_from_history(None)['status'],'disabled_diagnostic')
+
+    def test_collection_message_identifies_number_and_remaining_acceptance(self):
+        message=entry.completed_episode_message('save',{'number':1,'disposition':'kept'})
+        self.assertIn('第001条',message)
+        self.assertIn('仍待图像和数据验收',message)
+        rejected=entry.completed_episode_message('save',{'number':2,'disposition':'discarded','reasons':['未完成交接']})
+        self.assertIn('第002条',rejected)
+        self.assertIn('未完成交接',rejected)
 
 
 if __name__=='__main__':

@@ -79,14 +79,39 @@ class FinishPicoTests(unittest.TestCase):
     def test_original_episode_alias_to_numbered_kept_directory_still_finishes(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);actual=root/'kept'/'001';actual.mkdir(parents=True)
-            (actual/'episode.json').write_text(json.dumps({'state':{'status':'pending_audit'}}))
-            (actual/'collection_record.json').write_text(json.dumps({'disposition':'kept'}))
+            import hashlib
+            identity='f35e2c4b-d407-4422-a67d-533fd740ff2b'
+            (actual/'episode.json').write_text(json.dumps({'state':{'status':'pending_audit','human_demo_uuid':identity}}))
+            (actual/'collection_record.json').write_text(json.dumps({'disposition':'kept','status':'committed',
+                'human_demo_uuid':identity,'source_episode_directory':str(root/'episodes'/'original_uuid'),
+                'episode_json_sha256':hashlib.sha256((actual/'episode.json').read_bytes()).hexdigest()}))
             (root/'episodes').mkdir();alias=root/'episodes'/'original_uuid';alias.symlink_to(actual,target_is_directory=True)
             audit=mock.Mock(return_value={'status':'eligible','eligible_for_packing':True})
             with mock.patch.dict(sys.modules,{'audit_pico_teleop_episode':types.SimpleNamespace(audit_episode=audit)}):
                 report=finish(root)
             audit.assert_called_once_with(alias)
             self.assertEqual(report['eligible_for_packing'],1)
+            # A legacy record has no submission marker. Its durable queue
+            # intent must still block admission before the worker moves it.
+            requests=root/'.pico_episode_review'/'discard_requests'
+            requests.mkdir(parents=True)
+            (requests/(identity+'.json')).write_text(json.dumps({
+                'uuid':identity,'operator_discard_requested':True}))
+            audit.reset_mock()
+            with mock.patch.dict(sys.modules,{'audit_pico_teleop_episode':types.SimpleNamespace(audit_episode=audit)}):
+                report=finish(root)
+            audit.assert_not_called()
+            self.assertEqual(report['episodes'][0]['status'],'skipped_discarded')
+
+    def test_pending_background_review_never_starts_rtx_or_admission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.episode(directory,'pending',{'status':'pending_rtx','geometry_pending':True,
+                'state':{'status':'pending_audit'}})
+            with mock.patch('finish_pico_session.subprocess.run') as renderer:
+                report=finish(directory)
+            renderer.assert_not_called()
+            self.assertEqual(report['episodes'][0]['status'],'technical_error')
+            self.assertEqual(report['eligible_for_packing'],0)
 
 
 if __name__=='__main__':

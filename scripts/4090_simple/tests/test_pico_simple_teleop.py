@@ -211,7 +211,8 @@ class EntryGuardTests(unittest.TestCase):
             'pico_sonic_reference.py','pico_teleop_recording.py','pico_teleop_ui.py',
             'pico_deferred_capture.py','render_deferred_pico.py','finish_pico_session.py',
             'audit_pico_teleop_episode.py','start_pico_teleop.sh',
-            'handover_contact_quality.py','handover_geometry_quality.py','pico_episode_history.py'})
+            'handover_contact_quality.py','handover_geometry_quality.py','pico_episode_history.py',
+            'pico_episode_review.py'})
         self.assertTrue(all(len(digest)==64 for digest in identities.values()))
 
     def test_instance_rate_limits_record_before_after_without_clock_changes(self):
@@ -554,37 +555,100 @@ class EntryGuardTests(unittest.TestCase):
                 failed_reset,discard=False)
         self.assertEqual(calls,['reset'])
 
-    def test_history_only_remembers_started_capture_and_never_diagnostics(self):
-        remembered=[]
-        history=SimpleNamespace(remember=lambda directory:remembered.append(directory) or {'status':'ready'})
+    def test_only_started_capture_is_queued_and_diagnostics_disable_collection(self):
+        submitted=[]
+        queue=SimpleNamespace(submit=lambda directory,**options:
+            submitted.append((directory,options)) or {'status':'pending','uuid':Path(directory).name})
         episode=entry.RecordingState()
         episode.request_start()
         with tempfile.TemporaryDirectory() as directory:
             output=Path(directory)
             path=output/'episodes'/episode.human_demo_uuid
             self.assertFalse(entry.episode_has_started_capture(episode,output))
-            self.assertIsNone(entry.remember_finished_episode(history,path,capture_started=False))
+            self.assertIsNone(entry.submit_finished_episode(queue,path,capture_started=False))
             episode.on_tick(0)
             self.assertFalse(entry.episode_has_started_capture(episode,output))
             path.mkdir(parents=True)
             episode.reject('failed tracking')
             self.assertTrue(entry.episode_has_started_capture(episode,output))
-            entry.remember_finished_episode(history,path,capture_started=True)
-            self.assertEqual(remembered,[path])
-            self.assertIsNone(entry.remember_finished_episode(None,path,capture_started=True))
-            self.assertEqual(remembered,[path])
+            entry.submit_finished_episode(queue,path,capture_started=True)
+            self.assertEqual(submitted,[(path,{'collection_enabled':True})])
+            self.assertIsNone(entry.submit_finished_episode(None,path,capture_started=True))
+            entry.submit_finished_episode(queue,path,capture_started=True,collection_enabled=False)
+            self.assertEqual(submitted[-1],(path,{'collection_enabled':False}))
+            wrong_queue=SimpleNamespace(submit=lambda *args,**options:{'status':'pending','uuid':'older'})
+            rejected=entry.submit_finished_episode(wrong_queue,path,capture_started=True)
+            self.assertEqual(rejected['status'],'error')
+            self.assertEqual(rejected['uuid'],episode.human_demo_uuid)
 
-    def test_no_active_discard_only_marks_history_and_error_never_falls_back(self):
+    def test_no_active_discard_targets_latest_pending_uuid_and_never_falls_back(self):
         calls=[]
-        history=SimpleNamespace(discard_previous=lambda:calls.append('discard') or
-            {'status':'discarded','uuid':'same-attempt','number':2,'already_discarded':True})
-        status=entry.discard_previous_from_history(history)
-        self.assertEqual(status['number'],2)
-        self.assertEqual(calls,['discard'])
-        with self.assertRaisesRegex(RuntimeError,'禁止回退'):
-            entry.discard_previous_from_history(history,blocked_error='latest remember failed')
-        self.assertEqual(calls,['discard'])
-        self.assertEqual(entry.discard_previous_from_history(None)['status'],'disabled_diagnostic')
+        queue=SimpleNamespace(request_discard=lambda uuid:calls.append(uuid) or
+            {'status':'pending_discard','uuid':uuid,'pending':True})
+        status=entry.discard_finished_episode(queue,'latest-pending-attempt')
+        self.assertEqual(status['uuid'],'latest-pending-attempt')
+        self.assertEqual(calls,['latest-pending-attempt'])
+        self.assertEqual(entry.discard_finished_episode(queue,None)['status'],'empty')
+        self.assertEqual(calls,['latest-pending-attempt'])
+        self.assertEqual(entry.discard_finished_episode(None,'diagnostic')['status'],'disabled_diagnostic')
+        with self.assertRaisesRegex(ValueError,'different episode identity'):
+            entry.discard_finished_episode(SimpleNamespace(request_discard=lambda uuid:{'uuid':'old'}),
+                'latest-pending-attempt')
+
+    def test_background_results_are_matched_to_latest_uuid_and_cannot_revive_discard(self):
+        pending={'status':'pending','uuid':'new','pending':True,'available':False}
+        snapshot={'latest_finished_uuid':'old','latest_episode':{'status':'ready','uuid':'old'},
+            'latest_completed':{'status':'ready','uuid':'old'},'latest_results':[]}
+        uuid,status=entry.latest_review_status(snapshot,'new',pending)
+        self.assertEqual(uuid,'new')
+        self.assertEqual(status,pending)
+        snapshot['latest_results']=[{'status':'ready','uuid':'new','number':8,'disposition':'kept'}]
+        uuid,status=entry.latest_review_status(snapshot,'new',pending)
+        self.assertEqual(status['number'],8)
+        discard={**pending,'status':'pending_discard'}
+        _,status=entry.latest_review_status(snapshot,'new',discard)
+        self.assertEqual(status,discard)
+        snapshot['latest_results']=[{'status':'discarded','uuid':'new','number':8,'discarded':True}]
+        _,status=entry.latest_review_status(snapshot,'new',discard)
+        self.assertTrue(status['discarded'])
+
+    def test_raw_writers_are_sealed_without_geometry_or_physical_review(self):
+        state=entry.RecordingState()
+        state.request_start()
+        for tick in range(51):
+            state.on_tick(tick)
+        state.request_save()
+        calls=[]
+        capture=SimpleNamespace(close=lambda **options:calls.append(('capture',options)) or
+            {'status':'raw_physics_capture_completed_pending_rtx'})
+        ledger=SimpleNamespace(close=lambda:calls.append(('ledger',{})) or {'event_count':31})
+        streams=[SimpleNamespace(close=lambda label=label:calls.append((label,{})))
+            for label in ('raw_quality','original_forces')]
+        with patch.object(entry,'complete_quality_geometry',side_effect=AssertionError('worker only')):
+            outcome=entry.seal_episode_writers(state,capture,ledger,streams,
+                completed=True,reason=None,source_kind='live_pico_human',capture_started=True,deferred=True)
+        self.assertEqual([name for name,_ in calls],['capture','raw_quality','original_forces','ledger'])
+        self.assertEqual(calls[0][1],{'completed':True})
+        self.assertTrue(outcome['geometry_pending'])
+        self.assertNotIn('quality_geometry_sources',outcome)
+        self.assertNotIn('physical_gate',outcome)
+        self.assertEqual(outcome['status'],'pending_rtx')
+        self.assertFalse(outcome['accepted_new_dataset'])
+
+    def test_raw_seal_failure_still_closes_other_writers_and_rejects_attempt(self):
+        state=entry.RecordingState()
+        calls=[]
+        def failed_capture(**options):
+            calls.append('capture')
+            raise OSError('disk full')
+        outcome=entry.seal_episode_writers(state,SimpleNamespace(close=failed_capture),
+            SimpleNamespace(close=lambda:calls.append('ledger')),
+            [SimpleNamespace(close=lambda:calls.append('raw_quality'))],completed=False,
+            reason='tracking lost',source_kind='live_pico_human',capture_started=True,deferred=True)
+        self.assertEqual(calls,['capture','raw_quality','ledger'])
+        self.assertIn('disk full',outcome['finalization_errors']['capture'])
+        self.assertEqual(outcome['state']['status'],'rejected')
+        self.assertFalse(outcome['state']['pending_audit'])
 
     def test_collection_message_identifies_number_and_remaining_acceptance(self):
         message=entry.completed_episode_message('save',{'number':1,'disposition':'kept'})
@@ -593,6 +657,9 @@ class EntryGuardTests(unittest.TestCase):
         rejected=entry.completed_episode_message('save',{'number':2,'disposition':'discarded','reasons':['未完成交接']})
         self.assertIn('第002条',rejected)
         self.assertIn('未完成交接',rejected)
+        pending=entry.completed_episode_message('save',{'status':'pending','pending':True})
+        self.assertIn('后台正在物理复核',pending)
+        self.assertNotIn('已通过',pending)
 
 
 if __name__=='__main__':

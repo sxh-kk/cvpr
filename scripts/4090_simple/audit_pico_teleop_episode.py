@@ -248,6 +248,11 @@ def _check_deferred_bridge(root, metadata, outcome, manifest, events, ledger, re
 
 def _check_deferred_quality(metadata, outcome, qualities, read, bindings, root):
     from pico_simple_teleop import complete_quality_geometry
+    if outcome.get("geometry_pending") is True:
+        from pico_episode_history import quality_geometry_outcome
+        read("quality_geometry_completion.json")  # Bind the independent receipt in this audit.
+        outcome = quality_geometry_outcome(root, outcome)
+        require(not outcome.get("physical_gate_error"), "Background geometry review failed")
     raw = read("raw_quality_samples.jsonl", lines=True)
     cache = read("container_geometry_cache.json")
     require(metadata.get("container_geometry_cache_sha256") == bindings[str(root/"container_geometry_cache.json")],
@@ -314,8 +319,18 @@ def audit_episode(directory, *, write_report=True):
             require(disposition.get('disposition') in ('kept','discarded'), 'Invalid collection disposition')
             if disposition['disposition'] == 'discarded':
                 raise ValueError('Episode collection rejected this recording: '+str(disposition.get('reasons',[])))
+        from pico_episode_review import discard_requested
+        require(not discard_requested(root), 'Operator discard is pending in the background queue')
         metadata = read("metadata.json")
         outcome = read("episode.json")
+        if outcome.get("geometry_pending") is True:
+            submission = read("review_queue_submission.json")
+            require(isinstance(submission,dict), 'Background review submission marker is missing')
+            from pico_episode_review import discard_requested
+            require(not discard_requested(root), 'Operator discard is pending in the background queue')
+            collection = read("collection_record.json")
+            require(collection.get("status") == "committed" and collection.get("disposition") == "kept",
+                    "Background physical review has not retained this recording")
         manifest = read("capture/capture.json")
         deferred = metadata.get("render_mode") == "mujoco_deferred"
         async_result = None if deferred else read("capture/async_capture.json")

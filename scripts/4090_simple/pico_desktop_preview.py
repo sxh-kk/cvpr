@@ -12,25 +12,29 @@ import urllib.request
 
 PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <title>4090 · SIMPLE 相机</title><style>
-*{box-sizing:border-box}body{margin:0;background:#080e15;color:#edf2f8;font:16px system-ui}
+*{box-sizing:border-box}body{display:flex;flex-direction:column;height:100vh;margin:0;background:#080e15;color:#edf2f8;font:16px system-ui}
 header{height:56px;display:flex;align-items:center;gap:22px;padding:0 24px;background:#142130}
 h1{font-size:18px;margin:0}#state{color:#a5d7b9}a{color:#b2d5ff;margin-left:auto}
-main{height:calc(100vh - 168px);display:grid;place-items:center}img{width:100%;height:100%;object-fit:contain}
-footer{height:112px;padding:10px 24px;color:#aebdcc;background:#142130}#error{color:#ffb9ac}
+main{flex:1;min-height:160px;display:grid;place-items:center}img{width:100%;height:100%;object-fit:contain}
+footer{flex-shrink:0;padding:10px 24px;color:#aebdcc;background:#142130}#error{color:#ffb9ac}
 button{font:inherit;padding:5px 12px;color:#eaf3ff;background:#294260;border:0;border-radius:5px}
 </style><header><h1>4090 · SIMPLE 实时相机</h1><span id="state">连接中</span>
 <button id="full">全屏画面</button><a href="http://127.0.0.1:43100/" target="_blank">打开采集控制面板</a></header>
 <main><img src="/stream.mjpg" alt="G1真实仿真相机画面"></main>
-<footer>X 标定　Y 跟随／暂停　A 录制／保存　左右前扳机或侧握键抓握　<span id="error"></span><p id="grasp">等待抓握反馈</p><p id="last-episode">上一条：暂无已完成录制</p></footer>
+<footer>X 标定　Y 跟随／暂停　A 录制／保存　左右前扳机或侧握键抓握　<span id="error"></span><p id="grasp">等待抓握反馈</p><p id="last-episode">上一条：暂无已完成录制</p><p id="review-status">后台复核：准备中</p><p id="review-result">最近完成：暂无</p></footer>
 <script>
 document.querySelector('#full').onclick=()=>document.documentElement.requestFullscreen();
+
+function episodeText(v){if(!v?.uuid)return '暂无';const id=v.number!=null?String(v.number).padStart(3,'0'):'待编号（'+v.uuid.slice(0,8)+'）';const state=v.status==='pending_discard'?'已申请丢弃，后台处理中':v.discarded||v.disposition==='discarded'?'已丢弃':v.disposition==='kept'?'物理验收通过，已保留':v.status==='running'?'复核中':v.status==='error'?'复核异常':v.pending?'待复核':v.collection_enabled===false?'诊断已完成（不计真人数据）':'待审核';return id+' · '+state+((v.reasons??[]).length?' · 原因：'+v.reasons.join('；'):'')+(v.error?' · '+v.error:'');}
+function renderReview(q){const labels={starting:'正在准备',idle:'空闲',working:'正在复核',recovering:'正在恢复任务',error:'复核异常'};document.querySelector('#review-status').textContent='后台复核：'+(q?(labels[q.status]??q.status)+' · 未完成 '+(q.pending_count??0)+' 条'+(q.error?' · '+q.error:''):'准备中');document.querySelector('#review-result').textContent='最近完成：'+episodeText(q?.latest_completed);const list=document.querySelector('#review-results');if(list){list.replaceChildren();for(const v of (q?.latest_results??[])){const row=document.createElement('li');row.textContent=episodeText(v);list.appendChild(row);}}}
+
 async function refresh(){try{const response=await fetch('/status.json',{cache:'no-store'});if(!response.ok)throw Error('采集服务未连接');const v=await response.json();const s=v.status;
-const labels={paused:'已暂停',following:'正在跟随',saving:'正在保存并验收',auditing:'正在物理验收',resetting:'正在重置场景',stopped:'采集已结束'};
+const labels={paused:'已暂停',following:'正在跟随',saving:'正在封存本条',auditing:'正在物理验收',resetting:'正在重置场景',stopped:'采集已结束'};
 const phase=s.recording==='recording'?'正在录制':s.recording==='warmup'?'保持姿势一秒':labels[s.status]??'等待采集状态';
 document.querySelector('#state').textContent=phase+' · '+(s.tracking?.valid?'追踪正常':'等待有效追踪')+' · '+(s.calibrated?'已标定':'需要标定');
 const h=s.hand_control;const pct=x=>Number.isFinite(x)?Math.round(x*100)+'%':'未下发';
 document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
-const last=s.last_episode;document.querySelector('#last-episode').textContent=last?.uuid?'上一条：'+(last.number!=null?String(last.number).padStart(3,'0'):last.uuid.slice(0,8))+' · '+(last.discarded||last.disposition==='discarded'?'已丢弃':last.disposition==='kept'?'物理验收通过，已保留':'待审核')+((last.reasons??[]).length?' · 原因：'+last.reasons.join('；'):''):'上一条：暂无已完成录制';
+const last=s.last_episode;document.querySelector('#last-episode').textContent=last?.uuid?'上一条：'+episodeText(last):'上一条：暂无已完成录制';renderReview(s.background_review);
 document.querySelector('#error').textContent=s.error??'';}catch(e){document.querySelector('#state').textContent='采集服务未连接';}}
 refresh();setInterval(refresh,500);
 </script></html>'''

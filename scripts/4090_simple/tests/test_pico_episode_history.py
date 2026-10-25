@@ -63,6 +63,57 @@ class EpisodeHistoryTests(unittest.TestCase):
                 write(directory / "episode.json", outcome)
         return directory
 
+    def background_receipt(self, directory):
+        add_deferred_quality(directory)
+        outcome_path = directory / "episode.json"
+        outcome = json.loads(outcome_path.read_text())
+        sources = outcome.pop("quality_geometry_sources")
+        outcome["geometry_pending"] = True
+        outcome["quality_geometry_expected_cache_sha256"] = sources["cache_sha256"]
+        write(outcome_path, outcome)
+        metadata = json.loads((directory / "metadata.json").read_text())
+        receipt = {"contract":"cvpr-pico-quality-geometry-completion-v1", "status":"completed",
+            "episode_json_sha256":hashlib.sha256(outcome_path.read_bytes()).hexdigest(),
+            "metadata_sha256":hashlib.sha256((directory / "metadata.json").read_bytes()).hexdigest(),
+            "human_demo_uuid":metadata["human_demo_uuid"], "source_kind":metadata["source_kind"],
+            "quality_geometry_sources":sources,"accepted_new_dataset":False}
+        write(directory / "quality_geometry_completion.json", receipt)
+        return receipt
+
+    def test_separate_background_receipt_binds_immutable_episode_and_geometry(self):
+        directory = self.episode()
+        self.background_receipt(directory)
+        original = hashes(directory)
+        result = self.history.remember(directory)
+        self.assertEqual(result["disposition"], "kept", result)
+        self.assertEqual(hashes(Path(result["path"])), original)
+        invalid = self.episode(session="second")
+        receipt = self.background_receipt(invalid)
+        receipt["episode_json_sha256"] = "0" * 64
+        write(invalid / "quality_geometry_completion.json", receipt)
+        result = self.history.remember(invalid)
+        self.assertEqual(result["disposition"], "discarded")
+        self.assertTrue(any("回执" in reason for reason in result["reasons"]))
+
+    def test_worker_discards_exact_older_uuid_without_changing_latest_or_pending_attempt(self):
+        first = self.episode(session="first")
+        a = self.history.remember(first)
+        second = self.episode(session="second")
+        b = self.history.remember(second)
+        self.assertEqual(self.history.remember(first)["uuid"], a["uuid"])
+        pending = self.episode(session="pending")
+        outcome = json.loads((pending / "episode.json").read_text())
+        outcome["capture_started"] = True
+        write(pending / "episode.json", outcome)
+        self.assertEqual(self.history.discard_previous()["status"], "error")
+        result = self.history.discard_uuid(a["uuid"])
+        self.assertEqual(result["uuid"], a["uuid"])
+        self.assertTrue(result["discarded"])
+        self.assertTrue(self.history.discard_uuid(a["uuid"])["already_discarded"])
+        self.assertEqual(json.loads(self.index.read_text())["latest_uuid"], b["uuid"])
+        self.assertTrue((self.root / "kept/002").is_dir())
+        self.assertFalse(pending.is_symlink())
+
     def test_empty_cross_instance_pointer_and_restart_preserve_number_and_evidence(self):
         self.assertEqual(self.history.status()["status"], "empty")
         self.assertEqual(self.history.discard_previous()["status"], "empty")

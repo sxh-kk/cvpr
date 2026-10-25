@@ -82,6 +82,44 @@ def _rename_no_replace(source, destination):
         raise OSError(code, os.strerror(code), str(destination))
 
 
+
+def quality_geometry_outcome(directory, outcome):
+    """Read a separately bound background result, leaving sealed evidence intact."""
+    if outcome.get("geometry_pending") is not True:
+        return outcome
+    directory = Path(directory)
+    receipt = _json(directory / "quality_geometry_completion.json")
+    metadata = _json(directory / "metadata.json")
+    if (metadata.get("quality_geometry_mode") != "deferred_geometry_with_original_solved_support"
+            or outcome.get("quality_geometry_expected_cache_sha256") != metadata.get("container_geometry_cache_sha256")
+            or not isinstance(outcome.get("quality_geometry_expected_cache_sha256"), str)):
+        raise ValueError("后台几何缓存未绑定起录前的原始身份")
+    if (receipt.get("contract") != "cvpr-pico-quality-geometry-completion-v1"
+            or receipt.get("status") not in ("completed", "error")
+            or receipt.get("episode_json_sha256") != _sha(directory / "episode.json")
+            or receipt.get("metadata_sha256") != _sha(directory / "metadata.json")
+            or receipt.get("human_demo_uuid") != metadata.get("human_demo_uuid")
+            or receipt.get("source_kind") != metadata.get("source_kind")
+            or receipt.get("accepted_new_dataset") is not False):
+        raise ValueError("后台几何复核回执未绑定原始示例或状态无效")
+    effective = dict(outcome)
+    if receipt["status"] == "error":
+        if not receipt.get("error"):
+            raise ValueError("后台几何失败回执缺少原因")
+        effective["physical_gate_error"] = str(receipt["error"])
+        return effective
+    sources = receipt.get("quality_geometry_sources")
+    if receipt.get("error") or not isinstance(sources, dict) or set(sources) != {
+            "raw_samples_sha256", "cache_sha256", "completed_samples_sha256"}:
+        raise ValueError("后台几何结果缺少完整来源SHA")
+    for digest in sources.values():
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("后台几何来源SHA格式无效")
+    effective["quality_geometry_sources"] = sources
+    effective["quality_geometry_mode"] = "deferred_geometry_with_original_solved_support"
+    return effective
+
+
 def _physical_precheck(directory, outcome, metadata):
     """Recompute the existing physical gates; do not trust an outcome boolean."""
     from handover_contact_quality import evaluate_capture
@@ -92,6 +130,12 @@ def _physical_precheck(directory, outcome, metadata):
         reasons.append("收尾物理验收失败：" + str(outcome["physical_gate_error"]))
     if "finalization_errors" in outcome:
         reasons.append("录制收尾失败：" + str(outcome["finalization_errors"]))
+    try:
+        outcome = quality_geometry_outcome(directory, outcome)
+        if "physical_gate_error" in outcome:
+            reasons.append("后台物理几何复核失败：" + str(outcome["physical_gate_error"]))
+    except Exception as error:
+        reasons.append("后台几何复核未完成或回执无效：" + str(error))
     state = outcome["state"]
     if state.get("status") != "pending_audit" or state.get("pending_audit") is not True:
         why = "；".join(str(item) for item in state.get("reasons", []))
@@ -467,7 +511,7 @@ class EpisodeHistory:
                 entry = index["entries"][identity]
                 if path != self._target(entry["disposition"], entry["number"]) or _sha(path / "episode.json") != entry["episode_json_sha256"]:
                     raise ValueError("同UUID不能登记另一份外来记录")
-                return self._view(index)
+                return self._view({**index, "latest_uuid": identity})
             if path.name != identity:
                 raise ValueError("未登记示例目录名必须是原始human_demo_uuid")
             reasons, physical = _physical_precheck(path, outcome, metadata)
@@ -494,30 +538,44 @@ class EpisodeHistory:
             return self._view(index)
         return self._run(operation)
 
+    def _discard(self, index, identity):
+        if identity not in index["entries"]:
+            raise ValueError("指定UUID尚未编号，不能退回丢弃更早记录")
+        current = self._view({**index, "latest_uuid": identity})
+        if current["discarded"]:
+            return {**current, "already_discarded": True}
+        entry = index["entries"][identity]
+        previous = self._target(entry["disposition"], entry["number"])
+        actual_identity, _, _ = self._episode(previous)
+        if actual_identity != identity or _sha(previous / "episode.json") != entry["episode_json_sha256"]:
+            raise ValueError("指定原始记录已变化，未执行丢弃")
+        record = _json(previous / "collection_record.json")
+        reasons = list(dict.fromkeys(entry["reasons"] + ["操作员手动丢弃已结束记录"]))
+        target = self._target("discarded", entry["number"])
+        if os.path.lexists(target):
+            raise ValueError("discarded同编号目录已存在，未覆盖")
+        record.update(disposition="discarded", reasons=reasons, episode_directory=str(target), status="prepared")
+        entry.update(disposition="discarded", reasons=reasons, status="prepared", manual_discard=True,
+            from_relative_path=str(previous.relative_to(self.root)), planned_record=record,
+            operation_id="operator_discard:" + identity)
+        _atomic(self.index_path, index)
+        self._finish(index, identity)
+        return {**self._view({**index, "latest_uuid": identity}), "already_discarded": False}
+
+    def discard_uuid(self, identity):
+        """Worker-only exact identity operation; never follow a changing pointer."""
+        def operation(index):
+            normalized = str(uuid.UUID(identity))
+            if normalized != identity:
+                raise ValueError("丢弃UUID格式无效")
+            return self._discard(index, identity)
+        return self._run(operation)
+
     def discard_previous(self):
         def operation(index):
             self._guard_unregistered_attempts(index)
             current = self._view(index)
             if current["status"] == "empty":
                 return {**current, "already_discarded": False}
-            if current["discarded"]:
-                return {**current, "already_discarded": True}
-            identity = current["uuid"]
-            entry = index["entries"][identity]
-            previous = self._target(entry["disposition"], entry["number"])
-            actual_identity, _, _ = self._episode(previous)
-            if actual_identity != identity or _sha(previous / "episode.json") != entry["episode_json_sha256"]:
-                raise ValueError("上一条原始记录已变化，未执行丢弃")
-            record = _json(previous / "collection_record.json")
-            reasons = list(dict.fromkeys(entry["reasons"] + ["操作员手动丢弃上一条已结束记录"]))
-            target = self._target("discarded", entry["number"])
-            if os.path.lexists(target):
-                raise ValueError("discarded同编号目录已存在，未覆盖")
-            record.update(disposition="discarded", reasons=reasons, episode_directory=str(target), status="prepared")
-            entry.update(disposition="discarded", reasons=reasons, status="prepared", manual_discard=True,
-                from_relative_path=str(previous.relative_to(self.root)), planned_record=record,
-                operation_id="operator_discard:" + identity)
-            _atomic(self.index_path, index)
-            self._finish(index, identity)
-            return {**self._view(index), "already_discarded": False}
+            return self._discard(index, current["uuid"])
         return self._run(operation)

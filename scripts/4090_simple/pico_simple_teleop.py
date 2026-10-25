@@ -117,7 +117,7 @@ def source_code_identities():
              'pico_teleop_recording.py','pico_teleop_ui.py','pico_deferred_capture.py',
              'render_deferred_pico.py','finish_pico_session.py','audit_pico_teleop_episode.py',
              'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py',
-             'pico_hand_control.py','pico_episode_history.py')
+             'pico_hand_control.py','pico_episode_history.py','pico_episode_review.py')
     directory = Path(__file__).resolve().parent
     return {name:file_sha256(directory/name) for name in names}
 
@@ -322,6 +322,56 @@ def scene_bound_commands(commands, transition_started):
         yield action
 
 
+def seal_episode_writers(closing_episode, closing_capture, closing_ledger, streams, *,
+                         completed, reason, source_kind, capture_started, deferred):
+    """Drain every raw writer before reset; leave all geometry and review to CPU worker."""
+    started = time.perf_counter()
+    outcome = {'accepted_new_dataset':False,'source_kind':source_kind,
+        'capture_started':capture_started,'geometry_pending':bool(capture_started),
+        'quality_geometry_mode':'deferred_geometry_with_original_solved_support'}
+    errors,timing = {},{}
+    try:
+        if reason:
+            closing_episode.reject(reason)
+        state = closing_episode.close(completed=completed)
+    except Exception as error:
+        errors['recording_state'] = repr(error)
+        state = {'pending_audit':False,'status':'rejected'}
+    outcome['state'] = state
+    capture_started_wall = time.perf_counter()
+    try:
+        outcome['capture'] = closing_capture.close(
+            completed=completed and state.get('pending_audit',False)) if closing_capture else None
+    except Exception as error:
+        errors['capture'] = repr(error)
+    timing['capture_close'] = time.perf_counter()-capture_started_wall
+    streams_started = time.perf_counter()
+    for index,stream in enumerate(streams):
+        if stream:
+            try:
+                stream.close()
+            except Exception as error:
+                errors[f'quality_or_force_stream_{index}'] = repr(error)
+    timing['quality_force_close'] = time.perf_counter()-streams_started
+    ledger_started = time.perf_counter()
+    try:
+        outcome['ledger'] = closing_ledger.close() if closing_ledger else None
+    except Exception as error:
+        errors['ledger'] = repr(error)
+    timing['ledger_close'] = time.perf_counter()-ledger_started
+    if errors:
+        outcome['finalization_errors'] = errors
+        state.update(pending_audit=False,status='rejected')
+    if deferred:
+        pending = (completed and not errors and state.get('pending_audit')
+            and (outcome.get('capture') or {}).get('status') == 'raw_physics_capture_completed_pending_rtx')
+        outcome.update(status='pending_rtx' if pending else 'rejected',
+            render_engine='deferred_rtx_pending',rtx_ready=False)
+    timing['total'] = time.perf_counter()-started
+    outcome['seal_wall_timing_s'] = timing
+    return outcome
+
+
 def episode_finalization_error(outcome, *, requested_complete):
     """Keep technical writer/history failures visible after an automatic reset."""
     problems = []
@@ -356,6 +406,8 @@ def completed_episode_message(action, collection):
     prefix = '本条' if number is None else '第'+str(number).zfill(3)+'条'
     if action == 'discard':
         message = prefix+'已标记丢弃'
+    elif collection.get('pending') or collection.get('status') == 'pending':
+        message = prefix+'原始证据已封存，后台正在物理复核和编号归档'
     elif collection.get('disposition') == 'kept':
         message = prefix+'已通过物理验收并归档，仍待图像和数据验收'
     elif collection.get('disposition') == 'discarded':
@@ -371,22 +423,49 @@ def episode_has_started_capture(episode, output):
         (Path(output)/'episodes'/episode.human_demo_uuid).is_dir())
 
 
-def remember_finished_episode(history, directory, *, capture_started):
-    if history is None or not capture_started:
+def submit_finished_episode(review_queue, directory, *, capture_started, collection_enabled=True):
+    """Submit only sealed captures with explicit human/diagnostic collection policy."""
+    if review_queue is None or not capture_started:
         return None
     try:
-        return history.remember(directory)
+        receipt=review_queue.submit(directory,collection_enabled=collection_enabled)
+        if not isinstance(receipt,dict) or receipt.get('uuid') != Path(directory).name:
+            raise ValueError('Background review submission returned a different episode identity')
+        return receipt
     except Exception as error:
         return {'status':'error','available':False,'path':str(directory),
-            'uuid':Path(directory).name,'error':repr(error)}
+            'uuid':Path(directory).name,'pending':False,'error':repr(error)}
 
 
-def discard_previous_from_history(history, *, blocked_error=None):
-    if history is None:
+def discard_finished_episode(review_queue, latest_finished_uuid):
+    """A pending review is still the latest attempt; never fall back to an older one."""
+    if review_queue is None:
         return {'status':'disabled_diagnostic','available':False}
-    if blocked_error:
-        raise RuntimeError('上一条记账失败，已禁止回退丢弃更早记录：'+str(blocked_error))
-    return history.discard_previous()
+    if not latest_finished_uuid:
+        return {'status':'empty','available':False}
+    receipt=review_queue.request_discard(latest_finished_uuid)
+    if not isinstance(receipt,dict) or receipt.get('uuid') != latest_finished_uuid:
+        raise ValueError('Background discard returned a different episode identity')
+    return receipt
+
+
+def latest_review_status(snapshot, latest_finished_uuid, previous):
+    """An old worker result cannot replace the latest finished UUID on the UI."""
+    latest_finished_uuid = latest_finished_uuid or snapshot.get('latest_finished_uuid')
+    if not latest_finished_uuid:
+        return None,previous
+    candidates = [snapshot.get('latest_episode'),snapshot.get('latest_completed')]
+    candidates.extend(snapshot.get('latest_results') or [])
+    for candidate in candidates:
+        if not isinstance(candidate,dict) or candidate.get('uuid') != latest_finished_uuid:
+            continue
+        if (previous.get('uuid') == latest_finished_uuid
+                and previous.get('status') == 'pending_discard'
+                and candidate.get('status') != 'error'
+                and not candidate.get('discarded') and candidate.get('disposition') != 'discarded'):
+            return latest_finished_uuid,previous
+        return latest_finished_uuid,copy.deepcopy(candidate)
+    return latest_finished_uuid,previous
 
 
 def prepare_deferred_cache(prepare_function, output, index, *, model, objects, joint_names):
@@ -641,7 +720,6 @@ def run(args):
     env = ui = receiver = video_bridge = render_profiler = None
     capture = ledger = None
     episode = None
-    quality_rows = []
     quality_stream = force_stream = control_trace = None
     wall_periods = deque(maxlen=3000)
     wall_period_count = 0
@@ -649,10 +727,12 @@ def run(args):
     prepared_deferred = None
     deferred_prepare_index = 0
     geometry_cache_index = 0
-    history = None
+    review_queue = None
+    latest_finished_uuid = None
+    review_status = {'status':'disabled_diagnostic' if replay else 'initializing','pending_count':0}
+    last_review_poll_wall = 0.
     history_status = {'status':'disabled_diagnostic' if replay else 'empty','available':False,
         'path':None,'uuid':None,'discarded':False,'error':None}
-    history_error_latched = None
     operator_message = '请戴好头显、站直并校准，再开始下一条录制。'
     reference = PicoSonicReference(resources, args.human_info)
     pairing = {'body_token_version':'body_token_v1_1','compatibility_verified':True,
@@ -662,100 +742,51 @@ def run(args):
     write_json(output/'new_producer_binding.json', pairing)
 
     def finalize(completed=False, reason=None):
-        nonlocal capture, ledger, episode, quality_stream, force_stream, quality_rows, following
-        nonlocal history_status, history_error_latched, operator_message
+        nonlocal capture, ledger, episode, quality_stream, force_stream, following
+        nonlocal history_status, latest_finished_uuid, operator_message
         if episode is None:
             return
         closing_episode, closing_capture, closing_ledger = episode, capture, ledger
         capture_started = episode_has_started_capture(closing_episode,output)
         following = False
-        operator_message = '仿真已暂停，正在保存原始证据并计算物理几何。'
+        operator_message = '仿真已暂停，正在封存原始证据；物理复核将在后台独立进行。'
         if ui:
             ui.update({'status':'saving','recording':None,'accepted_new_dataset':False,
                 'operator_message':operator_message,'last_episode':history_status,
-                'note':'仿真已暂停，保存原始证据并计算几何；此后仍需RTX补图和独立验收'})
+                'note':'仅等待原始写入结束，随后重置；物理复核、编号归档在后台进行，仍需RTX补图和独立验收'})
         streams = (quality_stream, force_stream)
-        rows = quality_rows
         # Detach first: a writer failure must not reuse or close an episode twice.
         capture = ledger = episode = quality_stream = force_stream = None
-        quality_rows = []
-        outcome = {'accepted_new_dataset':False,'source_kind':result['source_kind'],
-            'capture_started':capture_started}
-        errors = {}
-        try:
-            if reason:
-                closing_episode.reject(reason)
-            state = closing_episode.close(completed=completed)
-            outcome['state'] = state
-        except Exception as error:
-            errors['recording_state'] = repr(error)
-            state = {'pending_audit':False,'status':'rejected'}
-            outcome['state'] = state
-        try:
-            outcome['capture'] = closing_capture.close(
-                completed=completed and state['pending_audit']) if closing_capture else None
-        except Exception as error:
-            errors['capture'] = repr(error)
-        for index, stream in enumerate(streams):
-            if stream:
-                try:
-                    stream.close()
-                except Exception as error:
-                    errors[f'quality_or_force_stream_{index}'] = repr(error)
-        try:
-            outcome['ledger'] = closing_ledger.close() if closing_ledger else None
-        except Exception as error:
-            errors['ledger'] = repr(error)
-        if rows:
-            try:
-                # Physics is paused. Only geometry is deferred; original solved
-                # forces are read solely in measured_step and retained verbatim.
-                completed_quality = complete_quality_geometry(rows,cache)
-                directory = output/'episodes'/closing_episode.human_demo_uuid
-                with (directory/'quality_samples.jsonl').open('x') as stream:
-                    for row in completed_quality:
-                        stream.write(json_text(row)+'\n')
-                outcome['quality_geometry_sources'] = quality_geometry_source_identities(directory)
-                if outcome['quality_geometry_sources']['cache_sha256'] != prepared_geometry_cache['sha256']:
-                    raise ValueError('Geometry cache changed after startup preparation')
-                outcome['quality_geometry_mode'] = 'deferred_geometry_with_original_solved_support'
-                outcome['physical_gate'] = evaluate_capture(completed_quality, initial_target_z_m=initial_z)
-            except Exception as error:
-                outcome['physical_gate_error'] = repr(error)
-        if errors:
-            outcome['finalization_errors'] = errors
-            outcome['state']['pending_audit'] = False
-            outcome['state']['status'] = 'rejected'
-        if deferred:
-            pending = (completed and not errors and state.get('pending_audit')
-                and outcome.get('capture',{}).get('status') == 'raw_physics_capture_completed_pending_rtx')
-            outcome['status'] = 'pending_rtx' if pending else 'rejected'
-            outcome['render_engine'] = 'deferred_rtx_pending'
-            outcome['rtx_ready'] = False
+        outcome = seal_episode_writers(closing_episode,closing_capture,closing_ledger,streams,
+            completed=completed,reason=reason,source_kind=result['source_kind'],
+            capture_started=capture_started,deferred=deferred)
+        if capture_started:
+            outcome['quality_geometry_expected_cache_sha256'] = prepared_geometry_cache['sha256']
         directory = output/'episodes'/closing_episode.human_demo_uuid
         directory.mkdir(parents=True,exist_ok=True)
         write_json(directory/'episode.json', outcome)
-        if history is not None and capture_started:
-            operator_message = '原始证据已保存，正在独立复核物理门槛并编号归档。'
-            if ui:
-                ui.update({'status':'auditing','recording':None,'accepted_new_dataset':False,
-                    'operator_message':operator_message,'last_episode':history_status})
-            history_status = remember_finished_episode(history,directory,capture_started=capture_started)
-            history_error_latched = (history_status.get('error') or 'history update failed') if history_status.get('status') == 'error' else None
+        if review_queue is not None and capture_started:
+            # The raw evidence is immutable from here. The independent worker
+            # writes a separate review receipt, never this sealed episode file.
+            latest_finished_uuid = closing_episode.human_demo_uuid
+            history_status = submit_finished_episode(review_queue,directory,capture_started=capture_started,
+                collection_enabled=not replay)
             outcome['collection'] = copy.deepcopy(history_status)
-            # remember() may move the directory while retaining its UUID alias.
-            # Do not rewrite episode evidence after the independent history
-            # operation has bound its hashes and collection classification.
+            operator_message = '原始证据已封存并提交后台复核；正在准备下一条的新场景。'
         result['episodes'].append({'directory':str(directory),**outcome})
         write_json(output/'result.json', result)
         return outcome
 
     try:
+        from pico_episode_review import ReviewQueue
+        review_options = {'spool_directory':output/'.review_diagnostic'} if replay else {}
+        review_queue = ReviewQueue(output.parent/'pico_episode_history.json',**review_options).start()
+        review_status = review_queue.snapshot()
+        latest_finished_uuid,history_status = latest_review_status(
+            review_status,latest_finished_uuid,history_status)
+        result['review_mode'] = 'independent_cpu_worker_after_raw_writers_sealed'
+        result['review_collection_enabled'] = not replay
         if not replay:
-            from pico_episode_history import EpisodeHistory
-            history = EpisodeHistory(output.parent/'pico_episode_history.json')
-            history_status = history.status()
-            history_error_latched = history_status.get('error') if history_status.get('status') == 'error' else None
             result['episode_history_index'] = str(output.parent/'pico_episode_history.json')
         if deferred:
             result['egl_backend_selection'] = configure_mujoco_egl(os.environ,
@@ -774,7 +805,6 @@ def run(args):
         from simple.baselines.sonic_v1_1 import SonicV11OnnxController, DEFAULT_ANGLES, BODY_JOINT_NAMES
         from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
         from simple.baselines.dual_source_psi0 import TRAINING_STATE_JOINT_NAMES
-        from handover_contact_quality import evaluate_capture
         from handover_geometry_quality import build_container_geometry_cache
         from pico_teleop_ui import LocalTeleopUI
         ui = LocalTeleopUI(port=args.port).start()
@@ -866,7 +896,6 @@ def run(args):
                     container_body=raw.mujoco.mj_objects['container'].id,
                     solver_stage='post_mj_step_before_observation_refresh')
                 row['live_contacts_support_sampling_wall_s'] = time.perf_counter()-sample_started
-                quality_rows.append(row)
                 quality_stream.write(json_text(row)+'\n')
             return value
         raw.mujoco.step = measured_step
@@ -930,7 +959,7 @@ def run(args):
             # A bad episode or input cannot close the UI/receiver during live use.
             # A fresh calibration is required even for a short operator pause.
             nonlocal error_text, active_local, operator_message
-            had_started_capture = history is not None and episode_has_started_capture(episode,output)
+            had_started_capture = not replay and episode_has_started_capture(episode,output)
             error_text = str(reason)
             active_local = None
             invalidate_calibration()
@@ -1120,8 +1149,8 @@ def run(args):
                     elif action == 'save':
                         if not episode:
                             raise ValueError('No active episode')
-                        episode.request_save()
                         reset_this_batch=True
+                        episode.request_save()
                         outcome,problem = end_episode_and_reset(finalize,
                             lambda:reset_scene(reason='after_save'),discard=False)
                         error_text=problem
@@ -1137,25 +1166,20 @@ def run(args):
                             operator_message=completed_episode_message('discard',outcome.get('collection') or {})
                             if problem:
                                 operator_message+=' 写盘或归档问题：'+problem
-                        elif history is None:
+                        elif replay or review_queue is None:
                             operator_message='诊断输入不操作真人历史记录；当前场景未重置。'
                         else:
                             if following:
                                 invalidate_calibration()
-                            blocked = history_error_latched
-                            if not blocked and history_status.get('status') == 'error':
-                                blocked = history_status.get('error') or 'history unavailable'
-                            history_status=discard_previous_from_history(history,blocked_error=blocked)
+                            history_status=discard_finished_episode(review_queue,latest_finished_uuid)
                             if history_status.get('status') == 'error':
-                                history_error_latched=history_status.get('error') or 'history update failed'
-                                raise RuntimeError('丢弃上一条失败：'+str(history_error_latched))
-                            history_error_latched=None
+                                raise RuntimeError('提交丢弃意图失败：'+str(history_status.get('error') or 'unknown error'))
                             error_text=None
                             if history_status.get('status') == 'empty':
                                 operator_message='目前没有可丢弃的上一条记录；当前场景未重置。'
                             else:
                                 label='第'+str(history_status.get('number')).zfill(3)+'条' if history_status.get('number') is not None else '上一条记录'
-                                operator_message=label+'已标记丢弃，原始证据保留；当前场景未重置。'
+                                operator_message=label+'已提交后台丢弃请求，原始证据保留；当前场景未重置。'
                             for item in reversed(result['episodes']):
                                 if (item.get('collection') or {}).get('uuid') == history_status.get('uuid') and history_status.get('uuid') is not None:
                                     item['collection']=copy.deepcopy(history_status)
@@ -1322,6 +1346,18 @@ def run(args):
             else:
                 wall_deadline=None; last_step_wall=None
                 time.sleep(.01)
+            # A bounded status file is the only worker observation in this
+            # process: no history lock, geometry, hashes, or state-file loading.
+            if review_queue and time.monotonic()-last_review_poll_wall >= .5:
+                last_review_poll_wall=time.monotonic()
+                try:
+                    review_status=review_queue.snapshot()
+                    latest_finished_uuid,history_status=latest_review_status(
+                        review_status,latest_finished_uuid,history_status)
+                except Exception as review_poll_error:
+                    review_status={'status':'error','error':repr(review_poll_error),
+                        'latest_finished_uuid':latest_finished_uuid}
+                result['background_review']=copy.deepcopy(review_status)
             feedback = None
             feedback_error = None
             if frame is not None:
@@ -1342,6 +1378,7 @@ def run(args):
                     last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
                 'operator_message':operator_message,'last_episode':history_status,
+                'background_review':review_status,
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
                 'hand_control':feedback,'hand_feedback_error':feedback_error,
                 'recording':episode.status if episode else None,'episode_count':len(result['episodes']),
@@ -1387,6 +1424,11 @@ def run(args):
         # final receipts and close writers before handing control to env.close.
         if render_profiler:
             result['render_profile'] = render_profiler.receipt()
+        if review_queue:
+            try:
+                review_queue.close(wait=False)
+            except Exception as review_close_error:
+                result.setdefault('cleanup_errors',{})['background_review'] = repr(review_close_error)
         for name, component in (('receiver',receiver),('headset_video',video_bridge),
                                 ('ui',ui),('control_trace',control_trace),('render_profiler',render_profiler)):
             if component:

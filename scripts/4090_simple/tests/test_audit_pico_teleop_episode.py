@@ -310,6 +310,39 @@ class AdmissionTests(unittest.TestCase):
             'reasons':['未完成交接']})
         self.assertIn('collection rejected',self.check_rejected())
 
+    def test_background_pending_is_not_eligible_before_numbered_review(self):
+        self.rewrite('episode.json',lambda value:value.update(geometry_pending=True))
+        self.assertIn('队列登记标记',self.check_rejected())
+
+    def test_completed_background_geometry_uses_bound_receipt_without_rewriting_outcome(self):
+        add_deferred_quality(self.root)
+        path=self.root/'episode.json'
+        outcome=json.loads(path.read_text())
+        sources=outcome.pop('quality_geometry_sources')
+        outcome['geometry_pending']=True
+        outcome['quality_geometry_expected_cache_sha256']=sources['cache_sha256']
+        write(path,outcome)
+        sealed=audit.sha(path)
+        metadata=json.loads((self.root/'metadata.json').read_text())
+        spool=self.root/'.review'
+        (spool/'discard_requests').mkdir(parents=True)
+        write(self.root/'review_queue_submission.json',{
+            'contract':'cvpr-pico-review-submission-v1','uuid':metadata['human_demo_uuid'],
+            'episode_json_sha256':sealed,'sequence':1,'collection_root':str(self.root),
+            'spool_directory':str(spool),'collection_enabled':True,'accepted_new_dataset':False})
+        write(self.root/'quality_geometry_completion.json',{
+            'contract':'cvpr-pico-quality-geometry-completion-v1','status':'completed',
+            'episode_json_sha256':sealed,'metadata_sha256':audit.sha(self.root/'metadata.json'),
+            'human_demo_uuid':metadata['human_demo_uuid'],'source_kind':metadata['source_kind'],
+            'quality_geometry_sources':sources,'accepted_new_dataset':False})
+        write(self.root/'collection_record.json',{'status':'committed','disposition':'kept'})
+        result=audit.audit_episode(self.root)
+        self.assertTrue(result['eligible_for_packing'],result['errors'])
+        self.assertEqual(audit.sha(path),sealed)
+        write(spool/'discard_requests'/(metadata['human_demo_uuid']+'.json'),{
+            'uuid':metadata['human_demo_uuid'],'operator_discard_requested':True})
+        self.assertIn('Operator discard is pending',self.check_rejected())
+
     def test_recorded_replay_never_qualifies_despite_successful_physics(self):
         self.rewrite("metadata.json",lambda v:v.update(source_kind="recorded_pico_diagnostic"))
         self.assertIn("never eligible",self.check_rejected())

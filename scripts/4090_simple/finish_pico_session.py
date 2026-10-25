@@ -42,7 +42,27 @@ def finish(session):
                     raise ValueError('Invalid collection disposition')
             if excluded:
                 continue
+            from pico_episode_review import discard_requested
+            if discard_requested(episode):
+                item.update(status='skipped_discarded',eligible_for_packing=False,
+                    reasons=['操作员已申请丢弃，后台正在完成分流'])
+                continue
             outcome=json.loads((episode/'episode.json').read_text())
+            if outcome.get('geometry_pending') is True:
+                submission=episode/'review_queue_submission.json'
+                if not submission.is_file() or submission.is_symlink():
+                    raise ValueError('Background review submission marker is missing or invalid')
+                from pico_episode_review import discard_requested
+                if discard_requested(episode):
+                    item.update(status='skipped_discarded',eligible_for_packing=False,
+                        reasons=['操作员已申请丢弃，后台正在完成分流'])
+                    continue
+                marker=episode/'collection_record.json'
+                collection=json.loads(marker.read_text()) if marker.is_file() else {}
+                if collection.get('status')!='committed' or collection.get('disposition')!='kept':
+                    item.update(status='pending_background_review',eligible_for_packing=False,
+                        reasons=['后台物理复核尚未完成，暂不启动RTX或数据准入'])
+                    continue
             if outcome.get('status')=='pending_rtx':
                 receipt=episode/'rtx_completion.json'
                 if not receipt.exists():
@@ -78,7 +98,10 @@ def finish(session):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('session',type=Path)
-    report=finish(parser.parse_args().session)
+    session=parser.parse_args().session
+    from pico_episode_review import wait_session
+    wait_session(session)  # The CLI is invoked only after live collection exits.
+    report=finish(session)
     print(json.dumps(report,ensure_ascii=False,indent=2))
     raise SystemExit(1 if report['technical_errors'] else 0)
 

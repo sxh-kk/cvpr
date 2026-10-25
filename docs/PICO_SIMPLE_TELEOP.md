@@ -96,6 +96,10 @@ Unity Demo 的 SDK 订阅或其他接收诊断。本入口不结束这些外部�
   避免随历史示例增长的整份结果序列化挤占实时预算。原始命令、状态与外力记录仍完整保留。
 - 相邻控制步偶尔读到同一个PICO包时，在原100ms累计迟延限额内等新包；坏包／无效追踪仍立即拒收，
   超时仍暂停。不会把旧包或重复时间戳当成新的30Hz样本；等待期间读到的X／Y／A短按也会锁存。
+- 新版本在一条尚未保存时忽略 X／网页重新标定请求，只提示先保存，保留当前录制、跟随和校准。
+  Y 暂停及主动丢弃仍按原语义结束本条。起录元数据只携带会话身份和当前场景绑定，
+  不再复制不断增长的全会话重置／拒收历史。新计时记录完整循环各阶段及上一轮耗时，
+  不改变200／50／30Hz网格、100ms限额或数据质量门槛。正在运行的旧进程不会自动热更新。
 - 默认 `mujoco_deferred`：操作者看到真实 MuJoCo EGL 双目预览。具名关节状态、
   完整 `mjSTATE_INTEGRATION` 与实际下发命令在同一 pre-step 状态记录；50Hz 网格的
   `ceil(k*50/30)` 对应 20／40ms 实际间隔，保留实际时钟及名义 30Hz 时间。
@@ -214,5 +218,68 @@ live_human_04 为切换流畅预览而在暂停、无活动示例时受控退出
 RTX、任务成功或训练数据准入。证据为本机 `ASYNC_WORKFLOW_VALIDATION.json`。
 
 当前SMPL mode2仍只包含身体姿态与根朝向，不将人的房间位移映射为机器人移动命令。
-官方PICO走动分支使用planner及摇杆方向／速度／朝向；本机已有planner模型，但既有无物体
-步行对照尚未形成通过的正向控制，因此本入口尚未启用“人走机器人一起走”。
+官方PICO走动分支使用planner及摇杆方向／速度／朝向。本入口尚未启用“人走机器人一起走”。
+
+## 独立人体平移与行走诊断（默认关闭）
+
+在独立worktree开发，当前采集入口不导入或启动以下模块，不创建第二个SDK消费者。
+`pico_locomotion_intent.py` 读取已有接收器同一个 `PicoFrame` 的 Body[0]，
+按设备时间差分得到人体骨盆水平速度；PICO Y-up 转世界 Z-up 后，通过初始人体／机器人
+heading 标定方向，输出 SONIC planner 的 movement／facing／speed。Body[0] 是SDK估计的
+骨盆位置，不能冒称独立腰部定位器；不用未经验证的 va/wva。该映射是本地新增控制策略，
+不是官方PICO原有的摇杆实现，也不是绝对位置跟随伺服。
+
+默认最高0.4m/s，内部矢量加速度上限0.5m/s²；小于官方慢走下界0.1m/s时输出IDLE，
+内部速度继续平滑过渡。IDLE↔SLOW_WALK有离散模式门槛，不宣称planner输出逐帧严格满足
+连续加速度限制。旧／重复包、时间倒退、追踪失效、跳变或暂停立即输出IDLE；
+失效需重新标定，重复包不会作为新样本。高度由planner默认处理，不复制人体根Z到机器人。
+
+`sonic_locomotion_planner.py` 固定官方模型SHA，保留bootstrap、30→50Hz、+2前瞻及
+8帧参考融合，并明确标记完整46帧未来要求引入的低水位重规划扩展。独立异步CPU进程
+提供latest-only有界mailbox、结果时限和过期丢弃；模型加载／推理不进入实时采集控制循环。
+`pico_locomotion_reference.py` 的同步时间线仅供离线物理诊断；支持官方完整身体mode0，
+或显式世界VR目标的mode1装配。mode1接口要求已经加过tip/head offset的**世界**三点与姿态，
+不能直接传官方PICO的root-local三点再归一化。人体上身与行走组合仍未做实际闭环验收，
+不能直接替换现有SMPL mode2数据生产协议。
+
+只读检查封存真人动作包到移动意图的映射（不运行物理、不验证原网络新鲜度）：
+
+```bash
+/home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
+  scripts/4090_simple/replay_pico_locomotion_intent.py /ABS/EPISODE/commands.jsonl \
+  --output /ABS/NEW_INTENT_DIAGNOSTIC
+```
+
+无SDK／渲染／GPU的独立物理检查示例；资源全走本机显式路径，输出目录必须全新。
+采集期间不启动此检查。可加 `--intent-trace /ABS/NEW_INTENT_DIAGNOSTIC/intents.jsonl`
+使用绑定回执的离线意图，源间隙／结束后200ms输出IDLE，复用命令不算新采样。
+失鲜IDLE面向机器人当前实际heading，不额外转回固定世界朝向。任意意图trace只记录执行，
+固定方向／时间窗的步行门不适用，报告 `applicable=false, passed=false`，退出码不表示验收通过；
+真实人体跟随需另外设计按指令分段的验收。
+
+```bash
+env CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  taskset -c 28 ionice -c 3 /home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
+  scripts/4090_simple/diagnose_pico_locomotion.py --environment simple \
+  --simple-robot /ABS/g1_29dof_with_hand.xml --sonic-resources /ABS/sonic_v1_1 \
+  --planner-model /ABS/planner_sonic.onnx --direction forward --speed .3 \
+  --output /ABS/NEW_PHYSICS_DIAGNOSTIC
+```
+
+本地诊断保存真实200Hz积分状态、50Hz根／腿／碰撞脚底FK、外力守卫、实际token与期望参考，
+以及模型XML/include/mesh、编译模型和源代码身份。只在冷初始化对齐脚底，开始仿真后不写根坐标、
+不施加外力、不降低重力。诊断门要求真实方向前进≥0.1m、末0.5秒速度<0.1m/s、
+双方脚底离地>1cm并落地、根高>0.6m、倾角<25°及完整50／200Hz证据；这不是官方任务成功率协议。
+
+2026-10-25独立CPU测试：官方模型和SIMPLE模型在6秒前向0.3m/s命令下分别实际前进
+1.832／1.836m，通过上述本地门。SIMPLE后退虽移动1.378m，左脚最高净离地9.03mm未过门；
+左移虽移动0.163m，右脚未形成合格离地，未过门；右移尚未测试。为排查当前采集中断已暂缓
+后续物理实验。因此四方向人体跟随、上身组合、持物行走和实时吞吐均未验收，仍禁止接入当前采集。
+本机证据在 `/home/zxc/CVPR_Evaluation_runtime/pico_locomotion_20261025/INDEPENDENT_PHYSICAL_GATES.json`。
+所有这些回放／合成诊断都不增加真人数据量，不生成可训练的成功示范。
+
+2026-10-25 live08到编号064的中断复核：48条中30条完整保存、18条中断；
+中断为10次实时迟延、4次新包超时、3次录制中标定、1次身体跳变，无写盘失败证据。
+最近20条中9条完整，6次迟延、2次等包、3次标定。34,456个跟随tick的已计控制耗时
+p95=23.85ms，超过20ms周期，且尚未覆盖全部尾部开销；不能用短时合成吞吐代替真人长时验收。
+旧live08不会因分支提交而改变行为，新修复须在用户允许切换并完成独立运行验证后部署。

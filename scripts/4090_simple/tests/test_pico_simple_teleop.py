@@ -1,6 +1,8 @@
 """CPU entry guards: no headset, SDK initialization, simulator, or rendering."""
 import json
 import copy
+import ast
+import inspect
 from pathlib import Path
 import sys
 import tempfile
@@ -52,7 +54,63 @@ def quality_fixture():
     return cache,raw
 
 
+def episode_metadata_fixture():
+    session={name:None for name in entry.EPISODE_SESSION_FIELDS}
+    session.update(task_id='simple/G1WholebodyHandoverTeleop-v0',source_kind='live_pico_human',
+        accepted_new_dataset=False,physics_hz=200,decoder_hz=50,command_rgb_hz=30,
+        render_mode='mujoco_deferred',raw_pico_va_wva_used=False,
+        preview_engine='mujoco_egl',training_rgb_engine='pending_offline_isaac_rtx',
+        preview_is_training_rgb=False,controller_identity={'decoder_sha256':'d'*64},
+        encoder_identity={'source_sha256':{'encoder':'e'*64}},
+        hand_control_profile={'profile_id':'official_middle_close'},
+        source_code_sha256_at_session_start={'entry':'s'*64},calibration_source_asset_sha256={'camera':'c'*64})
+    scene=entry.episode_scene_metadata(initialization={'object_restores_during_control':False,
+        'external_assistance':False,'current_scene':'first'},standing_warmup_readiness={'passed':True},
+        warmup={'events':[{'sim_time_s':i/50} for i in range(50)]},environment_config={'scene':'first'},
+        physics_seed=1,instruction='handover',mujoco_object_body_names={'target':'box','container':'basket'},
+        object_body_names={'target':'box','container':'basket'},mujoco_obj_names=['box','basket'],
+        container_geometry_cache_sha256='g'*64,physics_model_sha256='m'*64)
+    return session,scene
+
+
 class EntryGuardTests(unittest.TestCase):
+    def operator_loop(self, commands, episode):
+        """Execute the actual production command loop with CPU-only callbacks."""
+        tree=ast.parse(inspect.getsource(entry.run))
+        loop=next(node for node in ast.walk(tree) if isinstance(node,ast.For)
+            and isinstance(node.iter,ast.Call) and isinstance(node.iter.func,ast.Name)
+            and node.iter.func.id=='scene_bound_commands')
+        events=[]
+        namespace=dict(vars(entry),commands=commands,episode=episode,following=True,
+            reset_generation=0,reset_generation_at_loop_start=0,reset_this_batch=False,
+            operator_message='',error_text=None,replay=None,history_status={},
+            review_queue=None,latest_finished_uuid=None,result={'episodes':[]},
+            reference=SimpleNamespace(calibration={'same_calibration':True}))
+        def finalize(*args,**kwargs):
+            events.append(('finalize',args,kwargs))
+            namespace['episode']=None
+            return {'collection':{'status':'pending','pending':True}}
+        def reset_scene(*args,**kwargs):
+            if namespace['episode'] is not None:
+                raise ValueError('Finish the current episode before resetting the scene')
+            events.append(('reset',args,kwargs))
+            namespace['reset_generation']+=1
+            namespace['following']=False
+        def reject(reason):
+            events.append(('reject',reason))
+            namespace['following']=False
+        namespace.update(finalize=finalize,reset_scene=reset_scene,reject_and_pause=reject)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[copy.deepcopy(loop)],type_ignores=[])),
+            entry.__file__,'exec'),namespace)
+        return namespace,events
+
+    def active_episode(self):
+        episode=entry.RecordingState()
+        episode.request_start()
+        for tick in range(51):
+            episode.on_tick(tick)
+        return episode
+
     def replay(self, rows):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -84,6 +142,122 @@ class EntryGuardTests(unittest.TestCase):
         for timestamps in ((100,100),(200,100)):
             with self.assertRaisesRegex(ValueError,'strictly increase'):
                 self.replay([raw_packet(t) for t in timestamps])
+
+    def test_recording_calibration_guard_only_blocks_calibration(self):
+        self.assertIn('先保存后再校准',entry.recording_command_guard('calibrate',episode_active=True))
+        self.assertIsNone(entry.recording_command_guard('calibrate',episode_active=False))
+        for action in ('pause','save','discard','reset','record','follow'):
+            self.assertIsNone(entry.recording_command_guard(action,episode_active=True))
+
+    def test_actual_operator_loop_ignores_ui_and_x_calibration_without_rejecting_recording(self):
+        for commands in (['calibrate'],entry.rising_operator_commands({'X':True},{})):
+            episode=self.active_episode()
+            state,events=self.operator_loop(commands,episode)
+            self.assertEqual(events,[])
+            self.assertIs(state['episode'],episode)
+            self.assertEqual(episode.status,'recording')
+            self.assertTrue(state['following'])
+            self.assertEqual(state['reference'].calibration,{'same_calibration':True})
+            self.assertIn('录制继续',state['operator_message'])
+
+    def test_actual_operator_loop_keeps_pause_save_discard_and_reset_safety(self):
+        state,events=self.operator_loop(['pause'],self.active_episode())
+        self.assertEqual(events,[('reject','operator_pause')])
+        for action,completed,reason in (('save',True,None),('discard',False,'operator_discard')):
+            with self.subTest(action=action):
+                state,events=self.operator_loop([action,'discard'],self.active_episode())
+                self.assertEqual(events[0],('finalize',(),{'completed':completed,'reason':reason}))
+                self.assertEqual([item[0] for item in events],['finalize','reset'])
+                self.assertEqual(state['reset_generation'],1)
+        state,events=self.operator_loop(['reset'],None)
+        self.assertEqual([item[0] for item in events],['reset'])
+        _,events=self.operator_loop(['reset'],self.active_episode())
+        self.assertEqual(events[0][0],'reject')
+
+    def test_episode_metadata_does_not_copy_growing_session_histories(self):
+        session,scene=episode_metadata_fixture()
+        class NoCopy:
+            def __deepcopy__(self,memo):
+                raise AssertionError('A growing session history was copied on record')
+        for name in ('episodes','rejections','resets','prepared_deferred_models',
+                     'prepared_quality_geometry_caches','background_review','unbounded_debug'):
+            session[name]=NoCopy()
+        fixed=entry.episode_session_identity(session)
+        metadata=entry.bounded_episode_metadata(fixed,scene,human_demo_uuid='current',
+            pico_calibration={'heading':.1},initial_target_z_m=.5)
+        self.assertFalse(set(('episodes','rejections','resets','prepared_deferred_models',
+            'prepared_quality_geometry_caches','background_review')) & set(metadata))
+        before=json.dumps(metadata,sort_keys=True)
+        session['resets']=[{'large_old_scene':'x'*10000} for _ in range(100)]
+        again=entry.bounded_episode_metadata(entry.episode_session_identity(session),scene,
+            human_demo_uuid='current',pico_calibration={'heading':.1},initial_target_z_m=.5)
+        self.assertEqual(json.dumps(again,sort_keys=True),before)
+        session['controller_identity']['decoder_sha256']='changed'
+        self.assertEqual(fixed['controller_identity']['decoder_sha256'],'d'*64)
+
+    def test_episode_metadata_keeps_all_audit_renderer_and_geometry_bindings(self):
+        session,scene=episode_metadata_fixture()
+        metadata=entry.bounded_episode_metadata(entry.episode_session_identity(session),scene,
+            human_demo_uuid='current',pico_calibration={'heading':.1},initial_target_z_m=.5)
+        consumed=set()
+        for name in ('audit_pico_teleop_episode.py','render_deferred_pico.py',
+                     'pico_episode_history.py','pico_episode_review.py','pico_deferred_capture.py'):
+            tree=ast.parse((Path(entry.__file__).parent/name).read_text())
+            for node in ast.walk(tree):
+                if (isinstance(node,ast.Subscript) and isinstance(node.value,ast.Name)
+                        and node.value.id=='metadata' and isinstance(node.slice,ast.Constant)
+                        and isinstance(node.slice.value,str)):
+                    consumed.add(node.slice.value)
+                if (isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)
+                        and isinstance(node.func.value,ast.Name) and node.func.value.id=='metadata'
+                        and node.func.attr=='get' and node.args and isinstance(node.args[0],ast.Constant)
+                        and isinstance(node.args[0].value,str)):
+                    consumed.add(node.args[0].value)
+        self.assertTrue(consumed <= set(metadata),consumed-set(metadata))
+        self.assertEqual(metadata['environment_config'],{'scene':'first'})
+        self.assertEqual(metadata['physics_model_sha256'],'m'*64)
+        changed=copy.deepcopy(scene)
+        changed.update(initialization={'current_scene':'second'},environment_config={'scene':'second'},physics_seed=2)
+        next_metadata=entry.bounded_episode_metadata(entry.episode_session_identity(session),changed,
+            human_demo_uuid='next',pico_calibration={'heading':.2},initial_target_z_m=.6)
+        self.assertEqual(next_metadata['initialization']['current_scene'],'second')
+        self.assertEqual(metadata['initialization']['current_scene'],'first')
+
+    def test_full_loop_wall_timing_includes_startup_and_tail_but_excludes_clock_sleep(self):
+        clock=SimpleNamespace(value=0)
+        timer=entry.LoopWallTimer(clock_ns=lambda:clock.value,wall_clock_ns=lambda:123456789)
+        for stage,elapsed_ns in (('input_validation',3_000_000),('operator_actions',2_000_000),
+                ('control',20_000_000),('clock_sleep',10_000_000),('review_poll',4_000_000),
+                ('preview_status',7_000_000),('status_disk',6_000_000)):
+            timer.enter(stage)
+            clock.value+=elapsed_ns
+        result=timer.finish()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['loop_start_pc_wall_time_ns'],123456789)
+        self.assertAlmostEqual(result['timing_s']['total'],.052)
+        self.assertAlmostEqual(result['loop_critical_wall_s'],.042)
+        self.assertAlmostEqual(result['tail_after_control_wall_s'],.017)
+        self.assertAlmostEqual(sum(result['timing_s'][name] for name in timer.STAGES),.052)
+        clock.value+=100_000_000  # Reading the previous complete loop cannot grow it.
+        self.assertEqual(timer.snapshot(),result)
+        result['timing_s']['total']=999
+        self.assertAlmostEqual(timer.snapshot()['timing_s']['total'],.052)
+
+    def test_loop_timing_partial_rejection_snapshot_does_not_close_or_reset_clock(self):
+        clock=SimpleNamespace(value=0)
+        timer=entry.LoopWallTimer(clock_ns=lambda:clock.value,wall_clock_ns=lambda:12)
+        clock.value=2_000_000
+        timer.enter('control')
+        clock.value=102_000_000
+        partial=timer.snapshot()
+        self.assertFalse(partial['complete'])
+        self.assertEqual(partial['active_stage_at_snapshot'],'control')
+        self.assertAlmostEqual(partial['timing_s']['control'],.1)
+        clock.value=112_000_000
+        final=timer.finish()
+        self.assertAlmostEqual(final['timing_s']['control'],.11)
+        self.assertAlmostEqual(partial['timing_s']['control'],.1)
+        self.assertEqual(clock.value,112_000_000)
 
     def test_hand_mapping_uses_official_close_by_name_in_entry(self):
         names = entry.MODEL_HAND_NAMES

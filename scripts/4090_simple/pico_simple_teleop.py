@@ -122,6 +122,58 @@ def source_code_identities():
     return {name:file_sha256(directory/name) for name in names}
 
 
+EPISODE_SESSION_FIELDS = (
+    'task_id','source_kind','accepted_new_dataset','physics_hz','decoder_hz','command_rgb_hz',
+    'absolute_human_root_translation_encoded','render_mode','raw_pico_va_wva_used','resource_data_root',
+    'preview_engine','training_rgb_engine','preview_is_training_rgb','render_engine',
+    'calibration_source_asset_sha256','source_code_sha256_at_session_start',
+    'environment_config_source','replay_source_sha256','controller_identity','encoder_identity',
+    'hand_control_profile','egl_backend_selection','actual_mujoco_gl_module',
+    'review_mode','review_collection_enabled')
+
+
+def episode_session_identity(session_result):
+    """Snapshot only fixed identities, never the growing session history."""
+    required = ('task_id','source_kind','accepted_new_dataset','physics_hz','decoder_hz',
+        'command_rgb_hz','render_mode','raw_pico_va_wva_used','preview_engine',
+        'training_rgb_engine','preview_is_training_rgb','calibration_source_asset_sha256',
+        'source_code_sha256_at_session_start','replay_source_sha256',
+        'controller_identity','encoder_identity','hand_control_profile')
+    missing = [name for name in required if name not in session_result]
+    if missing:
+        raise ValueError('Episode session identities are incomplete: '+','.join(missing))
+    return copy.deepcopy({name:session_result[name] for name in EPISODE_SESSION_FIELDS if name in session_result})
+
+
+def episode_scene_metadata(*, initialization, standing_warmup_readiness, warmup,
+        environment_config, physics_seed, instruction, mujoco_object_body_names,
+        object_body_names, mujoco_obj_names, container_geometry_cache_sha256,
+        physics_model_sha256=None):
+    """Prepare the current scene receipt while paused, before the next record tick."""
+    values = {'initialization':initialization,'standing_warmup_readiness':standing_warmup_readiness,
+        'warmup':warmup,'environment_config':environment_config,'physics_seed':physics_seed,
+        'instruction':instruction,'mujoco_object_body_names':mujoco_object_body_names,
+        'object_body_names':object_body_names,'mujoco_obj_names':mujoco_obj_names,
+        'quality_geometry_mode':'deferred_geometry_with_original_solved_support',
+        'container_geometry_cache_sha256':container_geometry_cache_sha256,
+        'renderer_scene_config_scope':'initial after env.reset before controller warmup; dynamic frame poses come only from archived integration states'}
+    if physics_model_sha256 is not None:
+        values.update(physics_model_sha256=physics_model_sha256,
+            physics_model_identity_scope='current scene prepared model used by deferred capture')
+    return copy.deepcopy(values)
+
+
+def bounded_episode_metadata(session_identity, scene_metadata, *, human_demo_uuid,
+                             pico_calibration, initial_target_z_m):
+    """A complete per-episode binding whose size does not grow with older attempts."""
+    fixed = {name:session_identity[name] for name in EPISODE_SESSION_FIELDS if name in session_identity}
+    return copy.deepcopy({**fixed,**scene_metadata,
+        'episode_metadata_contract':'cvpr-pico-current-scene-metadata-v1',
+        'human_demo_uuid':human_demo_uuid,'pico_calibration':pico_calibration,
+        'hand_profile':session_identity['hand_control_profile']['profile_id'],
+        'initial_target_z_m':initial_target_z_m})
+
+
 def disable_instance_render_rate_limits(settings):
     """Change only this running Kit instance; never edit shared Kit files."""
     receipt = {'scope':'current process Kit settings only; no physical clock change',
@@ -312,6 +364,56 @@ def wait_fresh_command_frame(receiver, previous, last_timestamp_ns, deadline_s, 
 def rising_operator_commands(buttons, last_buttons):
     return [action for key, action in (('X','calibrate'),('Y','toggle_follow'),('A','toggle_record'))
         if buttons.get(key,False) and not last_buttons.get(key,False)]
+
+
+def recording_command_guard(action, *, episode_active):
+    """A calibration request cannot alter or reject an unfinished demonstration."""
+    if action == 'calibrate' and episode_active:
+        return '当前示例尚未结束，请先保存后再校准；已忽略本次校准请求，录制继续。'
+    return None
+
+
+class LoopWallTimer:
+    """Bounded host timing only; never advances or changes the physics clock."""
+    STAGES = ('input_validation','operator_actions','control','clock_sleep',
+              'review_poll','preview_status','status_disk')
+
+    def __init__(self, *, clock_ns=None, wall_clock_ns=None):
+        self._clock = clock_ns or time.monotonic_ns
+        self.start_ns = self._clock()
+        self.start_wall_time_ns = (wall_clock_ns or time.time_ns)()
+        self._stage = 'input_validation'
+        self._stage_start_ns = self.start_ns
+        self._durations_ns = {name:0 for name in self.STAGES}
+        self._finished = None
+
+    def enter(self, stage):
+        if stage not in self.STAGES or self._finished is not None:
+            raise ValueError('Invalid or already finished loop timing stage')
+        now = self._clock()
+        self._durations_ns[self._stage] += max(0,now-self._stage_start_ns)
+        self._stage,self._stage_start_ns = stage,now
+
+    def snapshot(self):
+        if self._finished is not None:
+            return copy.deepcopy(self._finished)
+        now = self._clock()
+        durations = dict(self._durations_ns)
+        durations[self._stage] += max(0,now-self._stage_start_ns)
+        timings = {name:value/1e9 for name,value in durations.items()}
+        timings['total'] = max(0,now-self.start_ns)/1e9
+        return {'complete':False,'loop_start_monotonic_ns':self.start_ns,
+            'loop_start_pc_wall_time_ns':self.start_wall_time_ns,'timing_s':timings,
+            'loop_critical_wall_s':max(0,timings['total']-timings['clock_sleep']),
+            'tail_after_control_wall_s':sum(timings[name] for name in
+                ('review_poll','preview_status','status_disk')),
+            'active_stage_at_snapshot':self._stage}
+
+    def finish(self):
+        if self._finished is None:
+            self._finished = self.snapshot()
+            self._finished['complete'] = True
+        return copy.deepcopy(self._finished)
 
 
 def scene_bound_commands(commands, transition_started):
@@ -727,6 +829,7 @@ def run(args):
     prepared_deferred = None
     deferred_prepare_index = 0
     geometry_cache_index = 0
+    session_identity = scene_metadata = None
     review_queue = None
     latest_finished_uuid = None
     review_status = {'status':'disabled_diagnostic' if replay else 'initializing','pending_count':0}
@@ -740,6 +843,17 @@ def run(args):
         'evidence':{'scope':'Only new tokens generated here by fixed matching official encoder, not old dataset tokens',
             'encoder_identity':reference.identities}}
     write_json(output/'new_producer_binding.json', pairing)
+
+    def current_scene_receipt(initialization, readiness):
+        return episode_scene_metadata(initialization=initialization,
+            standing_warmup_readiness=readiness,warmup=warmup.receipt,
+            environment_config=renderer_environment_config,physics_seed=args.seed,
+            instruction=raw.task.instruction,
+            mujoco_object_body_names={role:obj.name for role,obj in raw.mujoco.mj_objects.items()},
+            object_body_names={role:model.body(raw.mujoco.mj_objects[role].id).name
+                for role in ('target','container')},mujoco_obj_names=list(raw.mujoco.obj_names),
+            container_geometry_cache_sha256=prepared_geometry_cache['sha256'],
+            physics_model_sha256=prepared_deferred.model_sha256 if deferred else None)
 
     def finalize(completed=False, reason=None):
         nonlocal capture, ledger, episode, quality_stream, force_stream, following
@@ -914,6 +1028,8 @@ def run(args):
             result['initial_physical_state'], result['post_warmup_physical_state'])
         result.update(controller_identity=controller.identity,warmup=warmup.receipt,
             encoder_identity=reference.identities,status='waiting_for_calibration')
+        session_identity = episode_session_identity(result)
+        scene_metadata = current_scene_receipt(result['initialization'],result['standing_warmup_readiness'])
         if not replay:
             receiver = PicoReceiver().start()
         if args.headset_video:
@@ -946,6 +1062,8 @@ def run(args):
         last_preview_time = None
         last_snapshot_error = None
         reset_generation = 0
+        loop_timer = None
+        last_loop_wall_timing = None
 
         def invalidate_calibration():
             nonlocal following, command, calibration_fresh, reference_evidence
@@ -964,7 +1082,9 @@ def run(args):
             active_local = None
             invalidate_calibration()
             result.setdefault('rejections',[]).append({'sim_time_s':float(data.time),
-                'tick50':global_tick,'reason':error_text})
+                'tick50':global_tick,'reason':error_text,'pc_wall_time_ns':time.time_ns(),
+                'current_loop_wall_timing':loop_timer.snapshot() if loop_timer else None,
+                'previous_loop_wall_timing':last_loop_wall_timing})
             result['rejections'] = result['rejections'][-128:]
             try:
                 control_trace.write(json_text({'phase':'rejected_and_paused',
@@ -997,6 +1117,7 @@ def run(args):
             nonlocal previous,last_preview_time,last_buttons,reference_evidence,pending_input_commands
             nonlocal wall_deadline,last_step_wall,hands,active_local,quality,operator_message
             nonlocal reset_generation
+            nonlocal scene_metadata
             if episode is not None:
                 raise ValueError('Finish the current episode before resetting the scene')
             # Invalidate old UI/handset commands even if reset fails partway.
@@ -1049,12 +1170,14 @@ def run(args):
             result.setdefault('resets',[]).append({'reason':reason,'initialization':reset_initialization,
                 'before':reset_before,'after':reset_after})
             write_json(output/'result.json',result)
-            result['resets'][-1]['standing_warmup_readiness'] = require_standing_warmup(reset_before, reset_after)
+            reset_readiness = require_standing_warmup(reset_before, reset_after)
+            result['resets'][-1]['standing_warmup_readiness'] = reset_readiness
             cache = build_container_geometry_cache(model,data,container_body=raw.mujoco.mj_objects['container'].id,
                 target_body=raw.mujoco.mj_objects['target'].id)
             geometry_cache_index += 1
             prepared_geometry_cache = prepare_quality_geometry(cache,output,geometry_cache_index)
             result['prepared_quality_geometry_caches'].append(prepared_geometry_cache)
+            scene_metadata = current_scene_receipt(reset_initialization,reset_readiness)
             raw.mujoco.step = measured_step
             substeps=0; global_tick=0; command=None; previous=None
             last_preview_time=None
@@ -1068,6 +1191,7 @@ def run(args):
             operator_message = '新场景已准备，请站直后重新校准，再开始下一条录制。'
 
         while True:
+            loop_timer = LoopWallTimer()
             reset_generation_at_loop_start = reset_generation
             snapshot_error = None
             if args.seconds and time.monotonic()-started_wall >= args.seconds:
@@ -1105,6 +1229,7 @@ def run(args):
                 commands.append('record'); diagnostic_started = True
             if 'quit' in commands:
                 break
+            loop_timer.enter('operator_actions')
             reset_this_batch = reset_generation != reset_generation_at_loop_start
             for action in scene_bound_commands(commands,lambda:
                     reset_this_batch or reset_generation != reset_generation_at_loop_start):
@@ -1112,10 +1237,12 @@ def run(args):
                     action = 'pause' if following else 'follow'
                 if action == 'toggle_record':
                     action = 'save' if episode else 'record'
+                command_notice = recording_command_guard(action,episode_active=episode is not None)
+                if command_notice:
+                    operator_message = command_notice
+                    continue
                 try:
                     if action == 'calibrate':
-                        if episode:
-                            raise ValueError('Discard or save the current episode before calibration')
                         if not quality['valid']:
                             raise ValueError('Calibration requires valid live full-body tracking')
                         if not physics_ready:
@@ -1199,6 +1326,7 @@ def run(args):
                         reject_and_pause(error_text)
                     if replay:
                         raise
+            loop_timer.enter('control')
             if following and not quality['valid']:
                 reject_and_pause('Tracking rejected: '+','.join(quality['reasons']))
             if following:
@@ -1211,24 +1339,17 @@ def run(args):
                         reject_and_pause(f'Cannot maintain real time: lag={lateness:.3f}s')
                         if replay:
                             raise RuntimeError(error_text)
+                        last_loop_wall_timing = loop_timer.finish()
+                        result['last_loop_wall_timing'] = last_loop_wall_timing
                         continue
                     state = episode.on_tick(global_tick) if episode else None
                     if state and state['started']:
                         directory = output/'episodes'/episode.human_demo_uuid
                         directory.mkdir(parents=True)
                         initial_z = float(raw.mujoco.mj_objects['target'].xpos[2])
-                        metadata = {**result,'episodes':[],
-                            'human_demo_uuid':episode.human_demo_uuid,'pico_calibration':reference.calibration,
-                            'hand_profile':result['hand_control_profile']['profile_id'],
-                            'physics_seed':args.seed,'initial_target_z_m':initial_z,
-                            'mujoco_object_body_names':{role:obj.name for role,obj in raw.mujoco.mj_objects.items()},
-                            'object_body_names':{role:model.body(raw.mujoco.mj_objects[role].id).name
-                                for role in ('target','container')},
-                            'mujoco_obj_names':list(raw.mujoco.obj_names),
-                            'quality_geometry_mode':'deferred_geometry_with_original_solved_support',
-                            'container_geometry_cache_sha256':prepared_geometry_cache['sha256'],
-                            'environment_config':copy.deepcopy(renderer_environment_config),
-                            'renderer_scene_config_scope':'initial after env.reset before controller warmup; dynamic frame poses come only from archived integration states'}
+                        metadata = bounded_episode_metadata(session_identity,scene_metadata,
+                            human_demo_uuid=episode.human_demo_uuid,pico_calibration=reference.calibration,
+                            initial_target_z_m=initial_z)
                         os.link(prepared_geometry_cache['path'],directory/'container_geometry_cache.json',follow_symlinks=False)
                         write_json(directory/'metadata.json',metadata)
                         if deferred:
@@ -1313,6 +1434,10 @@ def run(args):
                         'timing_s':{'reference_encode':encode_seconds,'environment_step':step_seconds,
                             'fresh_input_wait':input_wait_seconds,
                             'control_tick_before_trace':time.perf_counter()-control_tick_started},
+                        'loop_wall_timing':{'loop_start_monotonic_ns':loop_timer.start_ns,
+                            'loop_start_pc_wall_time_ns':loop_timer.start_wall_time_ns,
+                            'pc_wall_time_ns':time.time_ns(),'lag_s':lateness,
+                            'previous_complete_loop':last_loop_wall_timing},
                         'actual_before_step':actual_before,
                         'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES),
                         'terminated':bool(terminated),'truncated':bool(truncated)})+'\n')
@@ -1336,6 +1461,7 @@ def run(args):
                     last_step_wall=now
                     global_tick+=1; source_elapsed+=.02; wall_deadline+=.02
                     delay=wall_deadline-time.monotonic()
+                    loop_timer.enter('clock_sleep')
                     if delay>0:
                         time.sleep(delay)
                 except Exception as error:
@@ -1345,9 +1471,11 @@ def run(args):
                         raise
             else:
                 wall_deadline=None; last_step_wall=None
+                loop_timer.enter('clock_sleep')
                 time.sleep(.01)
             # A bounded status file is the only worker observation in this
             # process: no history lock, geometry, hashes, or state-file loading.
+            loop_timer.enter('review_poll')
             if review_queue and time.monotonic()-last_review_poll_wall >= .5:
                 last_review_poll_wall=time.monotonic()
                 try:
@@ -1358,6 +1486,7 @@ def run(args):
                     review_status={'status':'error','error':repr(review_poll_error),
                         'latest_finished_uuid':latest_finished_uuid}
                 result['background_review']=copy.deepcopy(review_status)
+            loop_timer.enter('preview_status')
             feedback = None
             feedback_error = None
             if frame is not None:
@@ -1388,6 +1517,7 @@ def run(args):
                 'headset_video':{'enabled':True,**video_bridge.status} if video_bridge else {'enabled':False},
                 'note':('MuJoCo实时预览；保存后待RTX同状态补图及独立验收，尚非训练数据' if deferred
                         else '保存后仍需独立物理、图像和数据验收；不会自动标为成功数据')},preview_rgb)
+            loop_timer.enter('status_disk')
             if time.monotonic()-last_result_write_wall >= 1.:
                 if not following and frame is not None:
                     # One bounded latest packet from this same SDK consumer.
@@ -1406,10 +1536,13 @@ def run(args):
                         'status':'following','decoder_calls':controller.decoder_calls,
                         'simulated_control_ticks':global_tick,'maximum_lag_s':max_lateness,
                         'last_error':error_text,'hand_control':feedback,
+                        'previous_loop_wall_timing':last_loop_wall_timing,
                         'accepted_new_dataset':False})
                 else:
                     write_json(output/'result.json',result)
                 last_result_write_wall = time.monotonic()
+            last_loop_wall_timing = loop_timer.finish()
+            result['last_loop_wall_timing'] = last_loop_wall_timing
         result['status']='stopped'
     except BaseException as error:
         result.update(status='error',error=repr(error),traceback=traceback.format_exc())

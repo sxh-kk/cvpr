@@ -328,3 +328,28 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 本次实例目录：`/home/zxc/CVPR_Evaluation_runtime/handover_curated_merge_20261024`。
 筛选结果28条（新14+旧14），原100中25条满足更严格完整投影门，另去11条近重复。
 正式可用状态以该目录的`CURATED_DATASET_READY.json`与生产读取记录为准；不自动训练或同步A100。
+
+## 新14条与完整原100条合并并在A100微调
+
+`merge_handover_114.py` 使用独立 exact114 合同，完整保留新14条和原100条；
+0–13来自前述28包的新14，14–113依次来自原100的0–99。
+视频、DINO数组、归一化和动作保持原值，Parquet只重排episode/global/task索引。
+原100保持原physics-v2验收，新14保持各自原准入，不声称114条全部通过额外5mm投影门。
+本次本地目录为 `/home/zxc/CVPR_Evaluation_runtime/handover_merged114_20261025`，
+训练数据位于 `packed/train`、真实特征位于 `dino`；共49,089帧、42,363完整训练窗。
+`pack`、`cache`、`verify`依次构建并验收；`MERGED114_DATASET_READY.json`绑定本地就绪结果。
+
+`upload_handover_merged114.py --local-root LOCAL --remote-root REMOTE` 复制到独立A100目录，
+原100远端视频/特征经SHA匹配后可直接复制到新编号，随后全量校验文件内容并恢复纳秒mtime。
+远端用 `merge_handover_114.py relocate --pack-root REMOTE/packed --cache-root REMOTE/dino`
+在保留传入元数据和原缓存备份后重绑定DINO根路径，再运行 `verify` 实际读取全部114集。
+远端 `A100_DATASET_READY.json` 必须绑定实际重定位后的manifest、reindex、PACK_READY和生产报告，
+不能沿用本地manifest哈希充当远端验收。
+
+`a100_handover_merged114.py prepare/check/run` 复用SHA绑定的原A100冻结训练代码及状态迁移helper，
+从已验收joint38k模型重新开始optimizer/scheduler与步数；继承最近融合模型、state_drop_prob=0、
+256×320 clean DINO历史及VLM颜色增强，保持独立5集/40窗VAL，不使用TRAIN作验证。
+正式配置固定8卡、每卡8、累积1、全局64、10000次optimizer更新、1000步warmup。
+每1000步保存并保留全部模型权重；仅本新run超过最近两份的optimizer/scheduler/RNG会移除，
+旧run和旧数据保留。实际更新2/20/最终步检查各卡有限性、参数探针一致性及内存，
+单次短检查不代表完整训练或策略成功率已通过。

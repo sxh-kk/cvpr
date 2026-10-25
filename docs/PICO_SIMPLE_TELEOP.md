@@ -147,6 +147,8 @@ Unity Demo 的 SDK 订阅或其他接收诊断。本入口不结束这些外部�
 本机证据：`/home/zxc/CVPR_Evaluation_runtime/pico_realtime_budget_fix_20261025/VALIDATION.json`、
 `REFERENCE_NUMERIC_COMPARISON.json`、`SWITCH_RECEIPT.json`；
 EGL证据位于`/home/zxc/CVPR_Evaluation_runtime/pico_async_preview_20261025/egl_check.json`。
+切换后首8条真实PICO录制均正常保存为`pending_audit`，观察快照无控制拒收，最大累计lag为12.230ms；
+该有限真人回访已记录`HUMAN_LIVE10_FOLLOWUP.json`，不等于物理任务成功或RTX训练准入通过。
 
 集合根目录默认是启动时 `--output` 目录的上一级，因此同一集合内重启采集器后编号继续递增。
 `pico_episode_history.json` 保存编号与上一条指针，文件锁和可恢复事务防止重复编号或覆盖；

@@ -96,6 +96,12 @@ def adapt(relative, original, *, step, tag, source):
     if relative not in ADAPTED:
         return original
     text = original.replace(OLD_FRAMEWORK, framework).replace(OLD_RUN, run).replace(OLD_MARKER, marker)
+    if relative == 'evaluation_4090.py':
+        text = one(text, 'run,base,strict=modules();protocol,psha=',
+            "run,base,strict=modules();__import__('owned_process_cleanup').install(run.ev);protocol,psha=")
+    if relative == 'prepare_checkpoint.py':
+        text = one(text, "HERE/'runtime_audit.py',HERE/'prepare_checkpoint.py'",
+            "HERE/'runtime_audit.py',HERE/'owned_process_cleanup.py',HERE/'prepare_checkpoint.py'")
     if relative == 'test_dino_source_binding_CPU.py':
         # The old two real failed-case audits remain a regression fixture. They
         # are not a preflight for the new model and must never be relabelled.
@@ -230,6 +236,8 @@ def generate(args):
     # Read every input before writing. Only source files, never completed
     # acceptance/admission/result directories, enter the new framework.
     originals = {str(path): (template / path).read_bytes() for path in files}
+    cleanup_source = Path(__file__).with_name('owned_process_cleanup.py')
+    originals['owned_process_cleanup.py'] = cleanup_source.read_bytes()
     framework.mkdir();run.mkdir()
     try:
         clone_local(local, run / 'local_run')
@@ -243,7 +251,8 @@ def generate(args):
                 ast.parse(after, filename=relative)
             path = framework / relative;path.parent.mkdir(exist_ok=True)
             path.write_text(after)
-            source_bindings.append({'relative_path': relative, 'template': bind(template / relative),
+            original_path = cleanup_source if relative == 'owned_process_cleanup.py' else template / relative
+            source_bindings.append({'relative_path': relative, 'template': bind(original_path),
                                     'generated': bind(path), 'bytes_unchanged': before == after})
             if before != after:
                 changed.append(relative)
@@ -262,6 +271,8 @@ def generate(args):
             'allowed_runtime_identity_edits': ['protocol_core.CHECKPOINT_STEPS',
                 'rtc_acceptance.load_source_bound_dino_contract checkpoint guard'],
             'old_fixture_run': str(root / OLD_RUN.removesuffix('_r2')),
+            'owned_process_cleanup_source': bind(cleanup_source),
+            'cleanup_install_scope': 'Orchestrator modules() hook only; frozen inference runtime unchanged',
             'prior_preflight_or_results_copied': False})
         (framework / 'IDENTITY_SOURCE_DIFF.patch').write_text(''.join(diffs))
         environment = dict(os.environ, CUDA_VISIBLE_DEVICES='', PYTHONDONTWRITEBYTECODE='1', PYTHONNOUSERSITE='1')

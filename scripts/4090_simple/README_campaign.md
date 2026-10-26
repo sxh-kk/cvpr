@@ -62,6 +62,38 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 python3 \
 `protocol_core.CHECKPOINT_STEPS` 与 DINO 验收的当前部署 step guard 改变。
 原 5000 失败案例仍作为 CPU 回归 fixture，绝不当作新模型的 GPU 预检。
 
+后续各步另复制独立 `owned_process_cleanup.py`，其真实 SHA 纳入新 manifest 的
+`parent_sources/files`。每次 gate 核对该文件后，仅在编排器取得 runner 后安装进程
+清理函数，处理退出期间 `/proc/environ` 的权限竞态；活进程的 token/起始身份权限
+检查保留。冻结 runtime/helper 的数值源码不作此改动，原 5000 框架不回写。
+
+## 清理退出竞态与 5k 末两集恢复
+
+`owned_process_cleanup.py` 单独处理模型服务退出时 `/proc/<pid>/environ` 可能产生
+的权限竞态。仅当目标进程组和原始 starttime 已确认、复读 stat 证明该进程已经
+Z/X 或消失时才继续。活进程权限不足、attempt token 不符、PID 复用仍然拒绝；
+TERM/KILL 前重新核对整个组的所有权。数值 runtime/helper 原文件字节不修改，
+新框架在编排层安装此清理函数，并将辅助源码 SHA 纳入 checkpoint manifest。
+
+当前 5k 在 `level_1_episode_09/attempt_001` 完成模拟后因清理检查失败停止于28集。
+`resume_handover149_eval.py` 是这次明确范围的恢复入口：保留旧失败尝试，重新验收
+28 个原 case，按原种子/协议在 `attempt_002` 重跑第29集，再执行第30集。
+原真实三等级预检只按相同模型/硬件/协议的原 SHA 引用，不能称作新做的预检。
+恢复重新核验 namespace/FD9/空 GPU/CPU 资格/源模型/运行锁，入口及清理源码
+独立绑定于 `ROOT_RESUME_ADMISSION.json`，最终30集再次完整验收后才进入完成状态。
+原错误保存在恢复目录的状态快照及新状态的 `resolved_execution_errors` 中。
+
+准备恢复文件不会启动 GPU。该入口只接纳这次特定5k、原28集与末两集组合，
+不能用来忽略任意执行错误或跳过其它 case。先检查旧 evaluator、所有已记录
+进程组均已退出，再使用新恢复目录与新 host admission attempt 启动：
+
+```bash
+python3 /home/zxc/CVPR_Evaluation/scripts/4090_simple/resume_handover149_eval.py \
+  --framework /绝对路径/原handover149_5000_4090_eval_20261026_r2 \
+  --recovery /绝对路径/原handover149_5000_4090_eval_20261026_r2/新恢复目录
+# 根据返回目录调用 namespace_resume.sh，--phase run，--attempt 使用从未用过的新名字。
+```
+
 ## 阶段与串行门槛
 
 每步依次使用返回的 `namespace_launch.sh --phase cpu-check|preflight|run` 命令，

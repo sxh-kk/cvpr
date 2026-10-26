@@ -142,6 +142,15 @@ class ActualSourceTests(unittest.TestCase):
         self.assertIn('STEPS=(4000,)', after)
         self.assertIn('handover149_experiment_{step}_official30_4090_trt10133_20261026_campaign001', after)
 
+    def test_cleanup_hook_and_manifest_source_binding(self):
+        _, evaluator = self.changed('evaluation_4090.py')
+        _, preparer = self.changed('prepare_checkpoint.py')
+        self.assertIn("run,base,strict=modules();__import__('owned_process_cleanup').install(run.ev);protocol,psha=", evaluator)
+        self.assertIn("HERE/'runtime_audit.py',HERE/'owned_process_cleanup.py',HERE/'prepare_checkpoint.py'", preparer)
+        before = (FILE.with_name('owned_process_cleanup.py')).read_text()
+        self.assertEqual(p.adapt('owned_process_cleanup.py', before, step=4000,
+            tag='campaign001', source=Path('/backup/ckpt_4000')), before)
+
     def test_old_real_audits_remain_original_fixtures(self):
         _, after = self.changed('test_dino_source_binding_CPU.py')
         self.assertIn("OLD=H.parent/'" + p.OLD_RUN.removesuffix('_r2') + "'", after)

@@ -68,7 +68,39 @@ source /home/zxc/CVPR_Evaluation_runtime/local.env.sh
 本轮准备验证：44项审计CPU回归、6项打包回归（含真实无损MP4与LeRobot读取）、
 11项就绪／路径重绑及5项传输回归、18项流程回归通过。验证包括真实临时DINO cache路径重绑、
 远端字节脚本的本地临时执行、缓存就绪后文件变更拒绝，以及子进程亲和性且父进程不变。
-真实90条的GPU补图、DINO及A100就绪仍须在采集结束后实测，未完成时不声明上传或完整验收成功。
+以上为准备阶段的CPU验证；实际90条的后续GPU及A100交付结果见下节。
 
 本机原始记录与预检证据位于`/home/zxc/CVPR_Evaluation_runtime/pico_data_admission_20261025`；
 数据、日志、权重和缓存不提交Git。
+
+## 2026-10-26实际交付
+
+采集器及自动后处理退出后，固定流程于北京时间08:37启动，14:15完成远端收据回读。
+严格使用冻结清单的90个真人UUID，没有追加后续录制或替换候选。
+90/90完成原始积分状态补RTX及完整独立准入，拒收0条、技术失败0条；
+无损LeRobot包包含41,401帧及36,091个完整历史／未来训练窗口。
+64维SONIC v1.1 token沿用真人录制时实际执行值，归一化统计仍继承38k合同，未重新拟合。
+
+真实clean DINO的90个episode全部完成，使用已绑定的`256x320`、bf16推理、float32存储和
+CLS＋4 registers协议。本机及A100分别通过真实CPU Dataset／collator检查：
+每条读取首／中／末共270次生产查询，覆盖动作归一化、当前RGB及六帧DINO历史；
+全量缓存形状、有限性、帧身份及文件摘要另行检查。
+这些检查不是模型训练或闭环成功率测评。
+
+A100独立目录为`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/pico_handover_20261025_human90_01`：
+
+- 训练数据：`packed/train`；真实DINO：`dino`。
+- 上传回执核对2,665个文件，共29,285,542,850字节，全部SHA及纳秒mtime通过。
+- 路径重绑保留`dino.before-remote-relocation`原缓存，特征和训练数据字节不变。
+- 实际远端CPU验收使用提交`5fe3f4f40b2f838a0db3a83854bb965bed265dee`的独立代码快照，
+  GPU隐藏、nice19、仅绑定自身一个允许CPU；未修改训练checkout、未启动或切换A100训练。
+- 最终`A100_PICO_DATASET_READY.json`的`status=passed`、`remote_production_ready=true`、
+  `DINO_relocation_pending=false`、`training_started=false`。
+
+收据已回存本地发布目录；关键摘要为：
+
+- 固定清单：`488c8278202abbde480708a75cd04517f96b34398d9029cff6c49bdb44a7c038`。
+- `PACK_READY.json`：`dcd2ea30cac43f0ed167d67e1aaa5739ff6101a3f777b2d14e17ac242551f50a`。
+- A100最终就绪收据：`c99ed8b0b94cbc981228ca23bf39f8168eb1c47027320395399c305ac74247bc`。
+
+本数据包保持真人`train_only`来源，不并入VAL／TEST。交付完成后已关闭本项周期检查。

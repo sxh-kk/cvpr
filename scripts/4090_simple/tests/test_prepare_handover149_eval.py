@@ -66,6 +66,24 @@ class SourceTests(unittest.TestCase):
 
     def put(self,path,value):path.write_text(json.dumps(value,sort_keys=True))
 
+    def move_to_milestone(self, step, *, change_weights=True):
+        """Fixture models have distinct bytes; changing only receipt labels is insufficient."""
+        target=self.root/f'ckpt_{step}'
+        if target != self.source:
+            self.source.rename(target);self.source=target
+        if change_weights:
+            (self.source/'model.safetensors').write_bytes(f'fixture-saved-model-step-{step}'.encode())
+        self.receipt['step']=step
+        self.receipt['completed_retention_marker'].update(
+            saved_update=step,all_saved_model_steps=list(range(1000,step+1,1000)))
+        model=self.receipt['model']
+        model.update(source_path=f'{m.EXPECTED_RUN}/checkpoints/ckpt_{step}/model.safetensors',
+            bytes=(self.source/'model.safetensors').stat().st_size)
+        actual=m.sha256(self.source/'model.safetensors')
+        model.update({key:actual for key in ('source_sha256_before','source_sha256_after','local_sha256')})
+        self.seal()
+        return actual
+
     def seal(self, *, refresh_reindex=True, refresh_prepared=True):
         self.put(self.release/'packed/PACK_READY.json',self.pack)
         self.put(self.release/'dino/manifest.json',self.manifest)
@@ -96,6 +114,66 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(config['model']['state_drop_prob'],0.)
         self.assertEqual((preparation['effective_global_batch'],receipt['step']),(32,5000))
         self.assertFalse(self.pack['final_ready'])
+
+    def test_requested_milestones_require_their_actual_saved_model_and_explicit_sha(self):
+        for step in (4000,6000,7000,8000,9000,10000):
+            source_sha=self.move_to_milestone(step)
+            with self.subTest(step=step):
+                _,config,preparation,receipt=m.validate_source(self.source,self.release,
+                    expected_step=step,expected_model_sha256=source_sha)
+                self.assertEqual(receipt['step'],step)
+                self.assertEqual(config['model']['num_blocks'],6)
+                self.assertEqual(preparation['source_step'],38000)
+                self.assertFalse(self.pack['final_ready'])
+
+    def test_additional_milestone_cannot_use_receipt_sha_as_its_only_authority(self):
+        self.move_to_milestone(6000)
+        with self.assertRaisesRegex(ValueError,'separate A100 source'):
+            m.validate_source(self.source,self.release,expected_step=6000)
+
+    def test_task5000_pin_cannot_be_overridden(self):
+        with self.assertRaisesRegex(ValueError,'cannot be overridden'):
+            m.validate_source(self.source,self.release,expected_model_sha256='1'*64)
+
+    def test_metadata_only_relabel_of5000_is_rejected(self):
+        source_sha=self.move_to_milestone(6000,change_weights=False)
+        with self.assertRaisesRegex(ValueError,'cannot be relabeled'):
+            m.validate_source(self.source,self.release,expected_step=6000,expected_model_sha256=source_sha)
+
+    def test_separately_pinned_source_sha_rejects_resealed_alternate_weights(self):
+        source_sha=self.move_to_milestone(6000)
+        (self.source/'model.safetensors').write_bytes(b'different-saved-weight-values')
+        self.move_to_milestone(6000,change_weights=False)
+        with self.assertRaisesRegex(ValueError,'source-before/source-after/local SHA differs'):
+            m.validate_source(self.source,self.release,expected_step=6000,expected_model_sha256=source_sha)
+
+    def test_new_step_checks_actual_local_bytes_after_matching_all_receipt_hashes(self):
+        source_sha=self.move_to_milestone(6000)
+        weights=self.source/'model.safetensors'
+        weights.write_bytes(b'x'*weights.stat().st_size)
+        with self.assertRaisesRegex(ValueError,'Actual local milestone model SHA differs'):
+            m.validate_source(self.source,self.release,expected_step=6000,expected_model_sha256=source_sha)
+
+    def test_expected_step_cannot_be_taken_from_another_milestone_receipt(self):
+        source_sha=self.move_to_milestone(6000)
+        with self.assertRaisesRegex(ValueError,'task7000 model-only'):
+            m.validate_source(self.source,self.release,expected_step=7000,expected_model_sha256=source_sha)
+
+    def test_new_step_needs_completed_checkpoint_save_inclusion(self):
+        source_sha=self.move_to_milestone(10000)
+        for marker in ({'saved_update':9000,'all_saved_model_steps':[10000]},
+                       {'saved_update':10000,'all_saved_model_steps':[9000]}):
+            self.receipt['completed_retention_marker'].update(marker);self.seal()
+            with self.subTest(marker=marker),self.assertRaisesRegex(ValueError,'retention authority'):
+                m.validate_source(self.source,self.release,expected_step=10000,expected_model_sha256=source_sha)
+
+    def test_unauthorized_steps_and_malformed_external_pins_are_rejected(self):
+        for step in (1000,3000,11000,True,6000.):
+            with self.subTest(step=step),self.assertRaisesRegex(ValueError,'Unsupported149'):
+                m.validate_source(self.source,self.release,expected_step=step,expected_model_sha256='1'*64)
+        for value in (None,'','a'*63,'g'*64,'A'*64):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'separate A100 source'):
+                m.validate_source(self.source,self.release,expected_step=6000,expected_model_sha256=value)
 
     def test_actual_runtime_metadata_serialization_bridge_is_explicit(self):
         proof=m.validate_runtime_metadata(self.source,self.config,self.preparation)
@@ -208,6 +286,25 @@ class SourceCodeAndEncoderTests(unittest.TestCase):
         self.assertFalse(m.recorded_encoder_transition(encoder,actual)['numerical_bitwise_equivalence_claimed'])
         actual['preprocessing']['do_resize']=True
         with self.assertRaisesRegex(ValueError,'processor'):m.recorded_encoder_transition(encoder,actual)
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_cli_passes_requested_step_and_independent_sha_to_preparation(self):
+        argv=['prepare_handover149_eval.py','--source','/source/ckpt_4000','--resources','/resources',
+            '--output','/new/output','--release','/release','--step','4000',
+            '--expected-model-sha256','a'*64]
+        with patch.object(sys,'argv',argv),patch.object(m,'prepare',return_value={'status':'fixture'})as prepare,\
+             patch('builtins.print'):
+            m.main()
+        self.assertEqual(prepare.call_args.kwargs,{'expected_step':4000,'expected_model_sha256':'a'*64})
+
+    def test_cli_defaults_preserve_pinned5000_preparation(self):
+        argv=['prepare_handover149_eval.py','--source','/source/ckpt_5000','--resources','/resources',
+            '--output','/new/output','--release','/release']
+        with patch.object(sys,'argv',argv),patch.object(m,'prepare',return_value={'status':'fixture'})as prepare,\
+             patch('builtins.print'):
+            m.main()
+        self.assertEqual(prepare.call_args.kwargs,{'expected_step':5000,'expected_model_sha256':None})
 
 
 if __name__=='__main__':unittest.main()

@@ -29,6 +29,7 @@ PREPARED_METADATA = ('evidence/prepared_run_config.json','evidence/prepared_argv
 EXPECTED_TRACKER = {'entity':'','group':'posttrain','id':'l5a01d3a',
     'name':'handover_train149_joint38000_statekeep_bs4_8gpu.us.flow1000.cosine.lr1.0e-05.b32.gpus8.261026054254'}
 EXPECTED_STEP = 5000
+SUPPORTED_STEPS = (4000, 5000, 6000, 7000, 8000, 9000, 10000)
 EXPECTED_MODEL_SHA = '57f689768b0c0edf9b4407eb441f701d1b35be9807d76f2397dda4083fb02cfd'
 EXPECTED_RUN = ('/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/handover149_training_20261026/'
     'bs4_restart_001/formal10000/training/posttrain/'
@@ -90,32 +91,49 @@ def validate_runtime_metadata(source, config, preparation):
             'VLMExpert/src/psi/utils/utils.py':'cfg_json_default Path repr'}}
 
 
-def validate_source(source, release, *, verify_weight=True):
-    """Bind the downloaded5000 milestone to its actual149/BS4 run, not a sibling run.
+def milestone_model_sha(step, expected_model_sha256=None):
+    """Require a separately obtained source SHA for each newly requested milestone."""
+    require(type(step) is int and step in SUPPORTED_STEPS, 'Unsupported149 task milestone')
+    if step == EXPECTED_STEP:
+        require(expected_model_sha256 in (None, EXPECTED_MODEL_SHA),
+            'The previously verified task5000 model SHA cannot be overridden')
+        return EXPECTED_MODEL_SHA
+    require(isinstance(expected_model_sha256,str) and len(expected_model_sha256) == 64
+        and all(c in '0123456789abcdef' for c in expected_model_sha256),
+        'A separate A100 source --expected-model-sha256 is required for this task milestone')
+    require(expected_model_sha256 != EXPECTED_MODEL_SHA,
+        'The task5000 model cannot be relabeled as another milestone')
+    return expected_model_sha256
+
+
+def validate_source(source, release, *, verify_weight=True, expected_step=EXPECTED_STEP,
+                    expected_model_sha256=None):
+    """Bind a downloaded milestone to its actual149/BS4 run and external model SHA.
 
     This accepts a completed checkpoint save while its A100 training continues;
     it does not require, or assert, completion of the10000-update training run.
     ``verify_weight=False`` is only for rechecking already SHA-verified metadata.
     The public preparation path always verifies the full model bytes.
     """
+    model_sha = milestone_model_sha(expected_step,expected_model_sha256)
     source, release = Path(source).resolve(strict=True), Path(release).resolve(strict=True)
     receipt = read(source/'backup_receipt.json')
     step = receipt.get('step')
     require(receipt.get('contract') == BACKUP_CONTRACT and type(step) is int
-        and step == EXPECTED_STEP and source.name == f'ckpt_{step}'
+        and step == expected_step and source.name == f'ckpt_{step}'
         and receipt.get('optimizer_copied') is False,
-        'Require the exact149 BS4 task5000 model-only backup')
+        f'Require the exact149 BS4 task{expected_step} model-only backup')
     marker = receipt['completed_retention_marker']
     require(marker.get('all_models_preserved') is True
         and type(marker.get('saved_update')) is int and marker['saved_update'] >= step
         and step in marker.get('all_saved_model_steps', []),
-        'Completed checkpoint retention authority must include task5000')
+        f'Completed checkpoint retention authority must include task{step}')
     identity = receipt['run_identity']
     require(identity.get('run_directory') == EXPECTED_RUN,
         'Require the current149 BS4 restart run, not the failed BS8 or old114 run')
     expected_source = str(Path(EXPECTED_RUN)/'checkpoints'/f'ckpt_{step}'/'model.safetensors')
     hashes = [receipt['model'].get(k) for k in ('source_sha256_before','source_sha256_after','local_sha256')]
-    require(hashes[0] == EXPECTED_MODEL_SHA and len(set(hashes)) == 1
+    require(hashes[0] == model_sha and len(set(hashes)) == 1
         and receipt['model'].get('source_path') == expected_source,
         'Model source/run identity or source-before/source-after/local SHA differs')
     require(set(receipt['metadata']) == set(METADATA), 'Require all four saved inference/provenance files')
@@ -300,9 +318,12 @@ def strict_component_check(weights, config, qwen):
         'action_signature':signature,'state_drop_prob':0.,'num_blocks':6,'CUDA_initialized':False}
 
 
-def prepare(source, resources, output, repo, release):
+def prepare(source, resources, output, repo, release, *, expected_step=EXPECTED_STEP,
+            expected_model_sha256=None):
     os.environ.update(CUDA_VISIBLE_DEVICES='',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',PYTHONDONTWRITEBYTECODE='1')
-    source, config, preparation, receipt = validate_source(source,release)
+    model_sha = milestone_model_sha(expected_step,expected_model_sha256)
+    source, config, preparation, receipt = validate_source(source,release,
+        expected_step=expected_step,expected_model_sha256=model_sha)
     original_stat = (source/'model.safetensors').stat()
     resources, repo, release = (Path(p).resolve(strict=True) for p in (resources,repo,release))
     output = Path(output).absolute()
@@ -363,7 +384,8 @@ def prepare(source, resources, output, repo, release):
         write_json(output/'motion/export_validation.json',motion)
         validate_config(deployed,output/'argv.txt',repo)
         require(deployed['model']['state_drop_prob'] == 0., 'Deployment must preserve state-retention semantics')
-        validate_source(source,release,verify_weight=False)
+        validate_source(source,release,verify_weight=False,
+            expected_step=expected_step,expected_model_sha256=model_sha)
         current_stat = (source/'model.safetensors').stat()
         require((original_stat.st_dev,original_stat.st_ino,original_stat.st_size,original_stat.st_mtime_ns)
             == (current_stat.st_dev,current_stat.st_ino,current_stat.st_size,current_stat.st_mtime_ns),
@@ -372,6 +394,9 @@ def prepare(source, resources, output, repo, release):
             'source_unifolm_step':38000,'initial_task_step':0,'step_semantics':'handover149_task_optimizer_updates',
             'train_episodes':149,'train_windows':59468,'source_global_batch':32,'state_drop_prob':0.,'num_blocks':6,
             'joint_sha256':receipt['model']['local_sha256'],'run_dir':str(output),'source_snapshot':str(source),
+            'requested_task_step':expected_step,'expected_model_sha256':model_sha,
+            'model_sha_authority':'previously verified task5000 source' if step == EXPECTED_STEP
+                else 'independent A100 source SHA supplied explicitly to preparation',
             'source_backup_receipt_sha256':sha256(source/'backup_receipt.json'),
             'runtime_metadata_validation':validate_runtime_metadata(source,config,preparation),
             'full_saved_components_strict_CPU_load':structure,'strict_motion_load':motion['strict_meta_load'],
@@ -399,8 +424,13 @@ def main():
     for name in ('source','resources','output','release'):
         parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--repo',type=Path,default=REPO)
+    parser.add_argument('--step',type=int,choices=SUPPORTED_STEPS,default=EXPECTED_STEP,
+        help='Exact saved task optimizer step to deploy (default: previously verified5000)')
+    parser.add_argument('--expected-model-sha256',
+        help='Independent SHA256 of the exact A100 source model; required except for pinned5000')
     args = parser.parse_args()
-    print(json.dumps(prepare(args.source,args.resources,args.output,args.repo,args.release),ensure_ascii=False,indent=2))
+    print(json.dumps(prepare(args.source,args.resources,args.output,args.repo,args.release,
+        expected_step=args.step,expected_model_sha256=args.expected_model_sha256),ensure_ascii=False,indent=2))
 
 
 if __name__ == '__main__':

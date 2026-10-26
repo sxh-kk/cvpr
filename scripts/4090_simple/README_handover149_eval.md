@@ -39,6 +39,7 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
 - 训练配置和原始命令、继承的 38k 统计文件、149 条数据组成、DINO 原生 30Hz 清洁历史身份与重索引关系都匹配训练准备收据。不能重拟合统计、改 token 键或用旧 114 条 DINO 合同代替。
 - 实际模型源码匹配训练冻结的 `632968d` 关键模块；VLM 和动作头严格 CPU/meta 载入，保存动作头签名必须为六块、`state_drop_prob=0`；Motion 从本次联合权重导出并严格载入，不回退到原始 Motion 权重。
 - DINO 的模型字节、处理器和几何身份保持一致。历史参考到本次训练的 Torch / Transformers 版本转换显式记录，不声称跨版本逐位相等。
+- 导出合同顶层的 `motion_image_policy` 显式取自本次已核验 `run_config.json` 的 `data.transform.model.motion_image_policy`，并要求为 `vlm_color_clean_motion`。旧参考合同缺字段时也不能依赖默认值或用静态资源合同代替本次部署合同。
 
 准备输出为 `LOCAL_RUN_READY.json`，合同为 `cvpr-handover149-local-deployment-v1`，状态为 `local_handover149_run_prepared`。其模型硬链接、当前 Motion 导出、原始元数据、组件载入记录及 DINO 合同均位于新 `local_run` 中。原始数据和权重不改写。
 
@@ -49,6 +50,8 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
 独立运行框架需把本次模型及收据硬链接或复制到新评估根的 `source_bundle`，并从原始配置显式映射生成新 `deployment`。VLM 构造资源、当前 Motion、统计文件与 DINO `online_checkpoint` 必须指向命名空间内实际可见的新路径。不能原样使用主机配置路径，也不能改旧 114 条部署冒充本次模型。实际映射及源 SHA 由运行框架另外记录。
 
 CPU 准备不会启动模型服务、DINO 推理、GPU、SONIC 控制或 SIMPLE 物理仿真。只有随后新 149 模型在 4090 完成服务载入、真实在线历史/状态/动作接线和实际物理评估，才可报告对应测评结果。30 场景协议、SONIC v1.1、localhost 通信、RTX/TRT 身份和视频证据由独立运行框架验收；安装成功或 `LOCAL_RUN_READY` 都不等于测评通过。旧测评的 25 个已完成案例须保留，与新模型结果分开。
+
+首次 GPU 预检曾因验收端读取旧静态资源合同、且首版导出缺少上述顶层策略字段而技术失败。该失败不能当作模型输入或策略效果失败。原失败记录、首版 `local_run` 和 `LOCAL_RUN_READY.json` 保留原样；修复后的运行框架使用独立 `_r2` 链，显式绑定补字段的来源与新合同。仓库导出修复仅作用于之后新建的输出，不回写旧收据，也不重复已通过的完整权重数值验收。服务和验收端必须同时读取实际部署合同。
 
 ## CPU 回归
 

@@ -245,6 +245,16 @@ def recorded_encoder_transition(reference, actual):
         'actual_online_contract':'dino_training_contract.json retains the real149 encoder versions'}
 
 
+def bind_training_motion_image_policy(contract, config):
+    """Publish the policy from this run, independently of the older reference."""
+    policy = config['data']['transform']['model'].get('motion_image_policy')
+    require(policy == 'vlm_color_clean_motion',
+        'Require explicit vlm_color_clean_motion in the source run configuration')
+    result = deepcopy(contract)
+    result['motion_image_policy'] = policy
+    return result
+
+
 def strict_component_check(weights, config, qwen):
     """Strict-assign actual saved values into meta targets; no full CPU model allocation or forward."""
     import torch
@@ -306,7 +316,7 @@ def prepare(source, resources, output, repo, release):
     manifest = read(release/'dino/manifest.json')
     reference_contract = read(base/'dino_training_contract.json')
     runtime_transition = recorded_encoder_transition(reference_contract['encoder'],manifest['encoder'])
-    contract = deepcopy(reference_contract)
+    contract = bind_training_motion_image_policy(reference_contract,config)
     contract['encoder'] = canonical_visual_identity({'encoder':deepcopy(manifest['encoder'])})['encoder']
     contract['online_checkpoint'] = str(resources/'dinov2-with-registers-large')
     contract['source_manifest_sha256'] = sha256(release/'dino/manifest.json')

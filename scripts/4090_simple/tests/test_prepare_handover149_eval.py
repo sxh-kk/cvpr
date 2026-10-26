@@ -174,6 +174,22 @@ class SourceTests(unittest.TestCase):
 
 
 class SourceCodeAndEncoderTests(unittest.TestCase):
+    def test_exported_contract_gets_actual_training_policy_not_legacy_default(self):
+        config={'data':{'transform':{'model':{'motion_image_policy':'vlm_color_clean_motion'}}}}
+        for reference in ({'encoder':{'identity':'unchanged'}},
+                          {'encoder':{'identity':'unchanged'},'motion_image_policy':'shared_rgb'}):
+            before=deepcopy(reference)
+            contract=m.bind_training_motion_image_policy(reference,config)
+            self.assertEqual(contract['motion_image_policy'],'vlm_color_clean_motion')
+            self.assertEqual(contract['encoder'],before['encoder'])
+            self.assertEqual(reference,before)
+
+    def test_export_cannot_invent_policy_when_source_is_missing_or_different(self):
+        for model in ({},{'motion_image_policy':None},{'motion_image_policy':'shared_rgb'}):
+            config={'data':{'transform':{'model':model}}}
+            with self.subTest(model=model),self.assertRaisesRegex(ValueError,'source run configuration'):
+                m.bind_training_motion_image_policy({'motion_image_policy':'vlm_color_clean_motion'},config)
+
     def test_frozen_inference_model_code_change_is_rejected(self):
         with tempfile.TemporaryDirectory()as directory:
             root=Path(directory);bindings={}

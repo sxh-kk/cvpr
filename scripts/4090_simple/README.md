@@ -468,7 +468,11 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 浏览器只读核对无error、`no_tracking_packet`、暂停未录制，连续双臂说明且无B按钮；操作者需开启头显Send，再X校准／Y跟随。
 详情和原始证据路径见[Mobile超时诊断](../../docs/PICO_MOBILE_PP_TELEOP.md#异步-planner-超时与-cpu-分配修订)。
 
-后续`live_human_004_cpu_isolated`因`/home`写满的ENOSPC自行退出，43100连接拒绝，未被人为停止或重启。
+后续`live_human_004_cpu_isolated`因`/home`写满的ENOSPC自行退出，43100连接拒绝，未被人为停止。
 第27次未封存尝试`f0cdd5fa-3c2f-4791-9c25-79c96ae11d9e`的start receipt、capture.json和states.npy为0B，无episode.json，
 原件保留、未正式编号且排除冻结001–026，不能算官方任务失败。仅把13个旧uv.tmp缓存保留迁到/tmp并原路径symlink，恢复约2.1GB，未删除采集数据。
 该技术事故不改变18条kept的准入范围，RTX／DINO／生产读取与训练数据就绪仍未完成。
+用户随后明确要求恢复，已启动新目录`collection/live_human_005_native_only`，未复用旧标定或覆盖原件；
+页面已刷新，实测有效全身追踪、following、无error、相机ready，操作者可继续现场录制。
+启动源码SHA与native v2后台一致，planner CPU29、preview CPU30、review CPU31保持；回执为`restore_collection_005/RESTORE_COMPLETE.json`。
+另清理约3.2GB可重建的Omniverse编译纹理缓存，原始资源及采集数据未删；恢复时观测`/home`可用约338GB，不将全部容量变化归因于这次缓存清理。

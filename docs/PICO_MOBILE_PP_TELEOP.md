@@ -12,7 +12,7 @@
 **本轮 CPU 分配与诊断修订已通过 294 项 PICO CPU 回归及生产几何复核并行的 18 秒空手入口检查。
 旧 `live_human_003_continuous_vr1` 的超时证据与原数据保留，已正常退出；
 新 `live_human_004_cpu_isolated` 已实际加载并核对源码、planner CPU29 和预览 CPU30。
-加载页面快照无错误、暂停且未录制；操作者随后继续录制，之后 collector 因磁盘 ENOSPC 自行退出，未重启。
+加载页面快照无错误、暂停且未录制；操作者随后继续录制，之后 collector 因磁盘 ENOSPC 自行退出，现已按用户授权恢复为 `live_human_005_native_only`。
 本轮仅官方 native 筛选已应用到冻结的 001–026：18 条保留、3 条官方未成功、4 条技术阻塞、1 条人工丢弃意图保留；26 个完成 job 缓存已刷新。
 未封存的第 27 次尝试另保留为技术故障。独立 RTX／DINO 和训练数据就绪仍未完成。**
 下面把新操作方式与旧版证据分开说明。旧 Handover 默认 mode2、原固定 90 条候选及其交付范围保持独立。
@@ -242,7 +242,7 @@ CLI 重筛回执 `native_reselection_001/applied_receipt.json` 的 `status=commi
 ### 磁盘写满与未封存尝试
 
 `live_human_004_cpu_isolated` 后续因 `/home` 写满而发生 `OSError: ENOSPC`，collector **自行退出**，
-43100 连接拒绝；本轮没有人为停止或重启它。第 27 次尝试 UUID
+43100 连接拒绝；退出由磁盘满引起，用户随后授权恢复前未重启。第 27 次尝试 UUID
 `f0cdd5fa-3c2f-4791-9c25-79c96ae11d9e` 没有封存 `episode.json`，
 `capture_start_receipt.json`、`deferred_capture/capture.json` 和 `deferred_capture/states.npy` 为 0 字节。
 该原件完整保留在原 UUID 目录，**未正式编号，也不纳入冻结 001–026 或官方任务失败统计**；
@@ -250,6 +250,19 @@ CLI 重筛回执 `native_reselection_001/applied_receipt.json` 的 `status=commi
 
 为恢复写入空间，只将 13 个既有 uv 旧 `.tmp` 缓存保留迁移到 `/tmp`，在原路径建立符号链接，释放约 **2.1GB**；
 没有删除采集数据。磁盘恢复不等于未封存尝试已恢复完整，也不代表 collector 已恢复运行。
+
+### 用户授权恢复采集
+
+用户随后明确要求恢复，已在独立新目录 `collection/live_human_005_native_only` 重新启动同一官方场景、连续 mode1 与原有 CPU 分配，
+未覆盖旧目录或沿用旧标定。`restore_collection_005/RESTORE_COMPLETE.json` 的 `passed=true`：
+实际启动源码 SHA 全部匹配，planner CPU29、preview CPU30、native v2 review CPU31／nice19，
+页面和相机预览已恢复，全身追踪有效且操作者已重新进入 following，无 error。
+随后新保存的 **027–029** 已由新后台使用 `native_only`／`mobile-native-task-success-v2` 判为 selected/kept，
+这是新增现场记录，不属于之前冻结重筛的 001–026。
+
+恢复时另清理约3.2GB可再生成的Omniverse编译纹理缓存，原始纹理资源与采集数据均未删除。
+恢复检查观测到 `/home` 可用约338GB；不把全部容量变化归因于本次缓存清理。
+旧未封存尝试仍保留为技术故障，未补造记录，也未占用新编号027。
 
 ## 连续 mode1 初版的实测结果与范围
 

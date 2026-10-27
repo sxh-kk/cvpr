@@ -166,6 +166,8 @@ SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](
 原始外力全零、全新token为mode1，raw＋标定重建参考及token身份核对通过；均为合成空手诊断，不能称真人持物或完整任务成功。
 后续CPU隔离修订通过294项PICO CPU回归与生产几何负载并行的18秒空手入口检查；
 新review规则本轮通过330项PICO CPU及真实Node页面JS路径验证，另2项CLI通过。
-现场`live_human_004_cpu_isolated`之后因`/home` ENOSPC自行退出，未人为停止或重启；未封存的第27次尝试原件保留且不算任务失败。
+现场`live_human_004_cpu_isolated`之后因`/home` ENOSPC自行退出；未封存的第27次尝试原件保留且不算任务失败。
 仅将旧uv临时缓存保留迁到/tmp以恢复约2.1GB，未删除采集数据。
 旧v1／v2回执、replay技术失败与超时诊断均保留；完整独立RTX／DINO及训练数据就绪仍未完成。
+随后按用户明确要求恢复为独立会话`live_human_005_native_only`；实际源码匹配，planner CPU29、preview CPU30、native v2后台CPU31已核对，
+页面及相机恢复且收到有效全身追踪，操作者已重新跟随。恢复回执见`restore_collection_005/RESTORE_COMPLETE.json`，旧数据保留。

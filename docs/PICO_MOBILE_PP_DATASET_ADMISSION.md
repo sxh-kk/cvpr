@@ -5,9 +5,10 @@
 采集器已按这次要求正常退出，`COLLECTION_FINISHED.json` 确认 collector、planner 和 preview 均已退出、无 active capture。
 此后才开始 RTX 阶段；SDK 接收服务及其他任务没有因此停止或重启。
 
-**本地阶段已通过：固定 100／100 条完成原积分状态 RTX、10 阶段独立审计、无损转换、真实 clean DINO
-及 300 次 CPU 生产查询，共 61,806 帧、55,906 个训练窗口。A100 上传正在进行，远端字节核对、路径重绑和生产读取仍待验收。**
-本地通过不代表 A100 已收到全部文件或已完成交付，最终状态必须以后文远端收据为准。
+**本批 A100 数据交付已完成：固定 100／100 条完成原积分状态 RTX、10 阶段独立审计、无损转换、真实 clean DINO，
+共 61,806 帧、55,906 个训练窗口；本机和 A100 分别通过 300 次实际 CPU 生产查询。**
+初次上传的全部文件身份核对、远端 DINO 路径重绑及最终就绪收据回读均已通过，详见下文实际 A100 交付记录。
+数据验收与用户随后授权的新训练分别记录，不以数据交付完成宣称训练已启动。
 旧 Handover 固定 90 条的交付见[原交付记录](PICO_DATASET_ADMISSION.md)，其清单、合同和远端目录不用于本批。
 采集操作、场景与官方成功语义见[Mobile P&P 采集说明](PICO_MOBILE_PP_TELEOP.md)。
 
@@ -83,7 +84,7 @@ selection_policy = native_only
 
 这些入口只在采集器、自动后处理和其他 GPU 计算退出后进入 GPU 阶段；资源等待不算数据失败。
 不停止、重启或修改其他进程。数据交付流程本身不修改或启动 A100 训练；
-用户后续授权的独立训练另见[训练准备说明](#用户后续授权的独立训练尚未启动)。
+用户后续授权的独立训练另见[训练准备与实际启动](#用户后续授权的独立训练已启动完整训练待完成)。
 
 ## 独立合同与远端就绪
 
@@ -134,8 +135,8 @@ Mobile 使用明确的合同和 exact task ID；旧 Handover 合同仅保持旧�
 /home/zxc/CVPR_Evaluation_runtime/pico_mobile_pp100_20261027_human01
 ```
 
-其 `PROCESSING_STATUS.json` 记录 `status=local_verified_uploading`，100 个 UUID 全部
-`eligible_for_packing=true`，与冻结清单完全一致，没有拒收、追加或替换。
+100 个 UUID 全部 `eligible_for_packing=true`，与冻结清单完全一致，没有拒收、追加或替换。
+本地发布目录保留本机就绪回执，并在远端实际验收后回存最终 A100 回执。
 包内 100 份独立 admission 各有 10 个检查阶段且全部通过；RTX、无损 MP4 逐像素回读与 Parquet 逐值回读已完成。
 `packed/PACK_READY.json` 实际记录 100 条、**61,806 帧和 55,906 个完整训练窗口**；
 该窗口数已由本地生产读取验收，不再只是 `61,806 - 59×100` 的协议推导。
@@ -160,29 +161,51 @@ float32 存储和 bf16 推理身份，`extraction.training=false`，没有在线
 - `dino/manifest.json`：`a19b709473e8c884eb24034469fc8bf5fa890f315b1f380c1bd556b4d4dca199`。
 - `PICO_DATASET_READY.json`：`81e4fe7550f028940abd82884bef854573b57b2c05db6f28557cc638b2615b3c`。
 
-## A100 上传进行中与待验收阶段
+## 2026-10-28 实际 A100 交付完成
 
-`A100_TRANSFER_MANIFEST.json` 已固定 **3,070 个文件、37,307,298,981 字节**，
-绑定上述本地就绪 SHA 和独立 Mobile 远端目标；此计数表示待传输清单，不表示远端已完成校验。
-本地流程已进入上传。北京时间 22:40:40–22:40:50 的只读网络抽样中，
-上传专属 SSH 连接约 10.109 秒获 TCP ACK 50,983,680 字节，约 5.04MB/s，rsync 读写计数同步增长。
-这是短时实际传输进展，不是全量吞吐验收、完成百分比或剩余时间承诺。
-`rsync --info=stats2` 主要在结束时输出统计，日志暂不增长不能单独作为停滞证据。
+独立目标 `/gaozt-test1/datasets/SIMPLE_sonic_v1_1/pico_mobile_pp_20261027_human100_01` 已完成交付。
+`A100_TRANSFER_MANIFEST.json` 固定的 **3,070 个文件、37,307,298,981 字节**全部通过远端 SHA、大小及纳秒 mtime 核对。
+`A100_BYTE_VERIFICATION.json` 的 `status=all_copied_bytes_and_identities_verified`；
+它保留字节阶段的 `remote_production_ready=false`／`DINO_relocation_pending=true`，属于该阶段原始收据，
+后续最终验收不回写这些历史状态。
 
-**目前不能宣称 A100 上传完成、远端生产读取通过或本批交付完成。**
-本地就绪回执仍为 `remote_production_ready=false`、`DINO_relocation_pending=true`。
-剩余阶段是全部文件远端 SHA／大小／纳秒 mtime 核对、固定提交独立快照中的 DINO 路径重绑，
-以及 A100 实际 CPU 生产读取和最终 `A100_PICO_DATASET_READY.json` 回读验收。
-期间不修改或启动 A100 训练。所有运行数据、日志、资源与权重均保存在仓库外。
+远端使用数据代码提交 `69d306352760ed26cdee8e41af8d13f49cc273cb` 的独立快照，
+完成 DINO 本机路径重绑与签名更新，保留 `dino.before-remote-relocation` 原缓存。
+训练数据与特征数组保持原字节，`PACK_READY.json` 没有改写；重绑后的 DINO manifest 使用新的实际摘要。
+实际 A100 CPU Dataset／collator 通过 **300 次首／中／末生产查询**，覆盖全部100条，
+最终收据绑定 **3,171 个当前 payload 文件**以及100份cache记录；这与初次传输清单属于不同阶段，计数不可混用。
+验收进程隐藏 GPU、nice19、仅限定自身 CPU127，没有启动策略或训练。
 
-## 用户后续授权的独立训练：尚未启动
+`A100_PICO_DATASET_READY.json` 于北京时间 **2026-10-28 00:37:28**生成，
+`status=passed`、`remote_production_ready=true`、`DINO_relocation_pending=false`，
+记录100条／61,806帧／55,906窗口。回读时再次核对当前文件身份，
+`PROCESSING_STATUS.json` 于 **00:40:55**记录 `A100_ready_for_training_not_started`，流水线正常退出。
+
+最终实际摘要为：
+
+- `A100_BYTE_VERIFICATION.json`：`20c90142d2950ed99ef2ffaa410379b07ea51cf8924eb6ee2a410ec743de7cea`。
+- 重绑后的 `dino/manifest.json`：`8369929e3e6c89c97192a107a2ab18b86d206d4e79084be2d16bca154ba46c27`。
+- 未改写的 `packed/PACK_READY.json`：`5208307c097baf7bae6553cc7fdc5db51d0a6ef21efe9ab4c9b9e6e2599e6957`。
+- 最终 `A100_PICO_DATASET_READY.json`：`38b15799606518761eb1e45929be6b189c1bf79a83c690c1a6e781dea2663d21`。
+
+本机 `PICO_DATASET_READY.json` 仍保存当时本地验收的 pending 标志，远端最终状态以独立 A100 回执为准。
+最终数据回执中的 `GPU_used=false`、`CUDA_initialized=false`、`policy_constructed=false`、`training_started=false`
+描述**这次 CPU 数据验收事件**；不否认之前的 RTX／DINO GPU 计算，也不禁止用户随后授权的新训练。
+本次数据交付没有修改旧训练或旧数据。所有运行数据、日志、资源与权重均保存在仓库外。
+
+## 用户后续授权的独立训练：已启动，完整训练待完成
 
 用户最新要求：**等本批上传和 A100 实际生产就绪验收全部通过后，沿用上次 Handover114 的实际配置
-训练一次，从 4,000 步开始每 500 步保存模型。** 当前仍在上传，新训练入口
+训练一次，从 4,000 步开始每 500 步保存模型。** 数据交付与实际 A100 READY 现已完成；新训练入口
 [`a100_mobile_pp100.py`](../scripts/4090_simple/a100_mobile_pp100.py) 已通过独立 review 和 38 项 CPU 回归
-（19 项新入口＋19 项旧入口），但尚未准备或启动；实际 GPU、完整训练及13次保存仍待验收。
-远端 READY 也尚未通过。新的 prepared／run 拟用 `/root/workspace/mobile_pp_human100_train_20261027`，
-只读检查时该目录尚不存在；不能复用旧 Handover run 或向交付清单中加入训练产物。
+（19 项新入口＋19 项旧入口）。训练入口提交 `3e7aa6ce507a0103afd88caf107ce71dbc881e02` 已单独部署到
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp100_training_20261027/code/3e7aa6ce507a0103afd88caf107ce71dbc881e02`，
+22个部署文件的SHA已核准。首轮 `/root/workspace/mobile_pp_human100_train_20261027` 的启动被容量门拦住，
+该次未启动 GPU；第二次准备改用数据盘独立目录
+`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp100_training_20261027/run_001`，
+已通过 prepare、CPU check，并于北京时间 **2026-10-28 00:46:39**实际启动8卡训练。
+前2／20步GPU健康检查已通过，10,000步完整训练及13次保存仍待完成，详见本节末的实际启动记录。
+不复用旧 Handover run，也不向数据交付清单中加入训练产物。
 
 本地已只读归档上次配置、实际 resolved config、启动记录及源码原字节，位于：
 
@@ -222,14 +245,34 @@ float32 存储和 bf16 推理身份，`extraction.training=false`，没有在线
 新入口明确标记 `historical_handover_regression_only_not_mobile_validation`；
 本批 Mobile 100 条继续全部为 `train_only`，不拆出人工 VAL，不把 Handover loss 报成 Mobile 验证损失。
 
-下面是已落盘入口的命令模板，**只有最终 A100 READY 通过后才适用**。在远端包含该入口的独立代码根下运行；
-`MOBILE_TRAIN_REFERENCE` 和 `MOBILE_A100_READY_SHA256` 分别使用已部署原字节参考目录和实际最终远端收据 SHA。
+### 输出盘容量门与第二次准备
+
+首轮拟输出所在 root 盘，`supervisor.log` 拦截时记录可用 `61,002,874,880` 字节，
+稍后只读 stat 为 `61,002,878,976` 字节，均小于启动门要求的 `250,339,174,916` 字节。
+因此该次在 GPU 启动前拒绝继续，没有生成 `training_state.json`。
+旧 `/root/workspace/mobile_pp_human100_train_20261027` prepared、首轮 `DISPATCH_RECEIPT` 及
+`supervisor.log` 中的容量错误保留，不覆盖、不清理旧权重。
+这属于输出容量技术尝试，不计为数据拒收或 GPU 训练失败，已通过的 A100 数据就绪结果不变。
+
+随后只读检查数据盘可用 `6,998,150,086,656` 字节，新 `run_001` 当时尚不存在。
+第二次 prepare／CPU check 已在上述数据盘新目录通过，仍为入口提交 `3e7aa6ce507a0103afd88caf107ce71dbc881e02`，
+仅改变独立输出及其 data 绑定路径，初始化、训练数值配置与13个保存节点不变。
+这次数据盘训练随后已启动并通过前20步健康检查；13份模型的实际保存尚未完成。
+
+下面是本次已执行入口及绑定的**等价历史命令记录，不是待操作模板**。
+**`run_001` 已存在且运行中，不对当前 run 再次 prepare、run 或 launch。**
+原字节参考位于已部署入口快照的 `reference/`，最终远端收据 SHA 已明确写入。
 `training100_001/REMOTE_CPU_SCOPE_001.json` 记录普通训练会话完整允许 CPU 为 `0-127`，
 此次只读检查自身则为 CPU127／nice19／GPU隐藏；命令中的 `--training-cpus 0-127` 声明以后实际训练的范围，
 不是让 CPU 准备进程占用全部 CPU。
 
 ```bash
-MOBILE_TRAIN_OUTPUT=/root/workspace/mobile_pp_human100_train_20261027
+# 已执行入口的等价历史记录；不要对当前 run 再次执行。
+MOBILE_TRAIN_SOURCE=/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp100_training_20261027/code/3e7aa6ce507a0103afd88caf107ce71dbc881e02
+MOBILE_TRAIN_REFERENCE="$MOBILE_TRAIN_SOURCE/reference"
+MOBILE_TRAIN_OUTPUT=/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp100_training_20261027/run_001
+MOBILE_A100_READY_SHA256=38b15799606518761eb1e45929be6b189c1bf79a83c690c1a6e781dea2663d21
+cd "$MOBILE_TRAIN_SOURCE"
 
 env CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   taskset -c 127 nice -n 19 \
@@ -246,8 +289,45 @@ env CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 ```
 
 准备与 CPU check 显式隐藏 GPU、nice19、仅绑定自身 CPU127，不启动 GPU 训练。
-实际启动须在这些检查通过后，使用**另开的普通 SSH 会话**，
-保持已声明的 CPU0-127 完整训练亲和性及 nice0，再执行 `bash "$MOBILE_TRAIN_OUTPUT/launch.sh"`。
+本次实际启动在这些检查通过后，使用**另开的普通 SSH 会话**，
+保持已声明的 CPU0-127 完整训练亲和性及 nice0，执行独立 run 的启动入口
+（等价于 `bash "$MOBILE_TRAIN_OUTPUT/launch.sh"`，已执行，不再重跑）。
 不能从 GPU 隐藏、nice19、仅 CPU127 的只读检查包装器继承启动训练。
 新入口在准备前要求实际远端 READY，并在启动前检查独立输出容量和所选 GPU 状态；
-这些启动检查及13次保存的真实结果仍待执行，不能用本地 CPU 测试代替。
+这次实际启动已经通过这些门，不能把CPU测试或短时健康检查当作完整训练与保存验收。
+
+### 2026-10-28 实际启动与前20步GPU健康检查
+
+`training100_001/PREPARE_CHECK_RECEIPT_002.json` 的 `status=prepared_and_cpu_check_passed`，
+绑定最终 A100 READY、100条／55,906个Mobile训练窗口与40个历史Handover回归窗口。
+实际 `run_config.json` SHA 为 `854042b54d4b31d8b30c495539c4b220cf9dfa31b5570d8e052111a9137683b8`，
+`argv.txt` SHA 为 `a8d73892ea5449d9852dea28a399e1ca91c40056b30ca9e4cbc0f9e5800b1559`。
+启动前 `launch_acceptance.json` 核对3,171个当前payload及初始化权重SHA后通过。
+
+实际 project 目录为：
+
+```text
+/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp100_training_20261027/run_001/training/posttrain/mobile_pp100_joint38000_statekeep_8gpu.us.flow1000.cosine.lr1.0e-05.b64.gpus8.261027164426
+```
+
+训练于 UTC `2026-10-27T16:46:39.202102Z`（北京时间10月28日00:46:39）启动，
+torchrun PID为 `1581879`，launcher PID为 `1581769`；实际使用CPU0-127、nice0，未修改其他进程。
+原数据验收时的 `training_started=false` 继续保留为历史事件，当前训练状态由新run单独记录。
+实际初始化回执确认 joint38000 严格模型加载、fresh optimizer／scheduler／RNG、global batch64、
+fused AdamW／`foreach=false`；8个rank的状态策略迁移回执均为 `passed`。
+
+`TRAINING_STATUS_LATEST.json` 与 `TRAINING_HEALTH_ACCEPTANCE_002.json` 记录：
+
+- 2步和20步GPU健康检查均通过，每卡实际动作形状 `8×30×80`，8个rank每个batch均同步梯度更新。
+- 各卡loss及clip前梯度有限，fused优化器及内存健康检查通过；
+  每个可训练张量抽4值、每rank共7,700个探针，跨rank一致。
+- 该证据是**前20步的有界探针检查**，不表示全部参数逐位一致、全程训练通过或任务准确率。
+- 健康回执生成时为北京时间 **00:54:06**，尚无checkpoint，符合首个模型在4,000步保存的策略；
+  `all13_checkpoints_verified=false`，10,000步完整训练与13份模型保存尚未完成。
+
+健康回执 SHA 为 `b24f3657e1ee20b01a7e67b30f5ee82a49771adf7ea76d4eb1e69a07ee63c292`。
+这些是已发生的启动与短时健康记录，不将其作为之后训练状态持续不变的保证。
+
+本线程已安排 `mobile100-a100` 每小时继续核对这个现有 run，正常状态不发送更新。
+完整10,000步、全部13份模型、最近2份完整恢复状态及最终health均验收后，停止该后续检查；
+`CONTINUATION_MONITOR.json` 记录此范围，目前不把后续验收安排当作整轮训练已完成。

@@ -454,14 +454,18 @@ Mobile 按用户要求使用 `selection_policy=native_only`、版本 `mobile-nat
 `audit_pico_teleop_episode.py`、无损转换／就绪及上传现有显式Mobile任务派发和独立合同。
 准备阶段114项CPU验证记录保留；固定100／100条已实际通过RTX和10阶段独立审计、无损转换，
 共61,806帧／55,906窗口，100份真实clean DINO缓存及300次本地CPU生产查询通过，无拒收或替换。
-首002早期技术失败与旧日志保留。A100上传正在进行，远端字节／路径／生产读取尚待验收，不能称交付完成。固定清单、协议及就绪门见
+首002早期技术失败与旧日志保留。A100初次传输3070文件／37,307,298,981字节的SHA／size／纳秒mtime全过，
+路径重绑及300次实际A100 CPU查询通过，最终READY绑定3171个当前payload，`remote_production_ready=true`、pending=false，数据交付完成。固定清单与实际回执见
 [Mobile固定100条数据核定与交付](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md)。
 用户另行授权待实际A100 READY后，用独立 `a100_mobile_pp100.py` 新run沿用旧Handover114实配：
 joint38000仅模型初始化、fresh step0、8卡×batch8／全局64、10,000步、bf16／fused AdamW，原LR与seed保持。
 4,000／4,500／…／10,000保存13份模型，完整恢复状态保留2份，validation仍1,000；
 旧Handover5条40固定窗口仅回归监控，Mobile100全部train_only，无Mobile验证成绩。
-入口已通过独立review及38项CPU回归，未准备或启动；实际GPU与完整保存仍待验收。实际CLI模板、参考SHA与启动会话要求见
-[Mobile训练准备](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练尚未启动)。
+入口已通过独立review及38项CPU回归并单独部署；首轮root盘容量门在GPU前拦截，原prepared与错误回执保留，未记数据拒收或GPU训练失败。
+同一代码／数值配置的数据盘独立`run_001`已通过prepare／CPU check，于10月28日00:46:39实际启动8卡训练，前2／20步GPU健康检查通过。
+实际每卡8×30×80、梯度每batch同步，loss／clip前梯度有限；每可训练张量4值共每rank7700探针一致，不能称全参数逐位或全程验收。
+健康回执时尚无checkpoint，符合首4000步保存；完整10,000步与13份保存尚未完成。实际CLI、参考SHA与状态见
+[Mobile实际训练](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练已启动完整训练待完成)。
 
 Mobile 本轮针对 `planner_request_expired_no_reference` 修订 CPU 分配与故障诊断。
 旧003的四次超时与16:57:51–16:58:36后台review区间重叠，planner和review同用CPU31/nice19，

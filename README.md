@@ -157,11 +157,13 @@ SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](
 采集器正常退出后进入RTX；不追加或替换样本。显式Mobile独立审计、无损转换、DINO生产读取与上传合同
 准备阶段114项CPU测试通过；固定100／100条已实际通过RTX、10阶段独立审计、无损转换和真实clean DINO，
 共61,806帧／55,906窗口，300次本地CPU生产查询通过，无拒收或替换。
-A100上传正在进行，远端字节／路径／生产读取仍待验收，见[Mobile固定100条数据核定与交付](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md)。
+A100全部传输字节／文件身份、DINO路径重绑及300次实际CPU生产查询均通过，最终READY的`remote_production_ready=true`，
+固定100条数据交付完成，见[Mobile固定100条数据核定与交付](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md)。
 用户已授权在实际A100 READY后另开独立训练：沿用Handover114的joint38000模型初始化／fresh step0，
 8卡×batch8、10,000步、bf16／fused AdamW，4,000起每500步保存13份模型、保留2份完整恢复状态，验证间隔仍1,000。
-旧Handover5条40窗口只作回归监控，Mobile100全部train_only，没有Mobile验证集成绩；新入口通过38项CPU回归与独立review，尚未准备／启动，
-详见[Mobile训练准备](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练尚未启动)。
+旧Handover5条40窗口只作回归监控，Mobile100全部train_only，没有Mobile验证集成绩；新入口通过38项CPU回归与独立review并单独部署，
+首轮root盘容量门在GPU前拦截，证据保留。数据盘独立`run_001`已于10月28日00:46:39实际启动8卡训练，前2／20步有限loss／梯度及有界跨rank探针检查通过；
+完整10,000步与13份保存尚未完成，详见[Mobile实际训练](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练已启动完整训练待完成)。
 按用户最新要求，Mobile以`native_only`／`mobile-native-task-success-v2`只筛实际保存的官方native成功，
 移除额外位移、抬升、持物、末段稳定／几何成功门；SHA、时钟、有限性、原始外力等技术完整性保留，异常不能冒充任务失败。
 实际任务绑定`.9`阈值与源码SHA；环境每步两次reward更新，官方eval遇terminated退出，所以`any(native)`表示曾达官方终止成功，环境并不latch。

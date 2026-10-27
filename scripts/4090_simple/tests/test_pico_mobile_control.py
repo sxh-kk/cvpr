@@ -6,13 +6,14 @@ from pathlib import Path
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pico_mobile_control import (
     CONTINUOUS_CONTRACT, MobileControlConfig, MobileControlError, MobilePlannerControl,
-    SynchronousDiagnosticWorker, neutral_controls, transition_ready,
+    SynchronousDiagnosticWorker, mobile_planner_cpu_allocation, neutral_controls, transition_ready,
 )
 from prepare_carrybox_v11 import POLICY_TO_BODY
 from sonic_locomotion_planner import AsyncPlanner, Forecast, PlannerResult
@@ -97,6 +98,37 @@ class SpawnFakePlanner:
 
 
 class MobileBridgeTests(unittest.TestCase):
+    def test_default_mobile_worker_reserves_a_cpu_distinct_from_preview_and_background_review(self):
+        inherited = [2, 5, 9, 12, 16]
+        allocation = mobile_planner_cpu_allocation(reversed(inherited))
+        self.assertEqual(allocation['planner_cpus'], [9])
+        self.assertEqual(allocation['preview_cpus'], [12])
+        self.assertEqual(allocation['background_review_cpus'], [16])
+        self.assertTrue(allocation['isolation_available'])
+        self.assertFalse(allocation['physical_exclusivity_claimed'])
+        fake = FakeWorker(Clock())
+        with patch('pico_mobile_control.os.sched_getaffinity', return_value=set(inherited)), \
+                patch('pico_mobile_control.AsyncPlanner', return_value=fake) as factory:
+            bridge = MobilePlannerControl('unused_default_model')
+        self.addCleanup(bridge.close)
+        factory.assert_called_once_with('unused_default_model', timeout_s=.2, cpu_affinity=[9])
+        self.assertEqual(bridge.status()['cpu_allocation'], allocation)
+        self.assertEqual(bridge.config.planning_timeout_s, .2)
+
+    def test_small_affinity_is_reported_unisolated_without_extending_point_two_second_timeout(self):
+        for inherited in ([8], [8, 10]):
+            fake = FakeWorker(Clock())
+            with patch('pico_mobile_control.os.sched_getaffinity', return_value=set(inherited)), \
+                    patch('pico_mobile_control.AsyncPlanner', return_value=fake) as factory:
+                bridge = MobilePlannerControl('unused_default_model')
+            self.addCleanup(bridge.close)
+            allocation = bridge.status()['cpu_allocation']
+            self.assertFalse(allocation['isolation_available'])
+            self.assertFalse(allocation['physical_exclusivity_claimed'])
+            self.assertEqual(allocation['planner_cpus'], inherited[-1:])
+            factory.assert_called_once_with('unused_default_model', timeout_s=.2, cpu_affinity=inherited[-1:])
+            self.assertEqual(bridge.config.planning_timeout_s, .2)
+
     def bridge(self, *, ready=True, config=None, diagnostic=False, reference_policy='locked_upper_mode0'):
         self.clock = Clock()
         self.worker = FakeWorker(self.clock)
@@ -274,6 +306,40 @@ class MobileBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge.active)
         with self.assertRaises(MobileControlError):
             self.step(bridge, 2)
+
+    def test_timeout_fault_preserves_pending_worker_and_cpu_receipt_after_pause(self):
+        bridge = self.prepared()
+        self.step(bridge, 0)
+        self.step(bridge, 1, ly=1.)
+        pending = json.loads(json.dumps(bridge.pending))
+        status = {'status': 'working', 'ready': True, 'request_id': pending['id'],
+                  'last_queue_wait_s': .01, 'last_inference_wall_s': .19,
+                  'policy': {'cpus': bridge.cpu_allocation['planner_cpus']}}
+        self.worker.status = lambda: status
+        self.clock.value = pending['expires'] + .001
+        self.assertAlmostEqual(pending['expires'] - pending['submitted_tick50'] / 50 - 100., .2, places=6)
+        with self.assertRaisesRegex(MobileControlError, 'expired'):
+            bridge.step(2, ROOT, BODY, frame(self.clock(), 2, ly=1.))
+        fault = bridge.status()['last_fault']
+        self.assertEqual(fault['pending_request'], pending)
+        self.assertEqual(fault['worker_status'], status)
+        self.assertEqual(fault['reason'], 'planner_request_expired_no_reference')
+        self.assertEqual(fault['tick50'], 1)
+        self.assertEqual(fault['host_monotonic'], self.clock())
+        self.assertEqual(fault['cpu_allocation'], bridge.cpu_allocation)
+        self.assertIsNone(bridge.pending)
+        self.assertIsNone(bridge.active)
+        self.assertEqual(bridge.status()['status'], 'paused')
+        bridge.pause('collector_paused')
+        self.assertEqual(bridge.status()['last_fault'], fault)
+        fault['pending_request']['command']['mode'] = 999
+        status['policy']['cpus'].append(999)
+        saved = bridge.status()['last_fault']
+        self.assertEqual(saved['pending_request'], pending)
+        self.assertNotIn(999, saved['worker_status']['policy']['cpus'])
+        with self.assertRaises(MobileControlError):
+            bridge.step(2, ROOT, BODY, frame(self.clock(), 2, ly=1.))
+        self.assertEqual(bridge.status()['last_fault'], saved)
 
     def test_old_worker_id_and_expired_return_are_rejected(self):
         for result_id, expires in ((99, None), (None, 99.)):

@@ -417,18 +417,37 @@ offset 只加一次；每包的局部三点经当前实际 root 完整平移／�
 设备设置、操作顺序、FK／坐标约定、SHA 与验证边界见
 [Mobile P&P 采集说明](../../docs/PICO_MOBILE_PP_TELEOP.md)。
 
-新连续策略本轮 **291 项 PICO CPU 回归全部通过，无 skip**，
+连续mode1初版 **291 项 PICO CPU 回归全部通过，无 skip**，
 `continuous_mode1_001/CONTINUOUS_MODE1_ENTRY_ACCEPTANCE.json` 已通过实际场景／SONIC／异步 planner／EGL 空手检查。
 002为14秒、689个50Hz tick／413个新30Hz token，最大lag3.8955ms；面向桌子受空间限制，净位移仅0.0843m，不能称自由行走。
 003先转再前进16秒、789 tick／473 token，最大lag3.8082ms，实际转向-186.10°、净XY位移0.54531m，
 最低骨盆0.76586m、最大倾角6.4783°，双臂实关节确有运动。两次原始外力全零、全部新token为mode1，
 raw包＋标定重建世界VR参考零误差，token SHA一致；均为合成空手诊断，不计真人／持物／训练准入。
 001诊断 replay 重复包接收时间的技术失败与修复保留，live验证门未改。
-旧`live_human_002_v2`已正常stopped并保留数据；新`live_human_003_continuous_vr1`已加载，
-`continuous_mode1_001/RELOAD_COMPLETE.json`核对实际源码和mode1策略，浏览器已刷新、隐藏B并显示连续双臂说明。
-核对时无错误、暂停未录制、`no_tracking_packet`，等待头显Send与操作者X／Y。
+旧`live_human_002_v2`与后续`live_human_003_continuous_vr1`均已正常停止，原数据保留；003曾核对mode1加载，随后出现planner超时。
+新会话`live_human_004_cpu_isolated`已加载；本轮CPU分配、并发检查与独立重载回执见下方。
+历史003的`continuous_mode1_001/RELOAD_COMPLETE.json`曾核对源码／mode1及隐藏B的页面；
+当时暂停未录制、等待追踪，该快照不是故障后或当前新会话状态。
 旧268项CPU回归、9秒v2 IDLE检查及更早004分别只覆盖旧策略。
 
 Mobile 物理预检查不要求 Handover 交接顺序；`kept` 只代表 raw 物理预检查，
 尚未进入完整独立 RTX／DINO／训练准入。此 launcher 退出后只等待本次后台复核并封存，
 不调用旧 Handover 的 `finish_pico_session.py`／`audit_pico_teleop_episode.py`，不自动补图、上传或启动训练。
+
+Mobile 本轮针对 `planner_request_expired_no_reference` 修订 CPU 分配与故障诊断。
+旧003的四次超时与16:57:51–16:58:36后台review区间重叠，planner和review同用CPU31/nice19，
+已接受计划的ORT墙钟中位数71.56→133.11ms；旧失败请求缺完整耗时拆分，不能声称精确原因或必然复现。
+Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开本入口preview30/review31；不改其他任务或声称全机／物理核心独占，
+少于三个可用CPU记录`isolation_available=false`。`AsyncPlanner(cpu_affinity=...)`可选，默认兼容；新增排队／完整墙钟／进程CPU诊断与持久化`last_fault`。
+0.20秒deadline保持，过期结果不复用。真实planner＋CPU31受控busy负载的旧31／新29各12/12在200ms内交付，
+最大完整墙钟141.28／68.20ms，说明减少抢占，未复现deadline失败。
+`control_timeout_fix_001/CPU_ISOLATION_ENTRY_ACCEPTANCE.json`已通过：生产`complete_quality_geometry`在CPU31只读同一封存1700行raw两遍，
+耗时23.56／34.94秒，raw/cache SHA未改；与18秒Mobile／SONIC／async／EGL控制重叠99.8855%。
+890个实际50Hz tick、534个新30Hz token、103个不同已接受规划请求，实际worker均CPU29；全mode1／有限／零外力、ledger tokenSHA一致，无rejection。
+最大控制lag4.431888ms、完整planner请求87.124684ms、排队14.607986ms，期限仍200ms。
+本轮294项PICO CPU全过无skip，独立review的19项planner（含真spawn排队过期／清旧指标）和28项control测试全过。
+这些是生产几何负载下短时合成空手检查，不能证明永不超时、真人持物成功或训练准入。
+`control_timeout_fix_001/RELOAD_COMPLETE.json`另确认新`live_human_004_cpu_isolated`已加载，源码SHA逐项匹配；
+实际planner PID3812334在CPU29、preview PID3812414在CPU30，review在CPU31。
+浏览器只读核对无error、`no_tracking_packet`、暂停未录制，连续双臂说明且无B按钮；操作者需开启头显Send，再X校准／Y跟随。
+详情和原始证据路径见[Mobile超时诊断](../../docs/PICO_MOBILE_PP_TELEOP.md#异步-planner-超时与-cpu-分配修订)。

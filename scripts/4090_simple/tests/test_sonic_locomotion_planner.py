@@ -1,5 +1,6 @@
 from copy import deepcopy
 import math
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -101,7 +102,8 @@ class FakeCPUPlanner:
         qpos = np.tile(context[0], (60,1))
         qpos[:,0] = command['seed']
         forecast = adapter.Forecast(qpos, np.zeros((60,29)), np.ones(60,bool), {'synthetic_test':True})
-        return forecast, forecast, {'synthetic_test':True, 'command':command, 'model_loaded':False}, {}, None
+        return forecast, forecast, {'synthetic_test':True, 'command':command, 'model_loaded':False,
+            'worker_pid':os.getpid(), 'worker_actual_cpu_affinity':sorted(os.sched_getaffinity(0))}, {}, None
 
 
 def wait_until(predicate, timeout=8.):
@@ -129,6 +131,81 @@ class AsyncPlannerTests(unittest.TestCase):
         kwargs={'mode':mode,'movement_world':[1,0,0] if mode else [0,0,0],
             'facing_world':[1,0,0],'speed':speed,'seed':seed,'timeout_s':timeout_s}
         return planner.submit(context, alignment, **kwargs)
+
+    def test_explicit_worker_affinity_is_the_real_child_affinity_and_parent_is_unchanged(self):
+        inherited = sorted(os.sched_getaffinity(0))
+        requested = inherited[:1]
+        planner = self.planner(cpu_affinity=requested)
+        self.assertEqual(planner.cpu_affinity, tuple(requested))
+        self.request(planner, mode=0, speed=-1., seed=11)
+        result = wait_until(planner.poll)
+        self.assertNotEqual(result.evidence['worker_pid'], os.getpid())
+        self.assertEqual(result.evidence['worker_actual_cpu_affinity'], requested)
+        self.assertEqual(result.evidence['async_cpu_worker']['cpus'], requested)
+        self.assertTrue(result.evidence['async_cpu_worker']['explicit_cpu_affinity'])
+        self.assertEqual(result.evidence['async_cpu_worker']['inherited_cpus'], inherited)
+        self.assertEqual(sorted(os.sched_getaffinity(0)), inherited)
+
+    def test_invalid_affinity_never_starts_a_worker_or_escapes_inherited_cpus(self):
+        inherited = sorted(os.sched_getaffinity(0))
+        allowed = inherited[0]
+        for value in ([], (), [allowed, allowed], [True], [-1], [float(allowed)],
+                      str(allowed), {allowed}, [max(inherited) + 10000]):
+            with self.subTest(cpu_affinity=value):
+                with self.assertRaises(ValueError):
+                    adapter.AsyncPlanner('unused_test_model', planner_factory=FakeCPUPlanner, cpu_affinity=value)
+
+    def test_default_affinity_keeps_legacy_last_inherited_cpu_policy(self):
+        inherited = sorted(os.sched_getaffinity(0))
+        planner = self.planner()
+        self.assertIsNone(planner.cpu_affinity)
+        self.request(planner, mode=0, speed=-1.)
+        result = wait_until(planner.poll)
+        self.assertEqual(result.evidence['worker_actual_cpu_affinity'], inherited[-1:])
+        self.assertFalse(result.evidence['async_cpu_worker']['explicit_cpu_affinity'])
+
+    def test_worker_reports_separate_queue_wall_and_process_cpu_time_without_relaxing_deadline(self):
+        planner = self.planner(cpu_affinity=sorted(os.sched_getaffinity(0))[:1])
+        request = self.request(planner, mode=0, speed=-1., timeout_s=.2)
+        result = wait_until(planner.poll)
+        state = wait_until(lambda: planner.status() if planner.status().get('inference_calls', 0) >= 1 else None)
+        self.assertEqual(result.request_id, request)
+        for key in ('last_queue_wait_s', 'last_inference_wall_s', 'last_inference_process_cpu_s',
+                    'last_request_total_wall_s'):
+            self.assertTrue(math.isfinite(state[key]), key)
+            self.assertGreaterEqual(state[key], 0., key)
+        self.assertAlmostEqual(state['last_request_total_wall_s'],
+                               state['last_queue_wait_s'] + state['last_inference_wall_s'], delta=1e-6)
+        self.assertAlmostEqual(state['last_request_expires_monotonic'] - state['last_request_submitted_monotonic'],
+                               .2, delta=1e-6)
+        self.assertGreaterEqual(state['last_inference_completed_monotonic'], state['last_inference_started_monotonic'])
+        self.assertEqual(result.evidence['async_worker_timing'], {key: state[key] for key in (
+            'last_queue_wait_s', 'last_inference_wall_s', 'last_inference_process_cpu_s', 'last_request_total_wall_s')})
+
+    def test_expired_in_queue_rebinds_request_and_clears_previous_inference_metrics(self):
+        planner = self.planner(cpu_affinity=sorted(os.sched_getaffinity(0))[:1])
+        self.request(planner, mode=0, speed=-1., seed=10)
+        wait_until(planner.poll)
+        previous = wait_until(lambda: planner.status() if planner.status().get('inference_calls', 0) >= 1 else None)
+        self.assertIsNotNone(previous['last_inference_wall_s'])
+        slow = self.request(planner, speed=123, seed=11)
+        wait_until(lambda: planner.status().get('status') == 'working'
+                   and planner.status().get('request_id') == slow)
+        queued = wait_until(lambda: self.request(planner, mode=0, speed=-1., seed=12, timeout_s=.02))
+        submitted = planner._latest['submitted_monotonic']
+        expires = planner._latest['expires_monotonic']
+        state = wait_until(lambda: planner.status() if planner.status().get('expired_results', 0) >= 1 else None)
+        self.assertEqual(state['status'], 'expired')
+        self.assertEqual(state['request_id'], queued)
+        self.assertTrue(state['expired_before_inference'])
+        self.assertEqual(state['last_request_submitted_monotonic'], submitted)
+        self.assertEqual(state['last_request_expires_monotonic'], expires)
+        self.assertGreaterEqual(state['last_queue_wait_s'], .02)
+        self.assertGreaterEqual(state['last_request_total_wall_s'], .02)
+        for key in ('last_inference_started_monotonic', 'last_inference_completed_monotonic',
+                    'last_inference_wall_s', 'last_inference_process_cpu_s'):
+            self.assertIsNone(state[key], key)
+        self.assertIsNone(planner.poll())
 
     def test_load_runs_in_isolated_cpu_worker_and_idle_is_explicit_once_only(self):
         import time

@@ -297,7 +297,7 @@ class _Mailbox:
         return pickle.loads(value) if value else None
 
 
-def _cpu_worker_policy():
+def _cpu_worker_policy(cpu_affinity=None):
     import os
     for key in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
                 'NUMEXPR_NUM_THREADS', 'BLIS_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
@@ -305,9 +305,12 @@ def _cpu_worker_policy():
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     policy = {'cpu_only': True, 'ORT_intra_op_threads': 1, 'ORT_inter_op_threads': 1}
     if hasattr(os, 'sched_getaffinity'):
-        cpus = sorted(os.sched_getaffinity(0))[-1:]
+        inherited = sorted(os.sched_getaffinity(0))
+        cpus = list(cpu_affinity) if cpu_affinity is not None else inherited[-1:]
+        require(bool(cpus) and set(cpus).issubset(inherited), 'Planner CPUs must be in inherited affinity')
         os.sched_setaffinity(0, cpus)
-        policy['cpus'] = cpus
+        policy.update(cpus=sorted(os.sched_getaffinity(0)), inherited_cpus=inherited,
+            explicit_cpu_affinity=cpu_affinity is not None)
     if hasattr(os, 'nice'):
         os.nice(max(0, 19-os.getpriority(os.PRIO_PROCESS, 0)))
         policy['nice'] = os.getpriority(os.PRIO_PROCESS, 0)
@@ -321,9 +324,9 @@ def _cpu_worker_policy():
     return policy
 
 
-def _planner_process(model_path, factory, requests, results, statuses, wakeup, stop):
+def _planner_process(model_path, factory, requests, results, statuses, wakeup, stop,cpu_affinity):
     import os
-    policy = _cpu_worker_policy()
+    policy = _cpu_worker_policy(cpu_affinity)
     guard = policy.pop('_thread_limit_guard', None)  # Keep the native limit alive.
     state = {'status': 'loading', 'ready': False, 'pid': os.getpid(), 'policy': policy,
         'inference_calls': 0, 'expired_results': 0, 'superseded_results': 0,
@@ -344,17 +347,36 @@ def _planner_process(model_path, factory, requests, results, statuses, wakeup, s
             request_id = request['request_id']
             state['superseded_pending_requests'] += max(0, request_id-previous_id-1)
             previous_id = request_id
-            if time.monotonic() >= request['expires_monotonic']:
+            observed = time.monotonic()
+            state.update(request_id=request_id,
+                last_request_submitted_monotonic=request['submitted_monotonic'],
+                last_request_expires_monotonic=request['expires_monotonic'],
+                last_queue_wait_s=observed-request['submitted_monotonic'],
+                last_inference_started_monotonic=None,last_inference_completed_monotonic=None,
+                last_inference_wall_s=None,last_inference_process_cpu_s=None,
+                last_request_total_wall_s=observed-request['submitted_monotonic'],
+                expired_before_inference=observed>=request['expires_monotonic'])
+            if state['expired_before_inference']:
                 state.update(status='expired', expired_results=state['expired_results']+1)
                 statuses.put(state, blocking=True)
                 continue
-            state.update(status='working', request_id=request_id, error=None)
+            inference_started = time.monotonic()
+            process_cpu_started = time.process_time()
+            state.update(status='working', request_id=request_id, error=None,
+                last_request_submitted_monotonic=request['submitted_monotonic'],
+                last_request_expires_monotonic=request['expires_monotonic'],
+                last_inference_started_monotonic=inference_started,
+                last_queue_wait_s=inference_started-request['submitted_monotonic'])
             statuses.put(state, blocking=True)
             try:
                 world, canonical, evidence, _, _ = planner.infer(request['context'], request['alignment'],
                     **request['command'])
                 completed = time.monotonic()
                 state['inference_calls'] += 1
+                state.update(last_inference_completed_monotonic=completed,
+                    last_inference_wall_s=completed-inference_started,
+                    last_inference_process_cpu_s=time.process_time()-process_cpu_started,
+                    last_request_total_wall_s=completed-request['submitted_monotonic'])
                 latest = requests.get(blocking=True)
                 if stop.is_set():
                     break
@@ -364,13 +386,20 @@ def _planner_process(model_path, factory, requests, results, statuses, wakeup, s
                     state.update(status='superseded', superseded_results=state['superseded_results']+1)
                 else:
                     result = PlannerResult(request_id, world, canonical,
-                        {**evidence, 'async_cpu_worker': policy, 'reference_only': True},
+                        {**evidence, 'async_cpu_worker': policy, 'reference_only': True,
+                         'async_worker_timing':{key:state[key] for key in ('last_queue_wait_s',
+                            'last_inference_wall_s','last_inference_process_cpu_s','last_request_total_wall_s')}},
                         request['submitted_monotonic'], completed, request['expires_monotonic'])
                     results.put(result, blocking=True)
                     state.update(status='idle')
                 statuses.put(state, blocking=True)
             except Exception as error:
-                state.update(status='error', error=f'{type(error).__name__}: {error}'[:1000])
+                completed = time.monotonic()
+                state.update(status='error', error=f'{type(error).__name__}: {error}'[:1000],
+                    last_inference_completed_monotonic=completed,
+                    last_inference_wall_s=completed-inference_started,
+                    last_inference_process_cpu_s=time.process_time()-process_cpu_started,
+                    last_request_total_wall_s=completed-request['submitted_monotonic'])
                 statuses.put(state, blocking=True)
         state.update(status='closed', ready=False)
         statuses.put(state, blocking=True)
@@ -396,8 +425,17 @@ class AsyncPlanner:
     ``planner_factory`` is a spawn-pickleable CPU fake hook for isolated tests.
     Production leaves it unset, binding OfficialPlannerCPU's pinned model SHA.
     """
-    def __init__(self, model_path, *, timeout_s=.25, planner_factory=None):
+    def __init__(self, model_path, *, timeout_s=.25, planner_factory=None,cpu_affinity=None):
         import multiprocessing
+        import os
+        if cpu_affinity is not None:
+            require(isinstance(cpu_affinity,(tuple,list)) and bool(cpu_affinity)
+                and all(type(cpu) is int and cpu>=0 for cpu in cpu_affinity)
+                and len(set(cpu_affinity)) == len(cpu_affinity), 'Invalid planner CPU affinity')
+            require(hasattr(os,'sched_getaffinity') and set(cpu_affinity).issubset(os.sched_getaffinity(0)),
+                'Planner CPUs must be in inherited affinity')
+            cpu_affinity = tuple(cpu_affinity)
+        self.cpu_affinity = cpu_affinity
         require(math.isfinite(timeout_s) and timeout_s > 0, 'Positive finite planning timeout required')
         self.model_path = Path(model_path).absolute()
         self.timeout_s = float(timeout_s)
@@ -421,7 +459,7 @@ class AsyncPlanner:
         if self._process is None:
             self._process = self._context.Process(target=_planner_process,
                 args=(self.model_path, self.factory, self._requests, self._results,
-                      self._statuses, self._wakeup, self._stop), daemon=True,
+                      self._statuses, self._wakeup, self._stop,self.cpu_affinity), daemon=True,
                 name='sonic-locomotion-cpu')
             self._process.start()
             self._cached_status = {'status': 'starting', 'ready': False, 'error': None}

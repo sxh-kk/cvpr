@@ -9,7 +9,10 @@
 截至 2026-10-27，资源、真实 CPU 冷启动／站立及旧版移动控制已有独立验证，旧版也收到过有效 PICO 全身追踪。
 本次按用户要求把 Mobile 默认控制改为 **`continuous_vr_mode1`：左杆前进、右杆转向，双臂与颈部参考持续跟随人体**，
 取消 B 切换、移动时上身锁定和 3 厘米返回姿态门。旧策略以 `locked_upper_mode0` 显式保留。
-**新连续策略已通过 291 项 CPU 回归和两次实际场景空手物理／EGL 入口检查；现场新会话已加载并核对页面，真人持物、完整抓放任务与训练数据准入仍未验收。**
+**本轮 CPU 分配与诊断修订已通过 294 项 PICO CPU 回归及生产几何复核并行的 18 秒空手入口检查。
+旧 `live_human_003_continuous_vr1` 的超时证据与原数据保留，已正常退出；
+新 `live_human_004_cpu_isolated` 已实际加载并核对源码、planner CPU29 和预览 CPU30。
+页面检查时无错误、暂停且未录制，等待头显 Send／X 校准／Y 跟随。真人持物、完整抓放任务与训练数据准入仍未验收。**
 下面把新操作方式与旧版证据分开说明。旧 Handover 默认 mode2、原固定 90 条候选及其交付范围保持独立。
 
 ## 独立入口与资源
@@ -68,11 +71,13 @@ bash scripts/4090_simple/start_pico_mobile_pp.sh \
   --mobile-control-policy continuous_vr_mode1
 ```
 
-这是已通过本轮短时入口检查的新策略操作方式。旧锁上身会话 `collection/live_human_002_v2` 已经请求正常退出，
-状态为 stopped，原始数据保留；新现场 `collection/live_human_003_continuous_vr1` 已加载。
-`continuous_mode1_001/RELOAD_COMPLETE.json` 核对实际进程源码身份、新策略／mode1、旧进程停止与页面刷新。
-核对时现场无错误、未录制、暂停等待标定；追踪为 `no_tracking_packet`，需要头显重新开启 Send。
-磁盘源码、诊断进程和实际现场加载身份分别留证。
+这是已通过连续 mode1 短时入口检查的操作方式；本轮 planner CPU 修订的验收范围见下方。
+旧锁上身 `collection/live_human_002_v2` 已正常退出。后续 `collection/live_human_003_continuous_vr1`
+曾由 `continuous_mode1_001/RELOAD_COMPLETE.json` 核对实际源码身份、mode1 和页面，
+之后出现 `planner_request_expired_no_reference`；确认暂停且无活动录制后已请求 quit 并正常停止，原始数据保留。
+新 `collection/live_human_004_cpu_isolated` 已加载，`control_timeout_fix_001/RELOAD_COMPLETE.json` 的 `passed=true`，
+逐项核对启动源码 SHA 与实际 worker CPU；浏览器只读检查无错误、暂停且未录制，追踪原因是 `no_tracking_packet`。
+需要操作者在头显开启 Send，再按 X 校准、Y 跟随；磁盘源码、诊断与现场身份分别留证。
 
 PICO 的 XRoboToolkit 设备设置、单接收器限制、有效全身追踪和电脑预览方式沿用
 [基础 PICO 采集说明](PICO_SIMPLE_TELEOP.md#启动与操作)。电脑控制页默认
@@ -162,9 +167,9 @@ Mobile 的新增采集预检查要求：目标被手接触且抬升至少 0.10 �
 旧 `audit_pico_teleop_episode.py`、`finish_pico_session.py` 和固定 90 条 Handover 的准入／打包入口
 尚不支持本次 Mobile 任务，不能直接套用。完整 Mobile 独立 RTX／DINO 准入仍待实现和验收。
 
-## 新连续策略的实测结果与范围
+## 连续 mode1 初版的实测结果与范围
 
-本轮证据位于运行根 `continuous_mode1_001/`。
+CPU 隔离修订前的连续策略证据位于运行根 `continuous_mode1_001/`，本轮新修订证据见下一节。
 `cpu_tests_002.log` 记录 **291 项 PICO CPU 回归全部通过，无 skip**；
 `CONTINUOUS_MODE1_ENTRY_ACCEPTANCE.json` 的 `passed=true`，绑定两次真实 Mobile 场景、
 SONIC encoder／decoder、异步 CPU planner、MuJoCo 物理和 EGL 预览的空手诊断：
@@ -187,10 +192,60 @@ SONIC encoder／decoder、异步 CPU planner、MuJoCo 物理和 EGL 预览的空
 `host_timestamp_regressed`。已修为一个原始包只绑定一次接收时间，失败目录与修复说明保留；
 live 输入验证门没有更改。没有把诊断工具技术失败当作数据质量失败。
 
-旧现场 `live_human_002_v2` 已正常停止，原数据保留；新现场 `live_human_003_continuous_vr1` 已通过 `RELOAD_COMPLETE.json` 核对源码与控制策略身份。
-实际浏览器已刷新并显示“双臂持续跟随，无需B切换”，B按钮隐藏，桌面与双手相机预览可见；核对时暂停等待有效追踪和操作者标定。
+旧现场 `live_human_002_v2` 已正常停止，原数据保留；后续 `live_human_003_continuous_vr1` 曾通过 `RELOAD_COMPLETE.json` 核对源码与控制策略身份。
+当时浏览器显示“双臂持续跟随，无需B切换”，B 按钮隐藏，桌面与双手预览可见；该加载快照不代表后续无超时，
+也不是当前运行状态。003 的后续故障与本轮修订见下节。
 本轮短时空手结果与旧 v2 的 268 项 CPU 回归／9 秒 IDLE 诊断分开，后者不验证连续 mode1。
 真人的抓取、持物行走／转向、完整放置及独立 RTX／DINO 准入仍需各自实际验收，不能把短时入口检查称作完整任务就绪。
+
+## 异步 planner 超时与 CPU 分配修订
+
+`live_human_003_continuous_vr1` 出现 `MobileControlError: planner_request_expired_no_reference`。
+只读诊断保存在该会话的
+`fault_diagnosis/async_timeout_readonly_20261027T090346.306376Z/ASYNC_TIMEOUT_DIAGNOSIS.json`。
+当时 planner 与后台 review 同用逻辑 CPU31、nice19，预览使用 CPU30；四次超时均落在北京时间
+**16:57:51–16:58:36** 的 review 工作区间。已接受计划的 ORT 墙钟耗时中位数从约 **71.56ms** 升至 **133.11ms**。
+旧版本没有保存失败请求的完整排队／推理／后处理／调度耗时拆分，因此这些是共享 CPU 和时间重叠的证据，
+不能声称已经精确确定每次失败原因、planner 卡死或必然复现 deadline 失败。过期输出仍被正确拒绝。
+
+本轮只对 Mobile 的 planner worker 显式分配不同逻辑 CPU：从本进程可用 CPU 列表选择倒数第三个，
+当前机器为 **CPU29**，避开本入口预览的倒数第二个 CPU30 和后台 review 的最后一个 CPU31。
+worker 仍是 nice19、ORT 单线程；只修改本入口自己的 worker，不调整其他任务的 affinity 或优先级。
+这不保留全机独占 CPU，也不保证物理核心或其他进程没有竞争。可用 CPU 少于三个时记录
+`isolation_available=false`，不能声称三个角色已经隔离。
+
+`AsyncPlanner` 新增可选 `cpu_affinity`，未传入时保持原默认行为，其他调用方不因本轮 Mobile 策略自动改绑。
+新增排队时间、完整请求墙钟、完整推理墙钟和进程 CPU 时间等诊断，Mobile 在暂停前保存
+`last_fault`，包含 pending request、worker 状态、tick 和 CPU 分配快照，避免只留下短暂停止原因。
+**Mobile 的 0.20 秒请求 deadline、完整未来参考要求和拒绝过期结果规则保持不变**，不放宽迟延门或复用过期参考。
+
+运行根 `control_timeout_fix_001/CPU_AFFINITY_CONTENTION_COMPARISON.json` 记录真实 planner 的受控 CPU 对照：
+在 CPU31 上运行一个受控 busy 负载，planner 同用 CPU31 与改用 CPU29 分别完成 **12／12** 次，
+均在 200ms 内交付；完整请求最大墙钟分别约 **141.28ms／68.20ms**。
+这支持把本入口 planner 与该竞争负载分开可减少抢占耗时，**未复现现场 deadline 失败**，
+该受控 busy 对照没有重放历史生产几何任务，也不能证明全部实时场景都不会超时。
+
+### 生产几何负载并行检查与现场重载
+
+`control_timeout_fix_001/CPU_ISOLATION_ENTRY_ACCEPTANCE.json` 的 `passed=true`。
+真实生产 `complete_quality_geometry` 在 CPU31 上只读同一份已封存 **1,700 行 raw**，运行两遍，
+分别耗时 **23.56／34.94 秒**，原 raw 与 cache SHA 未改。它与 CPU29 上 18 秒真实 Mobile／SONIC／
+异步 planner／EGL 空手控制的实测时间重叠 **99.8855%**；控制记录包含 **890 个实际 50 Hz tick、
+534 个新 30 Hz token、103 个不同的已接受规划请求**。这些请求的实际 planner worker 均在 CPU29。
+
+本次无 rejection，实际状态全部有限，新 token 全部 mode1，原始外力全零，ledger 中 token SHA 全部一致；
+最大控制 lag 为 **4.431888ms**，最大完整 planner 请求墙钟为 **87.124684ms**，最大排队时间为 **14.607986ms**。
+请求期限仍为 **200ms**，没有放宽原门或复用过期结果。本轮 **294 项 PICO CPU 回归全部通过，无 skip**；
+独立 review 另运行 19 项 planner 测试（包含真实 spawn 的排队过期与清除旧指标）和 28 项 control 测试，全部通过。
+这是同一生产几何算法负载下的短时空手并发检查，仍不证明全部调度条件永不超时，也不计真人或持物任务验收。
+
+原 003 会话在暂停且无录制时正常退出，原记录和故障证据保留。
+后续 `control_timeout_fix_001/RELOAD_COMPLETE.json` 单独确认 `passed=true`：
+新会话为 `collection/live_human_004_cpu_isolated`，启动源码 SHA 逐项匹配，
+实际 planner 子进程 PID3812334 使用 CPU29、预览 PID3812414 使用 CPU30，后台 review 使用 CPU31。
+该分配只约束本入口 worker，仍不声称全机或物理核心独占。
+浏览器只读核对时无 error、`no_tracking_packet`、暂停、未录制，显示连续双臂说明且无 B 切换按钮；需要头显 Send 后 X／Y；
+加载通过不等于操作者已经开始采集，更不代表真人完整持物任务或独立 RTX／DINO 准入完成。
 
 ## 共享资源与旧策略的已有验证
 

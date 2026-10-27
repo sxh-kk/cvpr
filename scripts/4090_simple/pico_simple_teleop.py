@@ -1344,6 +1344,7 @@ def run(args):
             invalidate_calibration()
             result.setdefault('rejections',[]).append({'sim_time_s':float(data.time),
                 'tick50':global_tick,'reason':error_text,'pc_wall_time_ns':time.time_ns(),
+                'mobile_planner_fault':mobile_control.status().get('last_fault') if mobile_control else None,
                 'current_loop_wall_timing':loop_timer.snapshot() if loop_timer else None,
                 'previous_loop_wall_timing':last_loop_wall_timing})
             result['rejections'] = result['rejections'][-128:]

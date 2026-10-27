@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
+import copy
 import time
 from typing import Mapping
 
@@ -132,6 +134,19 @@ class SynchronousDiagnosticWorker:
         self.closed, self.result = True, None
 
 
+def mobile_planner_cpu_allocation(cpus=None):
+    # Collector preview chooses the penultimate CPU and background review the
+    # last. Reserve a different logical CPU for latency-bounded planning. This
+    # changes only our worker, never affinities or priorities of other tasks.
+    cpus = sorted(os.sched_getaffinity(0)) if cpus is None and hasattr(os,'sched_getaffinity') else cpus
+    cpus = sorted(cpus) if cpus is not None else []
+    return {'planner_cpus':cpus[-3:-2] if len(cpus)>=3 else cpus[-1:],
+        'preview_cpus':cpus[-2:-1] if len(cpus)>1 else cpus[-1:],
+        'background_review_cpus':cpus[-1:],
+        'isolation_available':len(cpus)>=3,'physical_exclusivity_claimed':False,
+        'scope':'distinct inherited logical CPUs for our three worker roles; other processes unchanged'}
+
+
 class MobilePlannerControl:
     """50 Hz asynchronous planner with explicit locked or live-VR references.
 
@@ -154,8 +169,10 @@ class MobilePlannerControl:
             raise ValueError('Nonnegative int64 planner seed required')
         if self.config.allow_strafe_backward and not self.diagnostic_only:
             raise ValueError('Backward/lateral control is restricted to isolated diagnostics')
+        self.cpu_allocation = mobile_planner_cpu_allocation()
         self.worker = planner_worker or AsyncPlanner(model_path,
-            timeout_s=self.config.planning_timeout_s)
+            timeout_s=self.config.planning_timeout_s,
+            cpu_affinity=self.cpu_allocation['planner_cpus'] or None)
         if getattr(self.worker, 'diagnostic_only', False) and not self.diagnostic_only:
             raise ValueError('Synchronous worker forbidden in live control')
         self.phase, self.reason = 'not_booted', None
@@ -163,6 +180,7 @@ class MobilePlannerControl:
         self.last_tick = None
         self._started, self._closed = False, False
         self.epoch = 0
+        self.last_fault = None
 
     @staticmethod
     def _state(root, body):
@@ -180,6 +198,13 @@ class MobilePlannerControl:
         return float(now)
 
     def _fail(self, reason):
+        try:
+            worker_status = self.worker.status()
+        except Exception as error:
+            worker_status = {'status':'observation_failed','error':str(error)}
+        self.last_fault = {'reason':str(reason),'pending_request':copy.deepcopy(self.pending),
+            'worker_status':copy.deepcopy(worker_status),'host_monotonic':self.clock(),
+            'tick50':self.last_tick,'cpu_allocation':copy.deepcopy(self.cpu_allocation)}
         self.pause(reason)
         raise MobileControlError(reason)
 
@@ -459,7 +484,8 @@ class MobilePlannerControl:
             'pause_reason': self.reason, 'last_tick50': self.last_tick,
             'pending_request_id': self.pending['id'] if self.pending else None,
             'epoch': self.epoch, 'mailbox_busy_submits': getattr(self, 'mailbox_busy', 0),
-            'diagnostic_only': self.diagnostic_only, 'physical_task_readiness_certified': False}
+            'diagnostic_only': self.diagnostic_only, 'cpu_allocation':copy.deepcopy(self.cpu_allocation),
+            'last_fault':copy.deepcopy(self.last_fault),'physical_task_readiness_certified': False}
 
     def pause(self, reason='operator_pause'):
         self.phase, self.reason = 'paused', str(reason)

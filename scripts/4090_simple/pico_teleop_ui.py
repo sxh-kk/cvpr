@@ -43,6 +43,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
 <p id="instructions" class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
 <p id="mobile-status" role="status" hidden></p>
+<p id="tracking-status" role="status">等待PICO追踪状态</p>
 <p id="grasp" role="status">等待抓握反馈</p>
 <p id="preview-feedback" role="status">等待相机</p>
 <p id="last-episode" role="status">上一条：暂无已完成录制</p>
@@ -61,6 +62,7 @@ function showCamera(){camera.hidden=!(imageAvailable&&cameraReady);document.quer
 function reconnectStream(){if(streamRetry!==null||!imageAvailable)return;cameraReady=false;showCamera();streamRetry=setTimeout(()=>{streamRetry=null;if(imageAvailable)camera.src='/stream.mjpg?retry='+Date.now();},500);}
 function updateCameraAvailability(available,version,epoch){if(Number.isInteger(epoch)){if(lastImageEpoch!==null&&epoch<lastImageEpoch)return;if(lastImageEpoch!==null&&epoch!==lastImageEpoch){cameraReady=false;camera.removeAttribute('src');if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}}lastImageEpoch=epoch;}const next=available===true;if(!next){imageAvailable=false;cameraReady=false;if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}camera.removeAttribute('src');}else{const restart=!imageAvailable||!camera.getAttribute('src');imageAvailable=true;if(restart){cameraReady=false;camera.src='/stream.mjpg?version='+version;}}showCamera();}
 function previewFeedbackText(feedback,available){if(feedback?.error||feedback?.status==='error')return '相机异常';if(!feedback)return available?'相机预览':'等待相机';const limit=Number.isFinite(feedback.max_age_s)&&feedback.max_age_s>0?Math.min(.1,feedback.max_age_s):.1;return available&&['ready','fresh','ok'].includes(feedback.status)&&Number.isFinite(feedback.age_s)&&feedback.age_s>=0&&feedback.age_s<=limit?'相机预览':'等待相机';}
+function trackingFeedbackText(t){if(t?.valid)return '全身追踪有效 · 手柄输入已连接';const labels={no_tracking_packet:'未收到数据，请保持XRoboToolkit前台并开启Send',controller_input_required:'请在头显切换到手柄输入模式',app_not_focused:'请保持XRoboToolkit在前台',head_tracking_invalid:'头部追踪无效，请戴好头显',body_missing_shape_or_nonfinite:'缺少完整24点全身追踪，请检查全身标定',stale:'数据已过期，请检查追踪发送连接',input_mode_changed:'输入模式刚切换，请等稳定后重新标定',device_timestamp_gap:'追踪数据中断，请检查发送连接'};return '追踪不可用：'+((t?.reasons??[]).map(reason=>labels[reason]??reason).join('；')||'等待数据');}
 
 function episodeText(v){if(!v?.uuid)return '暂无';const id=v.number!=null?String(v.number).padStart(3,'0'):'待编号（'+v.uuid.slice(0,8)+'）';const state=v.status==='pending_discard'?'已申请丢弃，后台处理中':v.discarded||v.disposition==='discarded'?'已丢弃':v.disposition==='kept'?'物理验收通过，已保留':v.status==='running'?'复核中':v.status==='error'?'复核异常':v.pending?'待复核':v.collection_enabled===false?'诊断已完成（不计真人数据）':'待审核';return id+' · '+state+((v.reasons??[]).length?' · 原因：'+v.reasons.join('；'):'')+(v.error?' · '+v.error:'');}
 function renderReview(q){const labels={starting:'正在准备',idle:'空闲',working:'正在复核',recovering:'正在恢复任务',error:'复核异常'};document.querySelector('#review-status').textContent='后台复核：'+(q?(labels[q.status]??q.status)+' · 未完成 '+(q.pending_count??0)+' 条'+(q.error?' · '+q.error:''):'准备中');document.querySelector('#review-result').textContent='最近完成：'+episodeText(q?.latest_completed);const list=document.querySelector('#review-results');if(list){list.replaceChildren();for(const v of (q?.latest_results??[])){const row=document.createElement('li');row.textContent=episodeText(v);list.appendChild(row);}}}
@@ -69,6 +71,7 @@ camera.onerror=reconnectStream;
 camera.onload=()=>{cameraReady=imageAvailable;showCamera();};
 async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
+ document.querySelector('#tracking-status').textContent=trackingFeedbackText(s.tracking);
  const mobile=s.collection_task_profile==='mobile_pp';document.querySelector('button[data-command="toggle_navigation"]').hidden=!mobile;
  const mobileStatus=document.querySelector('#mobile-status');mobileStatus.hidden=!mobile;
  if(mobile){document.querySelector('h1').textContent='Mobile P&P 双桌搬运数采';document.querySelector('#instructions').textContent='X 标定 · Y 跟随／暂停 · A 录制／保存 · B 切换移动／手臂操作。移动时左杆向前、右杆转向，上身保持进入时姿态，扳机仍控制抓握。松杆站稳并恢复入场人体姿态后，按B恢复手臂操作。起录后先保持姿势1秒。';mobileStatus.textContent='控制模式：'+({pose:'手臂操作',preparing_navigation:'正在准备移动，请松开摇杆',navigation:'移动：上身保持、手指可控'}[s.mobile_mode]??'等待准备');}
@@ -84,7 +87,7 @@ async function refresh(){try{
  const discard=document.querySelector('button[data-command="discard"]');discard.textContent=s.recording?'丢弃当前录制':'丢弃上一条';
  const busy=['saving','auditing','resetting'].includes(s.status);for(const b of document.querySelectorAll('button[data-command]'))b.disabled=busy;
  if(!busy&&!s.recording)discard.disabled=!(last?.available||(last?.pending&&last?.status!=='pending_discard'));
- if(s.operator_message&&s.operator_message!==lastOperatorMessage){document.querySelector('#message').textContent=s.operator_message;lastOperatorMessage=s.operator_message;}
+ if(s.operator_message&&(s.operator_message!==lastOperatorMessage||document.querySelector('#message').textContent!==s.operator_message)){document.querySelector('#message').textContent=s.operator_message;lastOperatorMessage=s.operator_message;}
  document.querySelector('#details').textContent=JSON.stringify(s,null,2);
  const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
  updateCameraAvailability(v.image_available,v.image_version,v.image_epoch);

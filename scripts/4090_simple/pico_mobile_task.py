@@ -66,6 +66,40 @@ def require_manipulation_pose_match(entry_smpl24, current_smpl24, *, maximum_dis
         'scope': 'human pose return guard; not decoder or grasp certification'}
 
 
+def mobile_reference_diagnostics(value, body_names, body_joint_ranges):
+    """Validate an encoder reference and report range excursions without edits.
+
+    Mode0 contains desired planner conditioning, not measured joints or direct
+    PD targets. The official encoder/decoder still converts it to control; a
+    reference outside a MuJoCo soft joint range is not an actual-state failure.
+    """
+    from prepare_carrybox_v11 import POLICY_TO_BODY
+    reference = np.asarray(value)
+    ranges = np.asarray(body_joint_ranges, dtype=float)
+    if (reference.shape != (1,1751) or not np.isfinite(reference).all()
+            or reference[0,0] != 0.):
+        raise ValueError('Mobile mode0 reference must be finite with shape (1,1751)')
+    if (len(body_names) != 29 or len(set(body_names)) != 29 or ranges.shape != (29,2)
+            or not np.isfinite(ranges).all() or np.any(ranges[:,0] >= ranges[:,1])):
+        raise ValueError('Mobile reference diagnostics require named actual joint ranges')
+    q = reference[0,4:294].reshape(10,29)
+    policy_ranges = ranges[POLICY_TO_BODY]
+    excess = np.maximum(np.maximum(policy_ranges[None,:,0]-q,q-policy_ranges[None,:,1]),0.)
+    violations = []
+    for frame, column in np.argwhere(excess > 1e-6):
+        body_index = int(POLICY_TO_BODY[column])
+        violations.append({'reference_frame_index':int(frame),
+            'reference_offset_s':float(frame/10.), 'joint_name':body_names[body_index],
+            'reference_q_rad':float(q[frame,column]),
+            'actual_model_range_rad':ranges[body_index].tolist(),
+            'excess_rad':float(excess[frame,column])})
+    return {'contract':'cvpr-sonic-mode0-reference-range-diagnostics-v1',
+        'reference_is_actual_state':False,'reference_is_direct_pd_target':False,
+        'reference_modified':False,'hard_reject_on_reference_range':False,
+        'outside_range_reference_count':len(violations),
+        'maximum_reference_excess_rad':float(excess.max()),'violations':violations}
+
+
 def collection_buttons(buttons, previous, *, mobile=False):
     mapping = [('X', 'calibrate'), ('Y', 'toggle_follow'), ('A', 'toggle_record')]
     if mobile:

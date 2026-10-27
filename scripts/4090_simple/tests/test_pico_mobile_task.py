@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pico_mobile_task import (collection_buttons, require_mobile_transition, task_identity,
-    require_manipulation_pose_match, MobileStoppedWindow)
+    require_manipulation_pose_match, mobile_reference_diagnostics, MobileStoppedWindow)
 
 
 class MobileTaskTests(unittest.TestCase):
@@ -47,6 +47,38 @@ class MobileTaskTests(unittest.TestCase):
             with self.subTest(frame=frame,speed=speed,warmup=warmup):
                 with self.assertRaises(ValueError):
                     require_mobile_transition(frame,speed,recording_warmup=warmup)
+
+    def test_planner_reference_range_is_diagnostic_and_never_clipped(self):
+        import numpy as np
+        from prepare_carrybox_v11 import POLICY_TO_BODY
+        names=['joint'+str(i) for i in range(29)]
+        ranges=np.tile([-1.,1.],(29,1));value=np.zeros((1,1751),dtype=np.float32)
+        column=int(np.where(POLICY_TO_BODY==5)[0][0])
+        value[0,4+3*29+column]=1.2
+        original=value.copy()
+        report=mobile_reference_diagnostics(value,names,ranges)
+        np.testing.assert_array_equal(value,original)
+        self.assertFalse(report['reference_modified'])
+        self.assertFalse(report['reference_is_direct_pd_target'])
+        self.assertFalse(report['hard_reject_on_reference_range'])
+        self.assertEqual(report['outside_range_reference_count'],1)
+        self.assertEqual(report['violations'][0]['joint_name'],'joint5')
+        self.assertEqual(report['violations'][0]['reference_frame_index'],3)
+        self.assertAlmostEqual(report['maximum_reference_excess_rad'],.2,places=6)
+        wrong_mode=value.copy();wrong_mode[0,0]=2.
+        for invalid in [np.zeros((1,1750)),wrong_mode]:
+            with self.assertRaises(ValueError):
+                mobile_reference_diagnostics(invalid,names,ranges)
+        value[0,20]=np.nan
+        with self.assertRaises(ValueError):
+            mobile_reference_diagnostics(value,names,ranges)
+
+    def test_pause_message_replaces_old_navigation_instructions(self):
+        from pico_simple_teleop import paused_operator_message
+        self.assertIn('已暂停',paused_operator_message('some error',physics_ready=True))
+        self.assertIn('先重置',paused_operator_message('physical error',physics_ready=False))
+        self.assertIn('手柄模式',paused_operator_message(
+            'Calibration requires valid live full-body tracking',physics_ready=True))
 
     def test_mode_switch_requires_full_half_second_and_restarts_after_motion_or_gap(self):
         window = MobileStoppedWindow()

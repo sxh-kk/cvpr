@@ -24,7 +24,7 @@ from sonic_locomotion_planner import (
 )
 
 
-CONTRACT = 'cvpr-pico-mobile-frozen-upperbody-async-reference-v1'
+CONTRACT = 'cvpr-pico-mobile-frozen-upperbody-async-reference-v2'
 UPPER_BODY_NAMES = tuple(BODY_NAMES[12:])
 CONTROL_DT = .02
 
@@ -294,7 +294,8 @@ class MobilePlannerControl:
     def _input_command(self, frame, now, tracking_valid):
         if tracking_valid is not True:
             self._fail('tracking_invalid_pause_required')
-        lx, ly, rx, _ = _axes(frame)
+        original_axes = _axes(frame)
+        lx, ly, rx, ry = original_axes
         received, timestamp, sequence = (_get(frame, key) for key in
             ('host_received_s', 'device_timestamp_ns', 'sequence'))
         if (type(received) not in (int, float) or not math.isfinite(received)
@@ -311,12 +312,23 @@ class MobilePlannerControl:
         self.last_source_timestamp, self.last_source_sequence = timestamp, sequence
         if self.last_tick is None and not neutral_controls(frame, self.config.deadzone):
             self._fail('first_mobile_tick_requires_neutral_sticks')
-        if not self.config.allow_strafe_backward and (abs(lx) >= self.config.deadzone or ly <= -self.config.deadzone):
-            self._fail('unvalidated_backward_or_lateral_control')
+        ignored_axes, ignored_reason = [], []
         if not self.config.allow_strafe_backward:
-            # A sub-deadzone sideways component must not quietly become a
-            # diagonal command when the forward axis crosses its threshold.
+            # Unsupported intent is a fresh bounded input, not a tracking or
+            # timing failure. Mask it explicitly instead of rejecting a whole
+            # human episode. Pure sideways/backward intent becomes a new IDLE
+            # command, which follows the same stop/replan path as released sticks.
+            if lx != 0.:
+                ignored_axes.append('left_axis_x')
+                ignored_reason.append('unsupported_lateral_axis')
+            if ly < 0.:
+                ignored_axes.append('left_axis_y')
+                ignored_reason.append('unsupported_backward_axis')
             lx = 0.
+            ly = max(0., ly)
+        if ry != 0.:
+            ignored_axes.append('right_axis_y')
+            ignored_reason.append('unbound_right_vertical_axis')
         if abs(rx) >= self.config.deadzone:
             self.yaw -= self.config.yaw_gain_rad_s*rx*CONTROL_DT
         facing = np.array([math.cos(self.yaw), math.sin(self.yaw), 0.])
@@ -334,7 +346,11 @@ class MobilePlannerControl:
         return command, {'source_sequence': sequence, 'device_timestamp_ns': timestamp,
             'source_age_s': now-received, 'source_packet_reused_as_new_sample': False,
             'source_packet_held_for_control_interval': reused,
-            'axes_left_x_y_right_x_y': list(_axes(frame))}
+            'axes_left_x_y_right_x_y': list(original_axes),
+            'applied_axes_left_x_y_right_x_y': [lx, ly, rx, 0.],
+            'ignored_axes': ignored_axes, 'ignored_reason': ignored_reason,
+            'axis_policy': 'diagnostic_planar_all_directions' if self.config.allow_strafe_backward
+                else 'production_forward_only_with_explicit_lateral_backward_mask'}
 
     def step(self, tick50, actual_root_pose7, actual_body29, frame, *, now=None, tracking_valid=True):
         if self.phase not in ('ready', 'active'):
@@ -388,7 +404,7 @@ class MobilePlannerControl:
                 timeline_origin_tick50=self.origin_tick, epoch=self.epoch,
                 source=source, desired_command=command, applied_plan_command=self.last_command,
                 movement_scope='diagnostic_all_planar_directions' if self.config.allow_strafe_backward
-                    else 'forward_and_facing_only_lateral_axis_masked_within_deadzone',
+                    else 'forward_and_facing_only_lateral_and_backward_axes_ignored',
                 pending_request_id=self.pending['id'] if self.pending else None,
                 pending_deadline_monotonic=self.pending['expires'] if self.pending else None,
                 last_replan_reason=self.last_replan_reason, last_inference=self.last_inference,

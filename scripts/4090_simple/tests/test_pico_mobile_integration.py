@@ -277,6 +277,38 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
         self.assertEqual(namespace["mobile_mode"], "navigation")
         self.assertEqual([row[0] for row in namespace["mobile_control"].ticks], [0])
 
+    def test_ready_planner_waits_for_neutral_sticks_without_interrupting_capture(self):
+        from pico_mobile_task import MobilePreparationReference
+        namespace=self.namespace()
+        namespace.update(mobile_mode='preparing_navigation',mobile_preparation=MobilePreparationReference(
+            namespace['root_pose'](),np.zeros(29),source_sequence=1,device_timestamp_ns=1234))
+        pushed=self.frame(0);pushed.inputs['left_axis_y']=.8
+        self.tick(namespace,0,frame=pushed)
+        self.assertEqual(namespace['mobile_mode'],'preparing_navigation')
+        self.assertEqual(namespace['mobile_control'].ticks,[])
+        self.assertIn('松开',namespace['operator_message'])
+        self.assertEqual(len(namespace['_ledger_rows']),1)
+        self.tick(namespace,2)
+        self.assertEqual(namespace['mobile_mode'],'navigation')
+        self.assertEqual([item[0] for item in namespace['mobile_control'].ticks],[0])
+
+    def test_reference_outside_soft_range_reaches_encoder_unchanged_with_evidence(self):
+        namespace=self.namespace();value=np.zeros((1,1751),dtype=np.float32)
+        value[0,4+29]=10.0015
+        original=value.copy()
+        namespace['mobile_control'].step=lambda *args,**kwargs:(value,{'encoder_mode':0})
+        self.tick(namespace,0)
+        self.assertEqual(len(namespace['_commands']),1)
+        np.testing.assert_array_equal(namespace['reference'].calls[0][1],original)
+        report=namespace['_ledger_rows'][0][1]['reference_evidence']['reference_range_diagnostics']
+        self.assertFalse(report['hard_reject_on_reference_range'])
+        self.assertFalse(report['reference_modified'])
+        self.assertEqual(report['outside_range_reference_count'],1)
+        value[0,15]=np.nan
+        with self.assertRaisesRegex(ValueError,'finite'):
+            self.tick(namespace,2)
+        self.assertEqual(len(namespace['_commands']),1)
+
     def test_invalid_tracking_runs_real_invalidation_before_follow_control(self):
         namespace = self.namespace()
         self.tick(namespace, 0)

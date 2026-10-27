@@ -236,6 +236,20 @@ for(const [feedback,available,expected] of [
  assert.equal(vm.runInContext('previewFeedbackText(sample,available)',context),expected);
 }
 assert.ok(elements.has('#preview-feedback'));
+for(const [tracking,expected] of [
+ [{valid:true},'全身追踪有效 · 手柄输入已连接'],
+ [{valid:false,reasons:['controller_input_required']},'追踪不可用：请在头显切换到手柄输入模式'],
+ [{valid:false,reasons:['no_tracking_packet']},'追踪不可用：未收到数据，请保持XRoboToolkit前台并开启Send'],
+ [{valid:false,reasons:['stale']},'追踪不可用：数据已过期，请检查追踪发送连接']]){
+ context.tracking=tracking;
+ assert.equal(vm.runInContext('trackingFeedbackText(tracking)',context),expected);
+}
+// A pending-button notice must not hide the server's unchanged pause reason.
+context.fetch=async()=>({ok:true,json:async()=>({status:{status:'paused',operator_message:'已暂停：等待恢复追踪'},image_available:false,image_version:0})});
+await vm.runInContext('refresh()',context);
+element('#message').textContent='已提交，等待电脑执行：标定';
+await vm.runInContext('refresh()',context);
+assert.equal(element('#message').textContent,'已暂停：等待恢复追踪');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
         result = subprocess.run([node, "-e", runner], input=script, text=True,

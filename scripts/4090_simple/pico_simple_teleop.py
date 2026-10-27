@@ -27,7 +27,8 @@ from pico_sonic_reference import PicoSonicReference, WRIST_NAMES, GEAR, body24_t
 from pico_teleop_recording import AsyncTrainingCapture, CommandLedger, RecordingState
 from pico_hand_control import named_hand_targets, profile_receipt, hand_feedback
 from pico_mobile_task import (task_identity, collection_buttons, require_mobile_transition,
-    require_manipulation_pose_match, MobileStoppedWindow, MobilePreparationReference)
+    require_manipulation_pose_match, mobile_reference_diagnostics,
+    MobileStoppedWindow, MobilePreparationReference)
 from pico_cpu_runtime import configure_cpu_runtime
 from pico_capture_start import CaptureStartGate
 from replay_handover_teacher import (MODEL_HAND_NAMES, RENDERER_LINKS, applied_force_state,
@@ -381,6 +382,14 @@ def wait_fresh_command_frame(receiver, previous, last_timestamp_ns, deadline_s, 
 
 def rising_operator_commands(buttons, last_buttons):
     return collection_buttons(buttons,last_buttons)
+
+
+def paused_operator_message(reason, *, physics_ready):
+    if not physics_ready:
+        return '已暂停：物理状态检查未通过，请先重置场景，再按X标定、Y跟随。原因：'+str(reason)
+    if 'Calibration requires valid live full-body tracking' in str(reason):
+        return '已暂停：需要有效的手柄和全身追踪数据。请检查头显XRoboToolkit前台、Send和手柄模式，再按X标定。'
+    return '已暂停；请查看原因，恢复后按X重新标定、Y跟随。原因：'+str(reason)
 
 
 def recording_command_guard(action, *, episode_active, episode_status=None):
@@ -1301,6 +1310,7 @@ def run(args):
             nonlocal error_text, active_local, operator_message
             had_started_capture = not replay and episode_has_started_capture(episode,output)
             error_text = str(reason)
+            operator_message = paused_operator_message(reason,physics_ready=physics_ready)
             active_local = None
             invalidate_calibration()
             result.setdefault('rejections',[]).append({'sim_time_s':float(data.time),
@@ -1712,12 +1722,15 @@ def run(args):
                     mobile_value = mobile_evidence = None
                     if mobile_mode == 'preparing_navigation':
                         preparing = mobile_control.poll()
-                        if preparing['ready'] and new_command:
+                        from pico_mobile_control import neutral_controls
+                        if preparing['ready'] and new_command and neutral_controls(frame):
                             mobile_mode = 'navigation'
                             mobile_tick = 0
                             operator_message='移动模式：左杆向前、右杆转向，松杆停步；上身保持进入时姿态，手指仍可控。站稳并恢复入场人体姿态后按B恢复手臂。'
                         else:
                             mobile_value,mobile_evidence = mobile_preparation.encoder_reference(root_pose(model,data))
+                            if preparing['ready']:
+                                operator_message='移动规划已就绪；请先松开两个摇杆，进入移动模式后再推杆。当前姿态保持、录制继续。'
                     if mobile_mode == 'navigation':
                         mobile_value,mobile_evidence = mobile_control.step(mobile_tick,
                             root_pose(model,data),actual_before['body_q29'],frame,
@@ -1726,13 +1739,8 @@ def run(args):
                         encode_started = time.perf_counter()
                         if mobile_value is not None:
                             from pico_sonic_reference import ENCODER_SHA256
-                            from prepare_carrybox_v11 import POLICY_TO_BODY
-                            ranges = np.asarray([model.joint(BODY_JOINT_NAMES[i]).range
-                                for i in POLICY_TO_BODY])
-                            forecast_q = mobile_value[0,4:294].reshape(10,29)
-                            if np.any(forecast_q < ranges[None,:,0]-1e-6) or np.any(
-                                    forecast_q > ranges[None,:,1]+1e-6):
-                                raise ValueError('Mobile reference exceeds actual joint limits; no clipping applied')
+                            reference_range_diagnostics = mobile_reference_diagnostics(mobile_value,
+                                BODY_JOINT_NAMES,[model.joint(name).range for name in BODY_JOINT_NAMES])
                             encoded = np.asarray(reference.session.run([reference.output_name],
                                 {reference.input_name:mobile_value})[0],dtype=np.float32)
                             if encoded.shape != (1,64) or not np.isfinite(encoded).all():
@@ -1740,6 +1748,7 @@ def run(args):
                             token = encoded[0].copy()
                             evidence = dict(mobile_evidence,model_inference_performed=True,
                                 encoder_sha256=ENCODER_SHA256,token_shape=[64],
+                                reference_range_diagnostics=reference_range_diagnostics,
                                 token_sha256=hashlib.sha256(token.tobytes()).hexdigest())
                         else:
                             token, evidence = reference.encode(frame.body24x7,root_pose(model,data),frame.device_timestamp_ns)

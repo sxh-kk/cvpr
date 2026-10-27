@@ -270,14 +270,106 @@ class MobileBridgeTests(unittest.TestCase):
         np.testing.assert_array_equal(evidence['frozen_upper_body_q17'], new_body[12:])
         self.assertEqual(evidence['epoch'], 2)
 
-    def test_no_silent_unsupported_lateral_backward_or_malformed_axes(self):
-        for axes in ({'lx': .7}, {'ly': -.8}, {'rx': float('nan')}):
+    def test_unsupported_axes_become_explicit_idle_without_rejecting_or_enabling_direction(self):
+        for axes, raw_axes, ignored in (({'lx': .7}, [.7, 0., 0., 0.], 'unsupported_lateral_axis'),
+                                       ({'ly': -.8}, [0., -.8, 0., 0.], 'unsupported_backward_axis')):
+            bridge = self.prepared()
+            self.step(bridge, 0)
+            _, evidence = self.step(bridge, 1, **axes)
+            self.assertEqual(evidence['desired_command']['mode'], 0)
+            self.assertEqual(evidence['desired_command']['movement_direction'], [0., 0., 0.])
+            self.assertEqual(evidence['source']['axes_left_x_y_right_x_y'], raw_axes)
+            self.assertEqual(evidence['source']['applied_axes_left_x_y_right_x_y'], [0.] * 4)
+            self.assertIn(ignored, evidence['source']['ignored_reason'])
+            self.assertEqual(bridge.status()['status'], 'active')
+
+    def test_malformed_axes_and_live_diagnostic_directions_still_fail_closed(self):
+        for axes in ({'lx': float('nan')}, {'ly': -1.1}, {'rx': float('nan')}, {'ry': float('inf')}):
             bridge = self.prepared()
             self.step(bridge, 0)
             with self.assertRaises(MobileControlError):
                 self.step(bridge, 1, **axes)
         with self.assertRaises(ValueError):
             self.bridge(config=MobileControlConfig(allow_strafe_backward=True))
+
+    def test_supported_forward_and_turn_remain_legal_with_ignored_axis_components(self):
+        bridge = self.prepared()
+        self.step(bridge, 0)
+        _, evidence = self.step(bridge, 1, lx=.8, ly=.9, rx=.5, ry=-.7)
+        command, source = evidence['desired_command'], evidence['source']
+        self.assertEqual(command['mode'], 1)
+        np.testing.assert_allclose(command['movement_direction'], command['facing_direction'])
+        self.assertLess(command['facing_direction'][1], 0.)
+        self.assertEqual(source['axes_left_x_y_right_x_y'], [.8, .9, .5, -.7])
+        self.assertEqual(source['applied_axes_left_x_y_right_x_y'], [0., .9, .5, 0.])
+        self.assertEqual(source['ignored_axes'], ['left_axis_x', 'right_axis_y'])
+        self.assertEqual(source['ignored_reason'], ['unsupported_lateral_axis', 'unbound_right_vertical_axis'])
+
+    def test_backward_with_right_turn_is_idle_translation_but_keeps_turning(self):
+        bridge = self.prepared()
+        self.step(bridge, 0)
+        _, evidence = self.step(bridge, 1, lx=-.5, ly=-.8, rx=.5)
+        command, source = evidence['desired_command'], evidence['source']
+        self.assertEqual(command['mode'], 0)
+        self.assertEqual(command['movement_direction'], [0., 0., 0.])
+        self.assertLess(command['facing_direction'][1], 0.)
+        self.assertEqual(source['applied_axes_left_x_y_right_x_y'], [0., 0., .5, 0.])
+        self.assertEqual(set(source['ignored_reason']), {'unsupported_lateral_axis', 'unsupported_backward_axis'})
+
+    def test_masked_backward_submits_fresh_stop_over_pending_walk_then_forward_recovers(self):
+        bridge = self.prepared()
+        self.step(bridge, 0)
+        self.step(bridge, 1, ly=.9)
+        walk_request = self.worker.requests[-1]['id']
+        _, stopped = self.step(bridge, 2, lx=.8, ly=-.9)
+        self.assertGreater(self.worker.requests[-1]['id'], walk_request)
+        self.assertEqual(self.worker.requests[-1]['mode'], 0)
+        self.assertEqual(stopped['desired_command']['mode'], 0)
+        self.assertEqual(stopped['last_inference']['request_id'], 1)  # original bootstrap, not invented stop output
+        self.assertEqual(bridge.pending['reason'], 'operator_stop_start_supersedes_pending')
+        self.worker.deliver()
+        _, applied = self.step(bridge, 3, ly=-.9)
+        self.assertEqual(applied['desired_command']['mode'], 0)
+        self.assertEqual(applied['applied_plan_command']['mode'], 0)
+        self.assertFalse(applied['source']['source_packet_held_for_control_interval'])
+        _, resumed = self.step(bridge, 4, ly=.9)
+        self.assertEqual(resumed['desired_command']['mode'], 1)
+        self.assertEqual(self.worker.requests[-1]['mode'], 1)
+        self.assertEqual(resumed['source']['ignored_reason'], [])
+        self.assertEqual(bridge.last_tick, 4)
+        self.assertTrue(bridge.status()['ready'])
+
+    def test_masked_sideways_requests_idle_over_an_already_applied_walk(self):
+        bridge = self.prepared()
+        self.step(bridge, 0)
+        self.step(bridge, 1, ly=.8)
+        self.worker.deliver()
+        _, walking = self.step(bridge, 2, ly=.8)
+        self.assertEqual(walking['applied_plan_command']['mode'], 1)
+        walking_id = walking['last_inference']['request_id']
+        _, stopped = self.step(bridge, 3, lx=.8)
+        self.assertEqual(stopped['desired_command']['mode'], 0)
+        self.assertEqual(self.worker.requests[-1]['mode'], 0)
+        self.assertGreater(self.worker.requests[-1]['id'], walking_id)
+        self.assertEqual(bridge.pending['reason'], 'official_mode_changed')
+        self.assertEqual(stopped['source']['device_timestamp_ns'], frame(100.06, 3)['device_timestamp_ns'])
+        self.worker.deliver()
+        _, settled = self.step(bridge, 4, lx=.8)
+        self.assertEqual(settled['applied_plan_command']['mode'], 0)
+        self.assertEqual(settled['source']['ignored_reason'], ['unsupported_lateral_axis'])
+        self.assertEqual(bridge.status()['status'], 'active')
+
+    def test_input_contract_v2_preserves_original_packet_without_modifying_it(self):
+        bridge = self.prepared()
+        self.step(bridge, 0)
+        self.clock.value = 100.02
+        sample = frame(self.clock(), 1, lx=.1, ly=-.2, rx=.2, ry=.3)
+        original = json.loads(json.dumps(sample))
+        _, evidence = bridge.step(1, ROOT, BODY, sample)
+        self.assertEqual(sample, original)
+        self.assertEqual(evidence['contract'], 'cvpr-pico-mobile-frozen-upperbody-async-reference-v2')
+        self.assertEqual(bridge.status()['contract'], evidence['contract'])
+        self.assertEqual(evidence['source']['axes_left_x_y_right_x_y'], [.1, -.2, .2, .3])
 
     def test_explicit_offline_sync_uses_same_interface_and_is_forbidden_live(self):
         clock = Clock()

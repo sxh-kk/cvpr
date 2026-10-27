@@ -22,6 +22,11 @@ import tempfile
 
 CONTRACT = 'cvpr-pico-admission-processing-plan-v1'
 SELECTION = 'cvpr-pico-handover-admissions-selection-v1'
+MOBILE_CONTRACT = 'cvpr-pico-mobile-pp-admission-processing-plan-v1'
+MOBILE_TASK = 'simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0'
+MOBILE_SELECTION = 'cvpr-pico-mobile-pp-admissions-selection-v1'
+MOBILE_INVENTORY = 'cvpr-pico-mobile-pp-collection-admission-inventory-v1'
+MOBILE_VERIFICATION = 'cvpr-pico-mobile-pp-production-verification-v1'
 BLOCKING_SCRIPTS = frozenset(('pico_simple_teleop.py','finish_pico_session.py',
     'render_deferred_pico.py','extract_unifolm_dino.py'))
 
@@ -64,6 +69,17 @@ def write(path, value):
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def plan_profile(plan):
+    if plan.get('contract') == CONTRACT:
+        return {'candidate_count':90,'inventory_contract':'cvpr-pico-collection-admission-inventory-v1',
+            'selection_contract':SELECTION,'verification_contract':'cvpr-pico-handover-production-verification-v1',
+            'mobile':False}
+    require(plan.get('contract') == MOBILE_CONTRACT and plan.get('task_id') == MOBILE_TASK,
+        'Unknown processing plan or Mobile task identity')
+    return {'candidate_count':100,'inventory_contract':MOBILE_INVENTORY,
+        'selection_contract':MOBILE_SELECTION,'verification_contract':MOBILE_VERIFICATION,'mobile':True}
 
 
 def process_activity(records=None):
@@ -174,16 +190,59 @@ def reusable_admission(directory):
 
 
 def frozen_inventory(plan):
+    profile = plan_profile(plan)
+    count = profile['candidate_count']
     source = Path(plan['frozen_inventory_path']).resolve(strict=True)
-    require(sha(source)==plan['frozen_inventory_sha256'],'Frozen90 inventory bytes changed')
+    require(sha(source)==plan['frozen_inventory_sha256'],'Frozen inventory bytes changed')
     value = read(source)
-    require(value.get('contract')=='cvpr-pico-collection-admission-inventory-v1'
+    require(value.get('contract')==profile['inventory_contract']
         and value.get('collection_root')==plan['collection_root']
-        and value.get('physical_preaccepted_candidates')==plan['candidate_count']==90
-        and len(value.get('episodes',[]))==90,'Use the explicitly frozen90 cohort only')
+        and value.get('physical_preaccepted_candidates')==plan['candidate_count']==count
+        and len(value.get('episodes',[]))==count,'Use the explicitly frozen task cohort only')
+    if profile['mobile']:
+        require(value.get('task_id')==MOBILE_TASK and value.get('selection_policy')=='native_only',
+            'Frozen Mobile task or official selection policy differs')
     identities = [e['human_demo_uuid'] for e in value['episodes']]
-    require(len(set(identities))==90,'Frozen90 cohort repeats a human demonstration')
+    require(len(set(identities))==count,'Frozen cohort repeats a human demonstration')
     return source,value
+
+
+def validate_frozen_selection(selection, snapshot, plan, progress):
+    """A cached admission list cannot replace or expand the frozen cohort."""
+    profile = plan_profile(plan)
+    require(selection.get('contract')==profile['selection_contract'], 'Cached selection contract differs')
+    cohort=selection.get('candidate_cohort',{})
+    require(cohort.get('candidate_count')==plan['candidate_count']
+        and cohort.get('frozen_inventory_sha256')==plan['frozen_inventory_sha256'],
+        'Cached selection belongs to another frozen cohort')
+    if profile['mobile']:
+        require(selection.get('task_id')==MOBILE_TASK and selection.get('selection_policy')=='native_only',
+            'Cached Mobile task or native-only policy differs')
+    frozen={item['human_demo_uuid']:item for item in snapshot['episodes']}
+    entries=selection.get('episodes',[])
+    identities=[item['human_demo_uuid'] for item in entries]
+    require(len(set(identities))==len(identities) and set(identities)<=set(frozen),
+        'Cached selection repeats, adds or replaces a frozen UUID')
+    passed={key for key,value in progress['episodes'].items() if value.get('eligible_for_packing') is True}
+    require(set(identities)==passed,'Cached selection differs from completed admission decisions')
+    if profile['mobile']:
+        require(set(identities)==set(frozen),'Frozen100 Mobile cohort is not fully admitted; no replacement or partial upload')
+    from pico_episode_review import discard_requested
+    for item in entries:
+        original=frozen[item['human_demo_uuid']]
+        require(all(item.get(key)==original.get(key) for key in
+            ('episode_dir','number','source_session')),'Cached selection changed a frozen source identity')
+        directory=Path(original['episode_dir'])
+        require(directory.is_dir() and not directory.is_symlink(),'Frozen source directory is missing or aliased')
+        require(all(sha(directory/name)==digest for name,digest in original['snapshot_sha256'].items()),
+            'Frozen source bytes changed after admission')
+        require(not discard_requested(directory)
+            and read(directory/'collection_record.json')['disposition']=='kept',
+            'A later operator discard cannot be revived by cached admission')
+        admission=directory/'admission.json'
+        require(item.get('admission_path')==str(admission) and sha(admission)==item.get('admission_sha256'),
+            'Cached selection admission receipt binding differs')
+        require(reusable_admission(directory) is not None,'Cached selection checker or admitted inputs changed')
 
 
 def run_child(argv, log, *, gpu=False, allow_rejection=False):
@@ -247,7 +306,8 @@ REMOTE_CHECK_READY = r'''
 import hashlib,json,pathlib,sys
 v=json.load(sys.stdin);root=pathlib.Path(v['remote_root']);p=root/'A100_PICO_DATASET_READY.json'
 assert p.is_file() and not p.is_symlink();r=json.loads(p.read_text())
-assert r['contract']=='cvpr-pico-handover-production-verification-v1' and r['status']=='passed'
+assert r['contract']==v.get('verification_contract','cvpr-pico-handover-production-verification-v1') and r['status']=='passed'
+if v.get('task_id') is not None:assert r['task_id']==v['task_id']
 assert r['release_root']==str(root) and r['pack_root']==str(root/'packed') and r['dino_root']==str(root/'dino')
 assert r['remote_production_ready'] is True and r['CUDA_initialized'] is False and r['GPU_used'] is False and r['training_started'] is False
 assert r['source_kind']=='live_pico_human' and r['split_restriction']=='train_only' and r['verifier_sha256']==v['verifier_sha256']
@@ -283,7 +343,9 @@ def remote_cpu_environment(argv):
 def remote_reader(plan, release):
     """Deploy only committed CPU tools to the new dataset, then verify its paths."""
     from upload_pico_handover import SSH,REMOTE_PYTHON,remote_python,remote_target
-    host = plan['remote_host'];remote = remote_target(plan['remote_root'])
+    profile = plan_profile(plan)
+    host = plan['remote_host'];remote = remote_target(plan['remote_root'],task_id=(MOBILE_TASK
+        if profile['mobile'] else 'simple/G1WholebodyHandoverTeleop-v0'))
     repo = Path(__file__).resolve().parents[2]
     revision = plan['code_revision']
     require(len(revision)==40 and all(c in '0123456789abcdef' for c in revision),'Pinned code revision required')
@@ -295,8 +357,8 @@ def remote_reader(plan, release):
     payload = {'remote_root':str(remote),'code_revision':revision,'archive_name':archive.name,
         'archive_sha256':sha(archive),'scope':'Independent CPU dataset tools only; no training checkout updates'}
     # Paths are shell-quoted as individual arguments; JSON stays on stdin.
-    command = shlex.join([REMOTE_PYTHON,'-B','-c',
-        REMOTE_TOOLS_DIRECTORY,str(remote)])
+    command = shlex.join(remote_cpu_environment([REMOTE_PYTHON,'-c',
+        REMOTE_TOOLS_DIRECTORY,str(remote)]))
     subprocess.run([*SSH,host,command],check=True)
     subprocess.run(['rsync','-a','--checksum','--protect-args','-e',shlex.join(SSH),
         str(archive),host+':'+str(remote/'tools')+'/'],check=True)
@@ -304,28 +366,30 @@ def remote_reader(plan, release):
     code = remote/'tools'/('code_'+revision)/'scripts/4090_simple/verify_pico_handover.py'
     environment = remote_cpu_environment([REMOTE_PYTHON,code])
     marker = remote/'A100_PICO_DATASET_READY.json'
-    test = shlex.join([REMOTE_PYTHON,'-B','-c','from pathlib import Path;import sys;sys.exit(0 if Path(sys.argv[1]).is_file() else 1)',str(marker)])
+    test = shlex.join(remote_cpu_environment([REMOTE_PYTHON,'-c','from pathlib import Path;import sys;sys.exit(0 if Path(sys.argv[1]).is_file() else 1)',str(marker)]))
     already = subprocess.run([*SSH,host,test],check=False).returncode==0
     if not already:
         relocate = shlex.join([*environment,'relocate','--pack-root',str(remote/'packed'),
             '--dino-root',str(remote/'dino')])
         # Relocation is idempotently recognized by its immutable receipt.
         relocated_marker = remote/'dino/REMOTE_DINO_RELOCATION.json'
-        test_relocation = shlex.join([REMOTE_PYTHON,'-B','-c',
-            'from pathlib import Path;import sys;sys.exit(0 if Path(sys.argv[1]).is_file() else 1)',str(relocated_marker)])
+        test_relocation = shlex.join(remote_cpu_environment([REMOTE_PYTHON,'-c',
+            'from pathlib import Path;import sys;sys.exit(0 if Path(sys.argv[1]).is_file() else 1)',str(relocated_marker)]))
         if subprocess.run([*SSH,host,test_relocation],check=False).returncode!=0:
             subprocess.run([*SSH,host,relocate],check=True)
         verify = shlex.join([*environment,'--pack-root',str(remote/'packed'),'--dino-root',str(remote/'dino'),
             '--reference-dino-root',plan['remote_reference_dino'],'--run-config',plan['remote_run_config'],
-            '--output',str(marker),'--a100'])
+            '--output',str(marker),'--a100',*(['--expected-episodes',
+                str(read(release/'PICO_DATASET_READY.json')['train_episodes'])] if profile['mobile'] else [])])
         subprocess.run([*SSH,host,verify],check=True)
-    fetch = shlex.join([REMOTE_PYTHON,'-B','-c',
-        'import pathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())',str(marker)])
+    fetch = shlex.join(remote_cpu_environment([REMOTE_PYTHON,'-c',
+        'import pathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())',str(marker)]))
     local = read(release/'PICO_DATASET_READY.json')
     remote_python(host,REMOTE_PYTHON,REMOTE_CHECK_READY,{'remote_root':str(remote),
         'verifier_sha256':sha(Path(__file__).with_name('verify_pico_handover.py')),
         'pack_ready_sha256':local['pack_ready_sha256'],'train_episodes':local['train_episodes'],
-        'train_windows':local['train_windows']})
+        'train_windows':local['train_windows'],'verification_contract':profile['verification_contract'],
+        **({'task_id':MOBILE_TASK} if profile['mobile'] else {})})
     result = subprocess.run([*SSH,host,fetch],check=True,text=True,capture_output=True)
     report = json.loads(result.stdout)
     require(report.get('status')=='passed' and report.get('remote_production_ready') is True
@@ -340,7 +404,7 @@ def remote_reader(plan, release):
 def process(plan_path):
     plan_path = Path(plan_path).resolve(strict=True)
     plan = read(plan_path)
-    require(plan.get('contract')==CONTRACT,'Unknown processing plan')
+    profile = plan_profile(plan)
     frozen_path,frozen = frozen_inventory(plan)
     require_idle()
     release = Path(plan['release']).absolute()
@@ -358,7 +422,7 @@ def process(plan_path):
         snapshot_path = release/'INVENTORY.json'
         if not snapshot_path.exists():
             shutil.copyfile(frozen_path,snapshot_path)
-        require(sha(snapshot_path)==plan['frozen_inventory_sha256'],'Release inventory differs from frozen90')
+        require(sha(snapshot_path)==plan['frozen_inventory_sha256'],'Release inventory differs from frozen cohort')
         snapshot = read(snapshot_path)
         progress_path = release/'PROCESSING_STATUS.json'
         progress = read(progress_path) if progress_path.exists() else {'created_utc':now(),'episodes':{}}
@@ -366,10 +430,14 @@ def process(plan_path):
         write(progress_path,progress)
         selection_path = release/'ADMISSIONS_SELECTION.json'
         frozen_selection = selection_path.is_file()
-        selection = read(selection_path) if frozen_selection else {'contract':SELECTION,'created_utc':now(),
-            'candidate_cohort':{'candidate_count':90,'frozen_inventory_sha256':sha(snapshot_path)},'episodes':[]}
+        selection = read(selection_path) if frozen_selection else {'contract':profile['selection_contract'],'created_utc':now(),
+            'candidate_cohort':{'candidate_count':plan['candidate_count'],'frozen_inventory_sha256':sha(snapshot_path)},'episodes':[]}
+        if profile['mobile'] and not frozen_selection:
+            selection.update(task_id=MOBILE_TASK,selection_policy='native_only')
         for item in ([] if frozen_selection else snapshot['episodes']):
             identity = item['human_demo_uuid'];directory = Path(item['episode_dir'])
+            progress.update(active_uuid=identity,active_number=item['number'],updated_utc=now())
+            write(progress_path,progress)
             if identity in progress['episodes']:
                 previous = progress['episodes'][identity]
                 if previous.get('eligible_for_packing') is not True and not previous.get('technical_failure'):
@@ -377,16 +445,19 @@ def process(plan_path):
             try:
                 require_idle()
                 if not directory.is_dir():
-                    raise AdmissionRejected('Frozen episode was moved or discarded; it will not be revived')
+                    raise ValueError('Frozen episode is missing; retain evidence and diagnose before admission')
                 if not all(sha(directory/name)==digest for name,digest in item['snapshot_sha256'].items()):
-                    raise AdmissionRejected('Frozen collection changed; never revive a later discard')
+                    raise ValueError('Frozen collection bytes changed; preserve receipts and diagnose identity')
                 from pico_episode_review import discard_requested
                 if discard_requested(directory) or read(directory/'collection_record.json')['disposition']!='kept':
                     raise AdmissionRejected('Operator discarded the recording after selection')
                 completion = directory/'rtx_completion.json'
                 if not completion.exists():
                     require(not (directory/'capture').exists(),'Partial RTX exists; preserve it for diagnosis')
-                    run_child([plan['simulation_python'],script/'render_deferred_pico.py',directory],
+                    render_argv=[plan['simulation_python'],script/'render_deferred_pico.py',directory]
+                    if profile['mobile']:
+                        render_argv.extend(['--data-root',plan['render_data_root']])
+                    run_child(render_argv,
                         logs/(identity+'.rtx.'+str(os.getpid())+'.log'),gpu=True)
                 require(read(completion).get('status')=='deferred_rtx_completed_pending_independent_audit',
                     'RTX did not finish without changing archived state')
@@ -399,11 +470,17 @@ def process(plan_path):
                             shutil.copyfile(old_admission,backup)
                     # The checker performs its first complete independent
                     # admission; no policy/SONIC/dynamics are replayed.
-                    run_child([plan['simulation_python'],script/'audit_pico_teleop_episode.py',directory],
+                    audit_argv=[plan['simulation_python'],script/'audit_pico_teleop_episode.py',directory]
+                    if profile['mobile']:
+                        audit_argv.extend(['--historical-sources',plan['historical_sources']])
+                    run_child(audit_argv,
                         logs/(identity+'.audit.'+str(os.getpid())+'.log'),allow_rejection=True)
                     fresh = read(directory/'admission.json')
                     if fresh.get('eligible_for_packing') is not True:
-                        raise AdmissionRejected('; '.join(fresh.get('errors',[])) or 'Independent admission rejected the recording')
+                        explicit_native_failure=(fresh.get('failure_kind')=='official_task_not_successful'
+                            and fresh.get('technical_blocked') is False)
+                        error_class=(ValueError if profile['mobile'] and not explicit_native_failure else AdmissionRejected)
+                        raise error_class('; '.join(fresh.get('errors',[])) or 'Independent admission rejected the recording')
                     admission = reusable_admission(directory)
                 require(admission.get('eligible_for_packing') is True,'; '.join(admission.get('errors',[])))
                 selection['episodes'].append({key:item[key] for key in
@@ -417,9 +494,14 @@ def process(plan_path):
                 progress['episodes'][identity]={'eligible_for_packing':False,'number':item['number'],
                     'reasons':[str(error)],'technical_failure':not isinstance(error,AdmissionRejected),
                     'raw_evidence_deleted':False}
+                if profile['mobile'] and not isinstance(error,AdmissionRejected):
+                    progress.update(status='technical_failure_needs_repair',updated_utc=now())
+                    write(progress_path,progress)
+                    raise ValueError('Mobile processing stopped for technical diagnosis at '+identity+': '+str(error)) from error
             progress['updated_utc']=now();write(progress_path,progress)
         technical = [identity for identity,item in progress['episodes'].items() if item.get('technical_failure')]
         require(not technical,'Processing failures need diagnosis, not data rejection: '+','.join(technical))
+        validate_frozen_selection(selection,snapshot,plan,progress)
         if not frozen_selection:
             write(selection_path,selection)
         require(selection['episodes'],'No independently admitted recordings; no package or upload created')
@@ -437,9 +519,12 @@ def process(plan_path):
                 '--batch-size','32','--workers','1','--decoder-threads','1','--cpu-threads','2',
                 '--storage-dtype','float32','--inference-precision','bf16'],logs/('dino.'+str(os.getpid())+'.log'),gpu=True)
         if not (release/'PICO_DATASET_READY.json').exists():
-            run_child([plan['model_python'],script/'verify_pico_handover.py','--pack-root',release/'packed',
+            verify_argv=[plan['model_python'],script/'verify_pico_handover.py','--pack-root',release/'packed',
                 '--dino-root',release/'dino','--reference-dino-root',plan['reference_dino'],
-                '--run-config',plan['run_config'],'--output',release/'PICO_DATASET_READY.json'],
+                '--run-config',plan['run_config'],'--output',release/'PICO_DATASET_READY.json']
+            if profile['mobile']:
+                verify_argv.extend(['--expected-episodes',str(len(selection['episodes']))])
+            run_child(verify_argv,
                 logs/('verify.'+str(os.getpid())+'.log'))
         progress.update(status='local_verified_uploading',updated_utc=now());write(progress_path,progress)
         require_idle()

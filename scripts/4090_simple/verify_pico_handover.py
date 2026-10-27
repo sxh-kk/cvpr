@@ -21,10 +21,25 @@ import verify_handover_supplement as shared
 
 CONTRACT = 'cvpr-pico-handover-production-verification-v1'
 PACK_CONTRACT = 'cvpr-pico-handover-lerobot-pack-v1'
+HANDOVER_TASK_ID = 'simple/G1WholebodyHandoverTeleop-v0'
+MOBILE_TASK_ID = 'simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0'
+MOBILE_CONTRACT = 'cvpr-pico-mobile-pp-production-verification-v1'
+MOBILE_PACK_CONTRACT = 'cvpr-pico-mobile-pp-lerobot-pack-v1'
 READY_NAME = 'PICO_DATASET_READY.json'
 SOURCE_FILES = ('source_initialization_receipt.json','source_run_config.json',
                 'source_dataset_statistics.json','source_state_info.json')
 require, sha, read, jsonl = shared.require, shared.sha, shared.read, shared.jsonl
+
+
+def production_protocol(task_id):
+    from pack_pico_handover import task_protocol
+    protocol = task_protocol(task_id)
+    kind = 'mobile-pp' if protocol['mobile'] else 'handover'
+    return {**protocol,
+        'production_contract':MOBILE_CONTRACT if protocol['mobile'] else CONTRACT,
+        'relocation_contract':f'cvpr-pico-{kind}-dino-host-relocation-v1',
+        'transfer_contract':f'cvpr-pico-{kind}-a100-byte-transfer-v1',
+        'byte_contract':f'cvpr-pico-{kind}-a100-byte-verification-v1'}
 
 
 def owned(root, relative):
@@ -64,10 +79,25 @@ def tree_inventory(root):
     return values
 
 
+def shared_original_evidence(pack, payload, admission, archived, original, expected, role):
+    from pack_pico_handover import valid_sha
+    require(isinstance(archived,dict) and isinstance(original,str) and valid_sha(expected)
+            and isinstance(archived.get('path'),str)
+            and archived.get('original_path')==original
+            and payload.get(archived['path'])==archived.get('sha256')==expected
+            and admission.get('bindings',{}).get(original)==expected,
+            'Mobile shared original '+role+' is not archived and SHA-bound')
+    owned(pack,archived['path'])
+
+
 def inspect_pack(pack, *, expected_episodes=None):
     pack = Path(pack).resolve(strict=True)
     ready = read(owned(pack,'PACK_READY.json'))
-    require(ready.get('contract')==PACK_CONTRACT and ready.get('train_payload_packed') is True
+    from pack_pico_handover import artifact_protocol
+    protocol = artifact_protocol(ready,'pack')
+    if protocol['mobile']:
+        require(ready.get('selection_policy')=='native_only','Mobile packed selection policy differs')
+    require(ready.get('train_payload_packed') is True
             and ready.get('final_ready') is False and ready.get('normalization_refitted') is False,
             'Require an unpromoted independent PICO human pack with inherited statistics')
     payload = ready.get('payload_sha256')
@@ -90,6 +120,9 @@ def inspect_pack(pack, *, expected_episodes=None):
                 and human_uuid not in seen,'Missing/duplicate canonical human demonstration UUID')
         seen.add(human_uuid)
         source = episode.get('source_identity',{})
+        if protocol['mobile']:
+            require(episode.get('task_id')==entry.get('task_id')==MOBILE_TASK_ID,
+                    'Mobile episode task identity differs from its pack')
         require(episode.get('source_kind')=='live_pico_human' and entry.get('source_kind')=='live_pico_human'
                 and episode.get('split')=='train' and episode.get('split_restriction')=='train_only'
                 and episode.get('lineage_complete') is True
@@ -109,7 +142,7 @@ def inspect_pack(pack, *, expected_episodes=None):
         admission_path = entry.get('admission_path')
         admission = read(owned(pack,admission_path))
         require(payload.get(admission_path)==entry.get('admission_sha256')
-                and admission.get('contract')=='cvpr-live-pico-handover-independent-admission-v1'
+                and admission.get('contract')==protocol['admission_contract']
                 and admission.get('status')=='independent_live_human_episode_audit_passed'
                 and admission.get('human_demo_uuid')==human_uuid
                 and admission.get('eligible_for_packing') is True
@@ -123,10 +156,36 @@ def inspect_pack(pack, *, expected_episodes=None):
         require(metadata_path in payload and metadata.get('source_kind')=='live_pico_human'
                 and metadata.get('human_demo_uuid')==human_uuid
                 and metadata.get('replay_source_sha256') is None,'Human source metadata differs')
-        from pack_pico_handover import BASE_CHECKS,AUDITOR_FILES
-        required = set(BASE_CHECKS)
+        if protocol['mobile']:
+            require(admission.get('task_id')==metadata.get('task_id')==MOBILE_TASK_ID,
+                    'Mobile admission/source task identity differs')
+            require(admission.get('selection_policy')=='native_only' and admission.get('technical_blocked') is False,
+                    'Mobile admission is not a complete native-only selection')
+            required_evidence = {'metadata.json','episode.json','commands.jsonl',
+                'raw_quality_samples.jsonl','applied_force_samples.jsonl'}
+            require(required_evidence<=set(evidence),'Mobile original evidence coverage differs')
+            trace = admission.get('mobile_reference_audit',{}).get('control_trace',{})
+            archived = entry.get('mobile_control_trace_file',{})
+            require(isinstance(trace,dict),'Mobile original control trace metadata is missing')
+            shared_original_evidence(pack,payload,admission,archived,trace.get('path'),trace.get('sha256'),'control trace')
+            historical = admission.get('mobile_reference_audit',{}).get('historical_sources',{})
+            archived_history = entry.get('mobile_historical_source_files',{})
+            require(isinstance(historical,dict) and isinstance(archived_history,dict),
+                    'Mobile historical source metadata is missing')
+            shared_original_evidence(pack,payload,admission,archived_history.get('manifest'),
+                historical.get('manifest_path'),historical.get('manifest_sha256'),'source manifest')
+            expected_sources,archived_sources = historical.get('files'),archived_history.get('files')
+            require(isinstance(expected_sources,list) and expected_sources
+                    and isinstance(archived_sources,list) and len(expected_sources)==len(archived_sources),
+                    'Mobile historical implementation coverage differs')
+            for source,copy in zip(expected_sources,archived_sources):
+                require(isinstance(source,dict) and isinstance(copy,dict)
+                        and isinstance(source.get('filename'),str) and copy.get('filename')==source['filename'],
+                        'Mobile historical implementation role differs')
+                shared_original_evidence(pack,payload,admission,copy,source.get('path'),source.get('sha256'),'capture implementation')
+        required = set(protocol['base_checks'])
         if metadata.get('render_mode')=='mujoco_deferred':required.add('original_full_state_to_deferred_rtx_bridge')
-        if metadata.get('quality_geometry_mode')=='deferred_geometry_with_original_solved_support':
+        if not protocol['mobile'] and metadata.get('quality_geometry_mode')=='deferred_geometry_with_original_solved_support':
             required.add('original_solved_support_and_deferred_geometry')
         if metadata.get('capture_start_protocol') is not None:required.add('independent_frozen_first_capture_boundary')
         require(required<=set(admission['checks']),'Human independent admission is missing mandatory checks')
@@ -138,7 +197,7 @@ def inspect_pack(pack, *, expected_episodes=None):
                 require(admission.get('bindings',{}).get(str(source_directory/original_relative))==payload[copied_relative],
                         'Copied human evidence is not the independently admitted original: '+original_relative)
         authorities = entry.get('auditor_source_files',{})
-        require({Path(name).name for name in authorities}==AUDITOR_FILES,'Archived auditor authority is incomplete')
+        require({Path(name).name for name in authorities}==protocol['auditor_files'],'Archived auditor authority is incomplete')
         for original,value in authorities.items():
             require(payload.get(value['path'])==value['sha256']==admission.get('auditor_source_sha256',{}).get(original),
                     'Archived auditor implementation SHA differs')
@@ -156,10 +215,12 @@ def inspect_pack(pack, *, expected_episodes=None):
     selection_path = selection_binding.get('path')
     selection = read(owned(pack,selection_path))
     require(payload.get(selection_path)==selection_binding.get('sha256')
-            and selection.get('contract')=='cvpr-pico-handover-admissions-selection-v1'
+            and selection.get('contract')==protocol['selection_contract']
             and [(row.get('human_demo_uuid'),row.get('admission_sha256')) for row in selection.get('episodes',[])]
                 ==[(entry['human_demo_uuid'],entry['admission_sha256']) for entry in entries],
             'Frozen selected human UUID/admission identities differ from the packaged set')
+    if protocol['mobile']:
+        require(selection.get('task_id')==MOBILE_TASK_ID,'Mobile selected task identity differs')
     require(not (pack/'val').exists() and not (pack/'test').exists(),'Human release is train-only')
     return pack,ready,episodes,{e['episode_index']:e for e in entries}
 
@@ -213,6 +274,7 @@ def verify(pack, dino_root, reference_dino_root, run_config, output, *, expected
     from curate_handover_dino_cache import full_encoder_contract
     require(not torch.cuda.is_initialized(),'CPU verifier must not initialize CUDA')
     pack,ready,episodes,entries = inspect_pack(pack,expected_episodes=expected_episodes)
+    protocol = production_protocol(ready.get('task_id',HANDOVER_TASK_ID))
     release = pack.parent
     dino_root,reference_dino_root = Path(dino_root).resolve(strict=True),Path(reference_dino_root).resolve(strict=True)
     require(pack.name=='packed' and dino_root.is_relative_to(release/'dino') and dino_root!=reference_dino_root,
@@ -223,13 +285,15 @@ def verify(pack, dino_root, reference_dino_root, run_config, output, *, expected
         require(output.name=='A100_PICO_DATASET_READY.json','A100 CPU readiness uses an explicit separate marker')
         relocation_path = owned(dino_root,'REMOTE_DINO_RELOCATION.json')
         relocation = read(relocation_path)
-        require(relocation.get('contract')=='cvpr-pico-handover-dino-host-relocation-v1'
+        require(relocation.get('contract')==protocol['relocation_contract']
                 and relocation.get('status')=='passed'
                 and relocation.get('dataset_root')==str(pack/'train')
                 and relocation.get('pack_ready_sha256')==sha(pack/'PACK_READY.json')
                 and relocation.get('manifest_sha256')==sha(dino_root/'manifest.json')
                 and relocation.get('data_and_features_byte_identical') is True,
                 'A100 production readiness requires the completed explicit host relocation')
+        if protocol['mobile']:
+            require(relocation.get('task_id')==MOBILE_TASK_ID,'Mobile relocated task identity differs')
         incoming_transfer_binding(release,include_cache=False)
         relocation_binding = {'path':str(relocation_path),'sha256':sha(relocation_path),
             'byte_verification_sha256':sha(release/'A100_BYTE_VERIFICATION.json')}
@@ -301,7 +365,9 @@ def verify(pack, dino_root, reference_dino_root, run_config, output, *, expected
     for path,wanted in external.items():
         require(identity(path)==wanted,'Reference/config changed during CPU verification')
     require(not torch.cuda.is_initialized(),'CPU production reader unexpectedly initialized CUDA')
-    report = {'contract':CONTRACT,'status':'passed','created_utc':datetime.now(timezone.utc).isoformat(),
+    report = {'contract':protocol['production_contract'],'task_id':protocol['task_id'],
+        **({'selection_policy':'native_only'} if protocol['mobile'] else {}),
+        'status':'passed','created_utc':datetime.now(timezone.utc).isoformat(),
         'release_root':str(release),'pack_root':str(pack),'dino_root':str(dino_root),
         'train_episodes':len(episodes),'total_frames':ready['total_frames'],'train_windows':len(subset),
         'pack_ready_sha256':sha(pack/'PACK_READY.json'),'cache_manifest_sha256':sha(dino_root/'manifest.json'),
@@ -323,16 +389,20 @@ def incoming_transfer_binding(release, *, include_cache=True):
     manifest_path = owned(release,'A100_TRANSFER_MANIFEST.json')
     report = read(owned(release,'A100_BYTE_VERIFICATION.json'))
     transfer = read(manifest_path)
-    require(transfer.get('contract')=='cvpr-pico-handover-a100-byte-transfer-v1'
+    from pack_pico_handover import artifact_protocol
+    pack = read(owned(release,'packed/PACK_READY.json'))
+    pack_protocol = artifact_protocol(pack,'pack')
+    protocol = production_protocol(pack_protocol['task_id'])
+    require(transfer.get('contract')==protocol['transfer_contract']
             and transfer.get('remote_root')==str(release)
-            and report.get('contract')=='cvpr-pico-handover-a100-byte-verification-v1'
+            and report.get('contract')==protocol['byte_contract']
             and report.get('status')=='all_copied_bytes_and_identities_verified'
             and report.get('remote_root')==str(release)
             and report.get('inventory_sha256')==sha(manifest_path)
             and report.get('remote_production_ready') is False,
             'Explicit same-release A100 byte verification is required')
     local_ready = read(owned(release,READY_NAME))
-    require(local_ready.get('contract')==CONTRACT and local_ready.get('status')=='passed'
+    require(local_ready.get('contract')==protocol['production_contract'] and local_ready.get('status')=='passed'
             and local_ready.get('production_ready_for_bound_pack_and_cache') is True
             and local_ready.get('source_kind')=='live_pico_human'
             and local_ready.get('split_restriction')=='train_only'
@@ -340,6 +410,9 @@ def incoming_transfer_binding(release, *, include_cache=True):
             and {relative:wanted for relative,wanted in transfer['files'].items()
                  if relative.startswith(('packed/','dino/'))}==local_ready.get('payload_files'),
             'Incoming byte verification must bind the original passed local production receipt')
+    if protocol['mobile']:
+        require(all(value.get('task_id')==MOBILE_TASK_ID for value in (transfer,report,local_ready)),
+                'Mobile transfer and CPU receipt task identities differ')
     for relative,wanted in transfer['files'].items():
         if not include_cache and relative.startswith('dino/'):
             continue
@@ -358,6 +431,7 @@ def relocate(pack, dino_root):
     shared.cpu_environment();shared.runtime_paths()
     from curate_handover_dino_cache import extractor
     pack,ready,episodes,entries = inspect_pack(pack)
+    protocol = production_protocol(ready.get('task_id',HANDOVER_TASK_ID))
     release = pack.parent;dino_root = Path(dino_root).resolve(strict=True)
     require(pack.name=='packed' and dino_root==release/'dino','Relocate only the independent release/dino tree')
     incoming_transfer_binding(release)
@@ -405,7 +479,7 @@ def relocate(pack, dino_root):
             cached = cache.load_episode_cache(staging,item['episode_index'],manifest=manifest,
                 dataset_root=pack/'train',verify_checksums=True)
             cached.features._mmap.close()
-        report = {'contract':'cvpr-pico-handover-dino-host-relocation-v1','status':'passed',
+        report = {'contract':protocol['relocation_contract'],'task_id':protocol['task_id'],'status':'passed',
             'created_utc':datetime.now(timezone.utc).isoformat(),
             'old_dataset_root':original_manifest['source']['dataset_root'],'dataset_root':str(pack/'train'),
             'pack_ready_sha256':sha(pack/'PACK_READY.json'),'original_manifest_sha256':sha(dino_root/'manifest.json'),

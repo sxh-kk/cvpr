@@ -448,7 +448,13 @@ Mobile 按用户要求使用 `selection_policy=native_only`、版本 `mobile-nat
 筛选规则更新不停止collector，review只在job边界轮换。
 新策略下`kept`只代表官方native成功且技术完整性通过，尚未进入完整独立RTX／DINO／训练准入。
 此 launcher 退出后只等待本次后台复核并封存，
-不调用旧 Handover 的 `finish_pico_session.py`／`audit_pico_teleop_episode.py`，不自动补图、上传或启动训练。
+不调用旧 Handover 的 `finish_pico_session.py`，不自动补图、上传或启动训练。
+后续用户已明确授权处理当前100条并上传A100，现从121条编号记录冻结100个selected UUID，
+采集器正常退出后才进入GPU阶段；不追加、替换或复用旧90条Handover交付目录。
+`audit_pico_teleop_episode.py`、无损转换／就绪及上传现有显式Mobile任务派发和独立合同。
+准备阶段114项CPU验证、首个实际002的1020帧RTX及10阶段独立审计通过；
+全100条、DINO与A100生产就绪尚未宣称完成。固定清单、协议、技术失败处理与远端就绪门见
+[Mobile固定100条数据核定与交付](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md)。
 
 Mobile 本轮针对 `planner_request_expired_no_reference` 修订 CPU 分配与故障诊断。
 旧003的四次超时与16:57:51–16:58:36后台review区间重叠，planner和review同用CPU31/nice19，
@@ -473,6 +479,6 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 原件保留、未正式编号且排除冻结001–026，不能算官方任务失败。仅把13个旧uv.tmp缓存保留迁到/tmp并原路径symlink，恢复约2.1GB，未删除采集数据。
 该技术事故不改变18条kept的准入范围，RTX／DINO／生产读取与训练数据就绪仍未完成。
 用户随后明确要求恢复，已启动新目录`collection/live_human_005_native_only`，未复用旧标定或覆盖原件；
-页面已刷新，实测有效全身追踪、following、无error、相机ready，操作者可继续现场录制。
+恢复时页面已刷新，实测有效全身追踪、following、无error、相机ready；后来采够100条后已正常退出转处理。
 启动源码SHA与native v2后台一致，planner CPU29、preview CPU30、review CPU31保持；回执为`restore_collection_005/RESTORE_COMPLETE.json`。
 另清理约3.2GB可重建的Omniverse编译纹理缓存，原始资源及采集数据未删；恢复时观测`/home`可用约338GB，不将全部容量变化归因于这次缓存清理。

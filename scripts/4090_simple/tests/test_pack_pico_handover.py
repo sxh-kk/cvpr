@@ -140,11 +140,46 @@ def refresh(case):
     directory = case["directory"]
     case["audit"]["bindings"] = {str(p.resolve()):packer.sha(p)
         for p in directory.rglob("*") if p.is_file() and p.name != "admission.json"}
+    case["audit"]["bindings"].update(case.get("external_bindings", {}))
     write(directory/"admission.json", case["audit"])
-    write(case["selection"], {"contract":packer.SELECTION_CONTRACT,"episodes":[{
+    protocol = packer.task_protocol(case["metadata"]["task_id"])
+    write(case["selection"], {"contract":protocol["selection_contract"],
+        **({"task_id":packer.MOBILE_TASK_ID} if protocol["mobile"] else {}),"episodes":[{
         "human_demo_uuid":case["identity"],"episode_dir":str(directory),
         "admission_path":str(directory/"admission.json"),
         "admission_sha256":packer.sha(directory/"admission.json"),"source_session":"live_human_fixture"}]})
+
+
+def make_mobile_case(root):
+    case = make_case(root)
+    directory = case['directory']
+    case['metadata'].update(task_id=packer.MOBILE_TASK_ID,
+        quality_geometry_mode='deferred_geometry_with_original_solved_support',
+        instruction=' Pick up the cracker box, walk to table2, and place it. ')
+    case['instruction'] = case['metadata']['instruction']
+    write(directory/'metadata.json',case['metadata'])
+    manifest = packer.read(directory/'capture/capture.json')
+    manifest.update(task_id=packer.MOBILE_TASK_ID,instruction=case['instruction'])
+    write(directory/'capture/capture.json',manifest)
+    (directory/'quality_samples.jsonl').rename(directory/'raw_quality_samples.jsonl')
+    audit = case['audit']
+    audit.update(contract=packer.MOBILE_ADMISSION_CONTRACT,task_id=packer.MOBILE_TASK_ID,
+        selection_policy='native_only',technical_blocked=False,
+        checks={name:{'passed':True} for name in packer.MOBILE_BASE_CHECKS},
+        auditor_source_sha256={str(Path(packer.__file__).with_name(name)):
+            packer.sha(Path(packer.__file__).with_name(name)) for name in packer.MOBILE_AUDITOR_FILES})
+    trace = root/'original_session_control_trace.jsonl'
+    trace.write_text('{"synthetic_control_trace_fixture_only":true}\n')
+    source = root/'historical_pico_simple_teleop.py'
+    source.write_text('# Historical capture implementation CPU fixture only\n')
+    historical = root/'HISTORICAL_SOURCE_IDENTITIES.json'
+    write(historical,{'files':[{'filename':source.name,'path':str(source),'sha256':packer.sha(source)}]})
+    audit['mobile_reference_audit'] = {'control_trace':{'path':str(trace),'sha256':packer.sha(trace)},
+        'historical_sources':{'manifest_path':str(historical),'manifest_sha256':packer.sha(historical),
+            'files':[{'filename':source.name,'path':str(source),'sha256':packer.sha(source)}]}}
+    case['external_bindings'] = {str(path):packer.sha(path) for path in (trace,source,historical)}
+    refresh(case)
+    return case
 
 
 def selected(case):
@@ -326,6 +361,79 @@ class PackerTests(unittest.TestCase):
                 packer.pack(case["template"], case["selection"], case["output"])
         assert not case["output"].exists()
         assert len(list(tmp_path.glob(".packed.partial-*/PACK_FAILED.json"))) == 1
+
+    def test_mobile_actual_lossless_conversion_keeps_task_labels_and_portable_original_evidence(self):
+        import verify_pico_handover as verifier
+        case = make_mobile_case(self.root)
+        report = packer.pack(case['template'],case['selection'],case['output'])
+        self.assertEqual(report['contract'],packer.MOBILE_CONTRACT)
+        self.assertEqual(report['task_id'],packer.MOBILE_TASK_ID)
+        self.assertFalse(report['tokens_reencoded'])
+        self.assertFalse(report['normalization_refitted'])
+        episode = report['episodes'][0]
+        self.assertTrue(episode['video']['pixels_exact'])
+        self.assertEqual(episode['instruction'],case['instruction'])
+        self.assertEqual(episode['task_id'],packer.MOBILE_TASK_ID)
+        self.assertEqual(episode['eligible_current_rows'],list(range(30,36)))
+        self.assertIn('raw_quality_samples.jsonl',episode['evidence_files'])
+        self.assertNotIn('quality_samples.jsonl',episode['evidence_files'])
+        table = pq.read_table(case['output']/episode['parquet_path'])
+        np.testing.assert_array_equal(table['action.body_token_v1_1'][30].as_py(),np.full(64,.3,np.float32))
+        self.assertTrue(np.isnan(table['action.body_token_v1_1'][:30].to_pylist()).all())
+        self.assertEqual(table['task_description'].to_pylist(),[case['instruction']]*65)
+        trace = episode['mobile_control_trace_file']
+        self.assertEqual((case['output']/trace['path']).read_bytes(),Path(trace['original_path']).read_bytes())
+        historical = episode['mobile_historical_source_files']
+        for value in [historical['manifest'],*historical['files']]:
+            self.assertEqual((case['output']/value['path']).read_bytes(),Path(value['original_path']).read_bytes())
+        self.assertFalse(set(case['external_bindings']) & set(episode['external_authority_bindings']))
+        verifier.inspect_pack(case['output'],expected_episodes=1)
+
+    def test_mobile_shared_trace_and_historical_source_are_copied_once_per_sha(self):
+        first_root,second_root = self.root/'first',self.root/'second'
+        first_root.mkdir();second_root.mkdir()
+        first,second = make_mobile_case(first_root),make_mobile_case(second_root)
+        selection = packer.read(first['selection'])
+        selection['episodes'] += packer.read(second['selection'])['episodes']
+        write(first['selection'],selection)
+        report = packer.pack(first['template'],first['selection'],first['output'])
+        a,b = report['episodes']
+        self.assertEqual(a['mobile_control_trace_file']['path'],b['mobile_control_trace_file']['path'])
+        self.assertEqual(a['mobile_historical_source_files']['files'][0]['path'],
+                         b['mobile_historical_source_files']['files'][0]['path'])
+        self.assertEqual(len(list((first['output']/'accepted_evidence/session_traces').glob('*.jsonl'))),1)
+        self.assertEqual(len(list((first['output']/'accepted_evidence/historical_sources').rglob('*.py'))),1)
+
+    def test_mobile_refuses_handover_contract_missing_native_authority_and_unbound_original_sources(self):
+        for change in ('selection','admission','task','policy','technical','native_check','continuous_check','auditor',
+                       'raw_samples','trace','historical_sources'):
+            with self.subTest(change=change):
+                root = self.root/change;root.mkdir();case = make_mobile_case(root)
+                if change == 'selection':
+                    value=packer.read(case['selection']);value['contract']=packer.SELECTION_CONTRACT;write(case['selection'],value)
+                elif change == 'admission':
+                    case['audit']['contract']=packer.ADMISSION_CONTRACT;refresh(case)
+                elif change == 'task':
+                    case['metadata']['task_id']=packer.HANDOVER_TASK_ID
+                    write(case['directory']/'metadata.json',case['metadata'])
+                    case['metadata']['task_id']=packer.MOBILE_TASK_ID;refresh(case)
+                elif change in ('policy','technical'):
+                    case['audit']['selection_policy' if change=='policy' else 'technical_blocked'] = (
+                        'extra_geometry' if change=='policy' else True)
+                    refresh(case)
+                elif change in ('native_check','continuous_check'):
+                    key='independent_native_mobile_task_success' if change=='native_check' else 'independent_mobile_continuous_reference'
+                    case['audit']['checks'].pop(key);refresh(case)
+                elif change == 'auditor':
+                    case['audit']['auditor_source_sha256'].pop(next(iter(case['audit']['auditor_source_sha256'])));refresh(case)
+                elif change == 'raw_samples':
+                    (case['directory']/'raw_quality_samples.jsonl').unlink();refresh(case)
+                else:
+                    case['audit']['mobile_reference_audit'].pop('control_trace' if change=='trace' else change);refresh(case)
+                with self.assertRaises((ValueError,KeyError)):
+                    packer.pack(case['template'],case['selection'],case['output'])
+                self.assertFalse(case['output'].exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -158,6 +158,25 @@ class WorkflowTests(unittest.TestCase):
                 workflow.write(source,value);plan['frozen_inventory_sha256']=workflow.sha(source)
             with self.assertRaises(ValueError):workflow.frozen_inventory(plan)
 
+    def test_mobile_frozen100_has_its_own_task_and_selection_contract(self):
+        source, value, plan = self.frozen_plan()
+        value.update(contract=workflow.MOBILE_INVENTORY,task_id=workflow.MOBILE_TASK,
+            selection_policy='native_only',physical_preaccepted_candidates=100,
+            episodes=[{'human_demo_uuid':str(i)} for i in range(100)])
+        workflow.write(source,value)
+        plan.update(contract=workflow.MOBILE_CONTRACT,task_id=workflow.MOBILE_TASK,
+            candidate_count=100,frozen_inventory_sha256=workflow.sha(source))
+        self.assertEqual(workflow.frozen_inventory(plan),(source,value))
+        self.assertEqual(workflow.plan_profile(plan)['selection_contract'],workflow.MOBILE_SELECTION)
+        for field, changed in [('task_id','handover'),('selection_policy','extra_geometry'),
+                               ('physical_preaccepted_candidates',99)]:
+            with self.subTest(field=field):
+                workflow.write(source,{**value,field:changed})
+                altered={**plan,'frozen_inventory_sha256':workflow.sha(source)}
+                with self.assertRaises(ValueError):workflow.frozen_inventory(altered)
+        with self.assertRaises(ValueError):
+            workflow.plan_profile({**plan,'task_id':'handover'})
+
     def test_remote_cpu_wrapper_never_enables_cuda_or_changes_training_arguments(self):
         argv=workflow.remote_cpu_environment(['/env/python','verify.py','--a100'])
         self.assertIn('CUDA_VISIBLE_DEVICES=',argv)
@@ -165,6 +184,60 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(argv[-2:],['verify.py','--a100'])
         self.assertIn('/env/python',argv)
         self.assertEqual(argv[argv.index('nice'):argv.index('nice')+3],['nice','-n','19'])
+
+    def test_cached_mobile_selection_cannot_add_or_replace_a_frozen_uuid(self):
+        source,value,plan=self.frozen_plan()
+        value.update(contract=workflow.MOBILE_INVENTORY,task_id=workflow.MOBILE_TASK,
+            selection_policy='native_only',physical_preaccepted_candidates=100,
+            episodes=[{'human_demo_uuid':str(i)} for i in range(100)])
+        workflow.write(source,value)
+        plan.update(contract=workflow.MOBILE_CONTRACT,task_id=workflow.MOBILE_TASK,
+            candidate_count=100,frozen_inventory_sha256=workflow.sha(source))
+        release=Path(plan['release']);release.mkdir()
+        selection={'contract':workflow.MOBILE_SELECTION,'task_id':workflow.MOBILE_TASK,
+            'selection_policy':'native_only','candidate_cohort':{'candidate_count':100,
+                'frozen_inventory_sha256':plan['frozen_inventory_sha256']},
+            'episodes':[{'human_demo_uuid':'later-recording'}]}
+        workflow.write(release/'ADMISSIONS_SELECTION.json',selection)
+        workflow.write(release/'PROCESSING_STATUS.json',{'episodes':{
+            'later-recording':{'eligible_for_packing':True}}})
+        plan_path=self.root/'plan.json';workflow.write(plan_path,plan)
+        with patch.object(workflow,'require_idle'),patch.object(workflow,'run_child') as child:
+            with self.assertRaisesRegex(ValueError,'repeats, adds or replaces'):
+                workflow.process(plan_path)
+            child.assert_not_called()
+
+    def test_cached_selection_checks_contract_cohort_and_does_not_rewrite_policy(self):
+        plan={'contract':workflow.MOBILE_CONTRACT,'task_id':workflow.MOBILE_TASK,
+            'candidate_count':100,'frozen_inventory_sha256':'a'*64}
+        selection={'contract':workflow.MOBILE_SELECTION,'task_id':workflow.MOBILE_TASK,
+            'selection_policy':'native_only','candidate_cohort':{'candidate_count':100,
+                'frozen_inventory_sha256':'a'*64},'episodes':[]}
+        for change in ({'contract':workflow.SELECTION},{'task_id':'handover'},
+                {'selection_policy':'extra-geometry'},
+                {'candidate_cohort':{'candidate_count':100,'frozen_inventory_sha256':'b'*64}}):
+            altered={**selection,**change};before=json.dumps(altered,sort_keys=True)
+            with self.assertRaises(ValueError):
+                workflow.validate_frozen_selection(altered,{'episodes':[]},plan,{'episodes':{}})
+            self.assertEqual(json.dumps(altered,sort_keys=True),before)
+
+    def test_remote_mobile_ready_requires_the_exact_mobile_contract_and_task(self):
+        root=self.root/'remote';root.mkdir()
+        expected={'remote_root':str(root),'verifier_sha256':'c'*64,'pack_ready_sha256':'d'*64,
+            'train_episodes':100,'train_windows':55906,
+            'verification_contract':workflow.MOBILE_VERIFICATION,'task_id':workflow.MOBILE_TASK}
+        report={**expected,'contract':workflow.MOBILE_VERIFICATION,'status':'passed',
+            'release_root':str(root),'pack_root':str(root/'packed'),'dino_root':str(root/'dino'),
+            'remote_production_ready':True,'CUDA_initialized':False,'GPU_used':False,'training_started':False,
+            'source_kind':'live_pico_human','split_restriction':'train_only',
+            'payload_files':{},'external_reference_files':{}}
+        def check():return subprocess.run([sys.executable,'-c',workflow.REMOTE_CHECK_READY],
+            input=json.dumps(expected),text=True,capture_output=True)
+        workflow.write(root/'A100_PICO_DATASET_READY.json',report)
+        self.assertEqual(check().returncode,0)
+        for change in ({'task_id':'handover'},{'contract':'cvpr-pico-handover-production-verification-v1'}):
+            workflow.write(root/'A100_PICO_DATASET_READY.json',{**report,**change})
+            self.assertNotEqual(check().returncode,0)
 
     def test_remote_code_extracts_only_owned_regular_committed_source(self):
         root=self.root/'remote';tools=root/'tools';tools.mkdir(parents=True)

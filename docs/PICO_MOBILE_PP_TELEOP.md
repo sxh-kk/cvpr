@@ -6,15 +6,20 @@
 `g1_wholebody_locomotion_pick_between_tables_teleop`。
 [官方论文表 1 的 Mobile P&P 与任务名对应关系](https://arxiv.org/html/2606.08278v1#S4.T1)。
 
-截至 2026-10-27，资源、真实 CPU 冷启动／站立及旧版移动控制已有独立验证，旧版也收到过有效 PICO 全身追踪。
+截至 2026-10-27，资源、真实 CPU 冷启动／站立及移动控制已有独立验证，并已完成本轮真人采集。
 本次按用户要求把 Mobile 默认控制改为 **`continuous_vr_mode1`：左杆前进、右杆转向，双臂与颈部参考持续跟随人体**，
 取消 B 切换、移动时上身锁定和 3 厘米返回姿态门。旧策略以 `locked_upper_mode0` 显式保留。
-**本轮 CPU 分配与诊断修订已通过 294 项 PICO CPU 回归及生产几何复核并行的 18 秒空手入口检查。
+用户在采够后要求处理当前 100 条并上传 A100，已从 121 条编号记录冻结 100 个 selected UUID；
+`live_human_005_native_only` 已正常退出后才开始 RTX，固定清单不追加或替换样本。
+首个实际样本 002 已通过 1,020 帧 RTX 与 10 阶段独立审计，完整 100 条及 A100 就绪尚未宣称完成，
+见[固定 100 条核定与交付](PICO_MOBILE_PP_DATASET_ADMISSION.md)。
+
+本轮 CPU 分配与诊断修订已通过 294 项 PICO CPU 回归及生产几何复核并行的 18 秒空手入口检查。
 旧 `live_human_003_continuous_vr1` 的超时证据与原数据保留，已正常退出；
-新 `live_human_004_cpu_isolated` 已实际加载并核对源码、planner CPU29 和预览 CPU30。
-加载页面快照无错误、暂停且未录制；操作者随后继续录制，之后 collector 因磁盘 ENOSPC 自行退出，现已按用户授权恢复为 `live_human_005_native_only`。
-本轮仅官方 native 筛选已应用到冻结的 001–026：18 条保留、3 条官方未成功、4 条技术阻塞、1 条人工丢弃意图保留；26 个完成 job 缓存已刷新。
-未封存的第 27 次尝试另保留为技术故障。独立 RTX／DINO 和训练数据就绪仍未完成。**
+历史会话 `live_human_004_cpu_isolated` 曾实际加载并核对源码、planner CPU29 和预览 CPU30。
+当时加载页面快照无错误、暂停且未录制；操作者随后继续录制，之后 collector 因磁盘 ENOSPC 自行退出，随后按用户授权恢复为 `live_human_005_native_only`。
+早期仅官方 native 筛选已应用到冻结的 001–026：18 条保留、3 条官方未成功、4 条技术阻塞、1 条人工丢弃意图保留；26 个完成 job 缓存已刷新。
+未封存的第 27 次尝试另保留为技术故障。这些早期回执不代表后来固定 100 条的独立 RTX／DINO 或训练数据就绪。
 下面把新操作方式与旧版证据分开说明。旧 Handover 默认 mode2、原固定 90 条候选及其交付范围保持独立。
 
 ## 独立入口与资源
@@ -207,8 +212,10 @@ bash scripts/4090_simple/start_pico_mobile_pp.sh \
 **在新策略下，`kept` 表示官方 native 曾成功且技术完整性通过，`eligible_for_packing` 仍为 false。**
 它不表示 RTX 图像、完整独立审计、clean DINO、训练格式或生产读取已经通过。
 独立 CPU 后台复核完成后，launcher 只封存并报告 raw 证据，**不自动补图、不上传、不启动训练**。
-旧 `audit_pico_teleop_episode.py`、`finish_pico_session.py` 和固定 90 条 Handover 的准入／打包入口
-尚不支持本次 Mobile 任务，不能直接套用。完整 Mobile 独立 RTX／DINO 准入仍待实现和验收。
+本轮 `audit_pico_teleop_episode.py` 已增加显式 Mobile 派发和 `pico_mobile_audit.py` 独立检查，
+转换、DINO 生产读取和上传入口也使用 Mobile 专属合同。`finish_pico_session.py` 及旧固定 90 条 Handover 计划
+仍不能作为本批 Mobile 的自动后处理入口。用户另行授权的固定 100 条处理、实际验证及就绪门见
+[Mobile 数据核定与交付](PICO_MOBILE_PP_DATASET_ADMISSION.md)；单凭集合 `kept` 不会跳过这些阶段。
 
 ### 001–026 的实际重筛结果
 

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import traceback
+import inspect
 
 import numpy as np
 
@@ -20,6 +21,27 @@ from pico_simple_teleop import (actual_renderer_poses, bind_saved_scene_manager,
     environment_binding_receipt, load_environment_config, root_pose)
 from replay_handover_teacher import (TrainingCapture, bound_calibration_assets,
     calibration_source_identities, file_sha256, write_json)
+
+
+def recorded_task(metadata):
+    """Dispatch by recorded task identity; never render Mobile in a Handover room."""
+    from pico_mobile_task import HANDOVER_TASK, MOBILE_TASK
+    task = metadata.get('task_id', HANDOVER_TASK)
+    if task not in (HANDOVER_TASK, MOBILE_TASK):
+        raise ValueError('Unsupported recorded task identity: ' + str(task))
+    if task == MOBILE_TASK:
+        from pico_episode_history import MOBILE_OFFICIAL_SOURCE_SHA256, MOBILE_NATIVE_SUCCESS_CRITERIA
+        criteria = metadata.get('actual_native_success_criteria')
+        if (metadata.get('actual_task_source_sha256') != MOBILE_OFFICIAL_SOURCE_SHA256
+                or type(criteria) not in (int,float) or criteria != MOBILE_NATIVE_SUCCESS_CRITERIA):
+            raise ValueError('Recorded Mobile official source or success threshold identity differs')
+    return task
+
+
+def recorded_environment(path, data_root, task_id):
+    from pico_mobile_task import MOBILE_TASK
+    return load_environment_config(path, data_root,
+        profile='mobile_pp' if task_id == MOBILE_TASK else 'handover')
 
 
 class RecordedStateView:
@@ -112,6 +134,7 @@ def render(args):
     source=load_deferred(episode/'deferred_capture',verify=True)
     manifest,events,states=source['manifest'],source['events'],source['states']
     metadata=manifest['metadata']
+    task_id = recorded_task(metadata)
     if manifest['status'] != 'raw_physics_capture_completed_pending_rtx':
         raise ValueError('Only explicitly completed physical captures may be rendered for audit')
     original_outcome=json.loads((episode/'episode.json').read_text())
@@ -123,7 +146,7 @@ def render(args):
     os.environ['SIMPLE_DATA_DIR']=str(data_root)
     expected_env_path=episode/'deferred_render_environment.json'
     write_json(expected_env_path,metadata['environment_config'])
-    environment,_=load_environment_config(expected_env_path,data_root)
+    environment,_=recorded_environment(expected_env_path,data_root,task_id)
     result={'contract':'cvpr-pico-deferred-rtx-completion-v1','status':'initializing',
         'accepted_new_dataset':False,'eligible_for_packing':False,
         'source_kind':metadata['source_kind'],'observation_domain_feedback':'MuJoCo EGL preview',
@@ -133,6 +156,7 @@ def render(args):
         'source_events_sha256':file_sha256(episode/'deferred_capture/events.jsonl'),
         'source_model_sha256':file_sha256(episode/'deferred_capture/model.mjb'),
         'source_states_sha256':file_sha256(episode/'deferred_capture/states.npy'),
+        'task_id':task_id,
         'render_code_sha256':file_sha256(__file__)}
     env=capture=None
     try:
@@ -145,10 +169,13 @@ def render(args):
         view=RecordedStateView(model,data,source['joint_names'],metadata['mujoco_object_body_names'],metadata['mujoco_obj_names'])
         sonic=SimLoopConfig().load_wbc_yaml()
         sonic.update(ENV_NAME='simple',SIMULATE_DT=.005,ENABLE_ELASTIC_BAND=False)
-        env=gym.make('simple/G1WholebodyHandoverTeleop-v0',sonic_config=sonic,
+        env=gym.make(task_id,sonic_config=sonic,
             sim_mode='mujoco_isaac',headless=True,dr_level=0,sync_mujoco_observations=True,
             isaac_observation_only=True,disable_env_checker=True)
         raw=env.unwrapped
+        result['actual_task_source_sha256'] = file_sha256(inspect.getfile(type(raw.task)))
+        if metadata.get('actual_task_source_sha256') is not None and result['actual_task_source_sha256'] != metadata['actual_task_source_sha256']:
+            raise ValueError('Loaded RTX task module differs from the original capture')
         bind_saved_scene_manager(raw.task,environment)
         raw._render_frame=lambda:raw.isaac.render()
         env.reset(seed=metadata['physics_seed'],options={'state_dict':copy.deepcopy(environment),'dr_level':None})

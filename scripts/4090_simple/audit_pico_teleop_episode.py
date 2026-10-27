@@ -502,7 +502,7 @@ def _check_deferred_quality(metadata, outcome, qualities, read, bindings, root):
     return {"original_solved_force_retained":True,"deferred_geometry_reproduced":True,"rows":len(raw)}
 
 
-def audit_episode(directory, *, write_report=True):
+def audit_episode(directory, *, write_report=True, historical_source_manifest=None):
     """Recompute raw eligibility. Invalid/missing evidence yields a rejection."""
     root = Path(directory).resolve(strict=True)
     report = {"contract": CONTRACT, "generated_utc": datetime.now(timezone.utc).isoformat(),
@@ -538,6 +538,19 @@ def audit_episode(directory, *, write_report=True):
             report["errors"].append(message)
             return None
     try:
+        metadata = read("metadata.json")
+        from pico_mobile_quality import MOBILE_TASK_ID
+        mobile = metadata.get('task_id') == MOBILE_TASK_ID
+        if mobile:
+            import pico_mobile_audit as mobile_audit
+            report.update(contract=mobile_audit.CONTRACT, task_id=MOBILE_TASK_ID,
+                selection_policy='native_only', technical_blocked=False,
+                scope='Independent original Mobile native task flags and capture/command/RGB/full-state/force consistency; separate packaging, clean DINO and production-reader acceptance remain required')
+            report['limitations'][-1] = ('Task success uses any complete original native50Hz boolean; no lift, carry distance, '
+                'release, geometry, support, stability or fall success criterion is added.')
+            report['limitations'].append('Planner numeric forecasts and ONNX inference are not rerun; original output hashes and timeline declarations are checked as serialized evidence.')
+            report['auditor_source_sha256'] = {str(Path(__file__).with_name(name).resolve()):
+                sha(Path(__file__).with_name(name)) for name in mobile_audit.AUDITOR_FILES}
         for marker_name in ('operator_discard.json','collection_record.json'):
             marker = root/marker_name
             require(not marker.is_symlink(), 'Discard/collection record must not be a symbolic link')
@@ -552,7 +565,6 @@ def audit_episode(directory, *, write_report=True):
                 raise ValueError('Episode collection rejected this recording: '+str(disposition.get('reasons',[])))
         from pico_episode_review import discard_requested
         require(not discard_requested(root), 'Operator discard is pending in the background queue')
-        metadata = read("metadata.json")
         outcome = read("episode.json")
         if outcome.get("geometry_pending") is True:
             submission = read("review_queue_submission.json")
@@ -567,14 +579,18 @@ def audit_episode(directory, *, write_report=True):
         async_result = None if deferred else read("capture/async_capture.json")
         events = read("capture/events.jsonl", lines=True)
         ledger = read("commands.jsonl", lines=True)
-        qualities = read("quality_samples.jsonl", lines=True)
+        quality_name = ('raw_quality_samples.jsonl' if mobile and (root/'raw_quality_samples.jsonl').is_file()
+                        else 'quality_samples.jsonl')
+        qualities = read(quality_name, lines=True)
         forces = read("applied_force_samples.jsonl", lines=True)
         require(bool(events) and bool(qualities), "Empty recorded episode")
         start_time = float(events[0]["sim_time_s"])
         ticks = len(qualities)
         identity = str(uuid.UUID(metadata["human_demo_uuid"]))
         report.update(human_demo_uuid=identity, event_count=len(events), control_ticks50=ticks)
-        expected_checks = 7
+        expected_checks = 8 if mobile else 7
+        if mobile:
+            report['native_quality_source'] = {'path':quality_name, 'sha256':bindings[str(root/quality_name)]}
         if deferred:
             report.update(observation_domain_feedback="MuJoCo EGL preview", training_rgb_domain="Isaac RTX deferred",
                           rgb_was_live_operator_feedback=False)
@@ -584,19 +600,22 @@ def audit_episode(directory, *, write_report=True):
                 require(data.get("source_kind") == "live_pico_human", "Recorded replay/unknown source is never eligible")
                 require(data.get("accepted_new_dataset") is False, "Raw recording must not claim dataset acceptance")
                 require(data.get("replay_source_sha256") is None, "Recorded replay provenance is present")
-            require(metadata.get("task_id") == TASK and metadata.get("render_mode") in ("isaac", "mujoco_deferred")
+            require(metadata.get("task_id") == (MOBILE_TASK_ID if mobile else TASK) and metadata.get("render_mode") in ("isaac", "mujoco_deferred")
                     and metadata.get("physics_hz") == 200 and metadata.get("decoder_hz") == 50
                     and metadata.get("command_rgb_hz") == 30 and metadata.get("raw_pico_va_wva_used") is False,
                     "Task/rendering/rate/raw-derivative contract differs")
             initial = metadata["initialization"]
             require(initial.get("object_restores_during_control") is False and initial.get("external_assistance") is False,
                     "External assistance or in-episode state restore is not accepted")
-            initial_z = metadata.get("initial_target_z_m")
-            require(type(initial_z) in (int, float) and math.isfinite(initial_z)
-                    and type(manifest.get("initial_target_z_m")) in (int, float)
-                    and close(initial_z, manifest["initial_target_z_m"], 1e-9)
-                    and close(initial_z, pose(events[0]["objects"]["target"]["pose7"], "initial target")[2], 1e-9),
-                    "Initial target height must be finite and match actual first-frame and capture metadata")
+            if mobile:
+                report['official_mobile_identity'] = mobile_audit.validate_metadata(metadata, bindings)
+            else:
+                initial_z = metadata.get("initial_target_z_m")
+                require(type(initial_z) in (int, float) and math.isfinite(initial_z)
+                        and type(manifest.get("initial_target_z_m")) in (int, float)
+                        and close(initial_z, manifest["initial_target_z_m"], 1e-9)
+                        and close(initial_z, pose(events[0]["objects"]["target"]["pose7"], "initial target")[2], 1e-9),
+                        "Initial target height must be finite and match actual first-frame and capture metadata")
         stage("live_source_and_rates", source)
 
         def completion():
@@ -633,7 +652,7 @@ def audit_episode(directory, *, write_report=True):
             report["capture_start_boundary"] = stage("independent_frozen_first_capture_boundary", lambda:
                 _check_capture_start(metadata, outcome, events, ledger, read, bindings, root,
                                      report.get("deferred_rtx_bridge")))
-        if metadata.get("quality_geometry_mode") == "deferred_geometry_with_original_solved_support":
+        if not mobile and metadata.get("quality_geometry_mode") == "deferred_geometry_with_original_solved_support":
             expected_checks += 1
             report["deferred_quality_geometry"] = stage("original_solved_support_and_deferred_geometry", lambda:
                 _check_deferred_quality(metadata, outcome, qualities, read, bindings, root))
@@ -647,6 +666,7 @@ def audit_episode(directory, *, write_report=True):
                     and ledger[0]["metadata"] == metadata, "Final command ledger SHA/count/identity changed")
             previous = None
             previous_ns = None
+            mobile_helper = None
             for index, row in enumerate(ledger):
                 require(row.get("event_index") == index and row.get("human_demo_uuid") == identity
                         and row.get("accepted_new_dataset") is False
@@ -673,17 +693,23 @@ def audit_episode(directory, *, write_report=True):
                 require(isinstance(hands, dict) and set(hands) == set(MODEL_HAND_NAMES), "Named hand14 semantics differ")
                 vector([hands[name] for name in MODEL_HAND_NAMES], 14, "actual hands")
                 evidence = row["reference_evidence"]
-                require(evidence.get("contract") == REFERENCE_CONTRACT and evidence.get("encoder_mode") == 2
-                        and evidence.get("model_inference_performed") is True
+                require(evidence.get("model_inference_performed") is True
                         and evidence.get("encoder_sha256") == ENCODER_SHA256
-                        and evidence.get("PICO_raw_va_wva_used") is False
-                        and evidence.get("device_timestamp_ns") == frame.device_timestamp_ns
-                        and evidence.get("token_sha256") == hashlib.sha256(token.astype(np.float32).tobytes()).hexdigest()
-                        and evidence.get("identities") == checked_identity,
+                        and evidence.get("token_sha256") == hashlib.sha256(token.astype(np.float32).tobytes()).hexdigest(),
                         "Executed token/source/actual encoder evidence differs")
-                horizon = evidence["reference_horizon"]
-                require(horizon.get("kind") == "causal_constant_desired_pose_hold"
-                        and horizon.get("measured_future_frames") == 0, "Live desired reference is misrepresented as measured future")
+                if mobile:
+                    mobile_helper = mobile_audit.check_reference(frame, event, evidence, metadata, bindings,
+                                                                helper=mobile_helper)
+                    mobile_audit.check_hands(frame, hands, metadata)
+                else:
+                    require(evidence.get("contract") == REFERENCE_CONTRACT and evidence.get("encoder_mode") == 2
+                            and evidence.get("PICO_raw_va_wva_used") is False
+                            and evidence.get("device_timestamp_ns") == frame.device_timestamp_ns
+                            and evidence.get("identities") == checked_identity,
+                            "Executed mode2 source/actual encoder evidence differs")
+                    horizon = evidence["reference_horizon"]
+                    require(horizon.get("kind") == "causal_constant_desired_pose_hold"
+                            and horizon.get("measured_future_frames") == 0, "Live desired reference is misrepresented as measured future")
         stage("raw_fullbody_and_actual_command_ledger", commands)
 
         def dense_capture():
@@ -741,6 +767,20 @@ def audit_episode(directory, *, write_report=True):
                 bindings[str(path)] = image["file_sha256"]
         stage("dense_actual_rgb_state_actions", dense_capture)
 
+        if mobile:
+            def mobile_reference():
+                historical = mobile_audit.check_historical_sources(metadata, historical_source_manifest, bindings)
+                original_quality = mobile_audit.check_native_source_binding(root, quality_name, bindings)
+                trace = mobile_audit.check_control_trace(root, metadata, outcome, events, ledger, qualities, bindings)
+                report['mobile_reference_audit'] = {'historical_sources':historical, 'control_trace':trace,
+                    'original_native_source':original_quality,
+                    'same_packet_body_and_same_tick_root_VR_recomputed':report['checks'].get(
+                        'raw_fullbody_and_actual_command_ledger', {}).get('passed') is True,
+                    'reference_numeric_inference_independently_reproduced':False,
+                    'actual_original_source_code_snapshots_verified':True,
+                    'model_forecasts_are_training_labels':False, 'dynamics_steps_performed':0}
+            stage('independent_mobile_continuous_reference', mobile_reference)
+
         def physical():
             for index, row in enumerate(qualities):
                 require(row["completed_steps"] == index+1 and close(row["sim_time_s"], start_time+(index+1)/50), "Physical50Hz evidence has gaps")
@@ -760,7 +800,16 @@ def audit_episode(directory, *, write_report=True):
             result["excluded_unsupervised_warmup_ticks50"] = warmup_ticks
             report["physical_gate"] = result
             require(result.get("eligible_physics") is True, "Unchanged handover-physics-v2 gate failed")
-        stage("independent_physical_handover_gate", physical)
+        if mobile:
+            def mobile_physical():
+                result = mobile_audit.native_gate(qualities, start_time)
+                report['physical_gate'] = result
+                require(result.get('native_success_evidence_complete') is True,
+                        'Original Mobile native capture evidence is incomplete: '+str(result.get('capture_validation_errors')))
+                require(result.get('official_task_success') is True, 'Original official Mobile task success flag was never true')
+            stage('independent_native_mobile_task_success', mobile_physical)
+        else:
+            stage("independent_physical_handover_gate", physical)
 
         def external_forces():
             require(len(forces) == ticks*4, "Missing original200Hz external-force measurements")
@@ -777,6 +826,21 @@ def audit_episode(directory, *, write_report=True):
         report["errors"].append(f"evidence_load: {type(error).__name__}: {error}")
     if not report["errors"] and len(report["checks"]) == expected_checks:
         report.update(status="independent_live_human_episode_audit_passed", eligible_for_packing=True)
+    if report.get('selection_policy') == 'native_only':
+        result = report.get('physical_gate', {})
+        native_failure = (result.get('native_success_evidence_complete') is True and
+            result.get('official_task_success') is False and
+            all(check.get('passed') is True for name, check in report['checks'].items()
+                if name != 'independent_native_mobile_task_success') and
+            len(report['checks']) == expected_checks)
+        technical = bool(report['errors']) and not native_failure
+        report.update(technical_blocked=technical,
+            failure_kind='technical_evidence_incomplete' if technical else
+                'official_task_not_successful' if native_failure else None,
+            official_task_success=None if technical else result.get('official_task_success'),
+            official_task_success_observed=result.get('official_task_success_observed'),
+            selection_status='technical_evidence_incomplete' if technical else
+                'official_task_not_successful' if native_failure else 'selected')
     if write_report:
         target = root/"admission.json"
         temporary = target.with_suffix(".json.tmp")
@@ -792,8 +856,10 @@ def _read_line(line):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("episode_directory", type=Path)
+    parser.add_argument('--historical-sources', type=Path,
+                        help='Explicit retained original source snapshot manifest (required for Mobile)')
     args = parser.parse_args()
-    report = audit_episode(args.episode_directory)
+    report = audit_episode(args.episode_directory, historical_source_manifest=args.historical_sources)
     print(json.dumps({key: report[key] for key in ("status", "eligible_for_packing", "accepted_new_dataset", "errors")}, ensure_ascii=False, indent=2))
     raise SystemExit(0 if report["eligible_for_packing"] else 1)
 

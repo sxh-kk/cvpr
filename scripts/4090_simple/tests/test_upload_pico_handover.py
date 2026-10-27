@@ -19,18 +19,22 @@ def write(path,value):
     path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
 
 
-def fixture(root):
+def fixture(root, *, task_id=None):
     for name in ('packed','dino'):(root/name).mkdir(parents=True)
-    write(root/'packed/PACK_READY.json',{'contract':verify.PACK_CONTRACT,'final_ready':False})
+    profile = upload.TASK_PROFILES[task_id or upload.HANDOVER_TASK_ID]
+    pack = {'contract':profile['pack_contract'],'final_ready':False}
+    if task_id is not None:pack['task_id'] = task_id
+    write(root/'packed/PACK_READY.json',pack)
     (root/'dino/features.npy').write_bytes(b'unit test bytes, not real DINO')
     files = {name+'/'+relative:value for name in ('packed','dino')
         for relative,value in verify.tree_inventory(root/name).items()}
-    ready = {'contract':verify.CONTRACT,'status':'passed','production_ready_for_bound_pack_and_cache':True,
+    ready = {'contract':profile['ready_contract'],'status':'passed','production_ready_for_bound_pack_and_cache':True,
         'source_kind':'live_pico_human','split_restriction':'train_only','normalization_refitted':False,
         'GPU_used':False,'CUDA_initialized':False,'training_started':False,'release_root':str(root),
         'verifier_sha256':verify.sha(verify.__file__),
         'payload_files':files,'pack_ready_sha256':verify.sha(root/'packed/PACK_READY.json'),
         'train_episodes':3,'train_windows':100}
+    if task_id is not None:ready['task_id'] = task_id
     write(root/verify.READY_NAME,ready)
     return ready
 
@@ -110,6 +114,85 @@ class UploadPicoTests(unittest.TestCase):
         self.execute(upload.REMOTE_PREPARE,value)
         write(target/'A100_PICO_DATASET_READY.json',{'status':'passed'})
         self.assertNotEqual(self.execute(upload.REMOTE_PREPARE,value,check=False).returncode,0)
+
+    def test_mobile_requires_exact_task_and_its_own_pack_ready_contract(self):
+        fixture(self.root,task_id=upload.MOBILE_TASK_ID)
+        remote = '/gaozt-test1/datasets/SIMPLE_sonic_v1_1/pico_mobile_pp_20261027_human100_01'
+        value = upload.inventory(self.root,remote)
+        self.assertEqual(value['task_id'],upload.MOBILE_TASK_ID)
+        self.assertEqual(value['contract'],upload.MOBILE_CONTRACT)
+        self.assertFalse(value['remote_production_ready'])
+        self.assertTrue(value['DINO_relocation_pending'])
+        with self.assertRaisesRegex(ValueError,'task-matched'):
+            upload.inventory(self.root,self.remote)
+        with self.assertRaises(ValueError):upload.remote_target(remote,task_id=upload.HANDOVER_TASK_ID)
+        path = self.root/verify.READY_NAME
+        ready = verify.read(path);del ready['task_id'];write(path,ready)
+        with self.assertRaisesRegex(ValueError,'Explicit supported task'):upload.inventory(self.root,remote)
+        ready['task_id'] = upload.HANDOVER_TASK_ID;write(path,ready)
+        with self.assertRaisesRegex(ValueError,'contract differ'):upload.inventory(self.root,remote)
+        ready['task_id'] = upload.MOBILE_TASK_ID;write(path,ready)
+        pack_path = self.root/'packed/PACK_READY.json'
+        for pack in ({'contract':upload.TASK_PROFILES[upload.HANDOVER_TASK_ID]['pack_contract'],'final_ready':False},
+                     {'contract':upload.TASK_PROFILES[upload.MOBILE_TASK_ID]['pack_contract'],'final_ready':False}):
+            write(pack_path,pack)
+            ready['payload_files']['packed/PACK_READY.json'] = verify.identity(pack_path)
+            ready['pack_ready_sha256'] = verify.sha(pack_path);write(path,ready)
+            with self.assertRaisesRegex(ValueError,'pack contract'):upload.inventory(self.root,remote)
+
+    def test_handover_legacy_marker_stays_in_handover_namespace(self):
+        fixture(self.root)
+        value = upload.inventory(self.root,self.remote)
+        self.assertEqual(value['contract'],upload.CONTRACT)
+        self.assertEqual(value['task_id'],upload.HANDOVER_TASK_ID)
+        with self.assertRaises(ValueError):
+            upload.inventory(self.root,'/gaozt-test1/datasets/SIMPLE_sonic_v1_1/pico_mobile_pp_invalid_reuse')
+        path = self.root/verify.READY_NAME;ready = verify.read(path)
+        ready['task_id'] = upload.MOBILE_TASK_ID;write(path,ready)
+        with self.assertRaisesRegex(ValueError,'contract differ'):upload.inventory(self.root,self.remote)
+
+    def test_mobile_remote_scripts_verify_actual_bytes_and_do_not_promote_readiness(self):
+        fixture(self.root,task_id=upload.MOBILE_TASK_ID)
+        value = upload.inventory(self.root,'/gaozt-test1/datasets/SIMPLE_sonic_v1_1/pico_mobile_pp_unit_test')
+        target = Path(self.tmp.name)/'mobile_remote';value['remote_root'] = str(target)
+        self.execute(upload.REMOTE_PREPARE,value)
+        for relative in value['files']:
+            path = target/relative;path.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(self.root/relative,path)
+        report = json.loads(self.execute(upload.REMOTE_VERIFY,value).stdout)
+        self.assertEqual(report['contract'],upload.MOBILE_BYTE_CONTRACT)
+        self.assertEqual(report['task_id'],upload.MOBILE_TASK_ID)
+        self.assertFalse(report['remote_production_ready'])
+        for relative,wanted in value['files'].items():self.assertEqual(verify.identity(target/relative),wanted)
+        self.assertFalse((target/'A100_PICO_DATASET_READY.json').exists())
+        previous = (target/'A100_BYTE_VERIFICATION.json').read_bytes()
+        (target/'dino/features.npy').write_bytes(b'changed after copy')
+        self.assertNotEqual(self.execute(upload.REMOTE_VERIFY,value,check=False).returncode,0)
+        self.assertEqual((target/'A100_BYTE_VERIFICATION.json').read_bytes(),previous)
+        invalid = {**value,'task_id':upload.HANDOVER_TASK_ID}
+        self.assertNotEqual(self.execute(upload.REMOTE_PREPARE,invalid,check=False).returncode,0)
+
+    def test_remote_launcher_limits_only_its_process_and_preserves_stdin_json(self):
+        value = {'exact':'stdin payload'}
+        with patch.object(upload.subprocess,'run') as run:
+            upload.remote_python('115.191.40.142','/absolute/python','print("not executed")',value)
+        args,kwargs = run.call_args
+        self.assertEqual(json.loads(kwargs['input']),value)
+        command = args[0][-1]
+        for token in ('CUDA_VISIBLE_DEVICES=', 'nice -n 19', 'os.sched_setaffinity', '<pico-cpu-remote>'):
+            self.assertIn(token,command)
+        parent_affinity = os.sched_getaffinity(0)
+        parent_nice = os.getpriority(os.PRIO_PROCESS,0)
+        result = subprocess.run(['env','CUDA_VISIBLE_DEVICES=','nice','-n','19',sys.executable,'-B','-c',
+            upload.REMOTE_CPU_LAUNCHER,
+            'import os,json; print(json.dumps({"cpus":sorted(os.sched_getaffinity(0)),"nice":os.getpriority(os.PRIO_PROCESS,0),"gpu":os.environ.get("CUDA_VISIBLE_DEVICES")}))'],
+            text=True,capture_output=True,check=True)
+        runtime = json.loads(result.stdout)
+        self.assertEqual(len(runtime['cpus']),1)
+        self.assertEqual(runtime['nice'],19)
+        self.assertEqual(runtime['gpu'],'')
+        self.assertEqual(os.sched_getaffinity(0),parent_affinity)
+        self.assertEqual(os.getpriority(os.PRIO_PROCESS,0),parent_nice)
 
 
 if __name__=='__main__':unittest.main()

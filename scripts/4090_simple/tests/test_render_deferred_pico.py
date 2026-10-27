@@ -13,10 +13,29 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from render_deferred_pico import (assert_recorded_state_unchanged, canonical_event_sha256,
-    restore_recorded_state, write_frame_bindings)
+    restore_recorded_state, write_frame_bindings, recorded_task, recorded_environment)
 
 
 class DeferredRendererTests(unittest.TestCase):
+    def test_saved_environment_uses_the_recorded_task_profile(self):
+        from pico_mobile_task import HANDOVER_TASK, MOBILE_TASK
+        for task,profile in [(HANDOVER_TASK,'handover'),(MOBILE_TASK,'mobile_pp')]:
+            with mock.patch('render_deferred_pico.load_environment_config',return_value=({},{})) as loader:
+                recorded_environment('recorded.json','assets',task)
+            loader.assert_called_once_with('recorded.json','assets',profile=profile)
+
+    def test_recorded_task_dispatch_never_substitutes_handover_for_mobile(self):
+        from pico_mobile_task import HANDOVER_TASK, MOBILE_TASK
+        from pico_episode_history import MOBILE_OFFICIAL_SOURCE_SHA256
+        self.assertEqual(recorded_task({}), HANDOVER_TASK)
+        metadata={'task_id':MOBILE_TASK,'actual_task_source_sha256':MOBILE_OFFICIAL_SOURCE_SHA256,
+                  'actual_native_success_criteria':.9}
+        self.assertEqual(recorded_task(metadata), MOBILE_TASK)
+        for changed in ({'task_id':'unknown'}, {'actual_task_source_sha256':'0'*64},
+                        {'actual_native_success_criteria':True}, {'actual_native_success_criteria':.8}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                recorded_task({**metadata,**changed})
+
     def test_full_state_roundtrip_never_forwards_or_steps_and_detects_non_qpos_mutation(self):
         model=mujoco.MjModel.from_xml_string('<mujoco><worldbody><body name="pelvis"><freejoint/>'
             '<geom type="sphere" size=".1"/><camera name="head_stereo_left"/></body></worldbody></mujoco>')

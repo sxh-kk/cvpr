@@ -77,7 +77,9 @@ def cache_and_transfer_fixture(root,pack,ready):
     from curate_handover_dino_cache import extractor
     ex = extractor();cache = ex.cache
     video_key = 'observation.images.egocentric'
-    write(pack/'train/meta/info.json',{'fps':30,'total_episodes':1,'total_frames':61,
+    length = ready['episodes'][0]['length']
+    protocol = verify.production_protocol(ready.get('task_id',verify.HANDOVER_TASK_ID))
+    write(pack/'train/meta/info.json',{'fps':30,'total_episodes':1,'total_frames':length,
         'features':{video_key:{'dtype':'video','video_info':{'video.fps':30}}},
         'data_path':'data/chunk-000/episode_{episode_index:06d}.parquet',
         'video_path':'videos/chunk-000/{video_key}/episode_{episode_index:06d}.mp4'})
@@ -91,25 +93,26 @@ def cache_and_transfer_fixture(root,pack,ready):
             'image_mean':[.485,.456,.406],'image_std':[.229,.224,.225],'rescale_factor':1/255}}
     manifest = ex.build_manifest(source,items,encoder,storage_dtype='float32');manifest['state'] = 'complete'
     dino = root/'dino';directory = dino/'episodes/00000000';directory.mkdir(parents=True)
-    np.save(directory/'features.npy',np.full((61,5,1024),.125,np.float32))
-    np.savez(directory/'frames.npz',frame_index=np.arange(61,dtype=np.int64),
-        timestamp=np.arange(61,dtype=np.float64)/30,source_frame_index=np.arange(61,dtype=np.int64),
-        video_timestamp=np.arange(61,dtype=np.float64)/30,valid=np.ones(61,bool))
-    receipt = {'contract':cache.CONTRACT,'state':'complete','episode_index':0,'frames':61,
+    np.save(directory/'features.npy',np.full((length,5,1024),.125,np.float32))
+    np.savez(directory/'frames.npz',frame_index=np.arange(length,dtype=np.int64),
+        timestamp=np.arange(length,dtype=np.float64)/30,source_frame_index=np.arange(length,dtype=np.int64),
+        video_timestamp=np.arange(length,dtype=np.float64)/30,valid=np.ones(length,bool))
+    receipt = {'contract':cache.CONTRACT,'state':'complete','episode_index':0,'frames':length,
         'source':items[0],'manifest_signature':manifest['signature'],
         'signature':cache.digest({'manifest_signature':manifest['signature'],'source':items[0]}),
         'outputs':{name:verify.identity(directory/name) for name in ('features.npy','frames.npz')}}
     write(directory/'receipt.json',receipt);write(dino/'manifest.json',manifest)
     payload = {name+'/'+relative:identity for name in ('packed','dino')
         for relative,identity in verify.tree_inventory(root/name).items()}
-    local = {'contract':verify.CONTRACT,'status':'passed','production_ready_for_bound_pack_and_cache':True,
+    local = {'contract':protocol['production_contract'],'task_id':protocol['task_id'],
+        'status':'passed','production_ready_for_bound_pack_and_cache':True,
         'source_kind':'live_pico_human','split_restriction':'train_only','payload_files':payload}
     write(root/verify.READY_NAME,local)
-    transfer = {'contract':'cvpr-pico-handover-a100-byte-transfer-v1','remote_root':str(root),
+    transfer = {'contract':protocol['transfer_contract'],'task_id':protocol['task_id'],'remote_root':str(root),
         'local_ready_sha256':verify.sha(root/verify.READY_NAME),
         'files':{**payload,verify.READY_NAME:verify.identity(root/verify.READY_NAME)}}
     write(root/'A100_TRANSFER_MANIFEST.json',transfer)
-    write(root/'A100_BYTE_VERIFICATION.json',{'contract':'cvpr-pico-handover-a100-byte-verification-v1',
+    write(root/'A100_BYTE_VERIFICATION.json',{'contract':protocol['byte_contract'],'task_id':protocol['task_id'],
         'status':'all_copied_bytes_and_identities_verified','remote_root':str(root),
         'inventory_sha256':verify.sha(root/'A100_TRANSFER_MANIFEST.json'),'remote_production_ready':False})
     return dino,manifest,receipt
@@ -233,6 +236,80 @@ class PicoVerificationTests(unittest.TestCase):
         path.write_bytes(b'changed after byte verification')
         with self.assertRaisesRegex(ValueError,'Copied immutable input changed'):verify.relocate(pack,dino)
         self.assertFalse((self.root/'dino.before-remote-relocation').exists())
+
+
+    def mobile_pack(self, root=None):
+        from test_pack_pico_handover import make_mobile_case
+        import pack_pico_handover as packer
+        root = root or self.root
+        case = make_mobile_case(root)
+        ready = packer.pack(case['template'],case['selection'],case['output'])
+        return case['output'],ready
+
+    def test_mobile_pack_requires_explicit_task_and_its_own_admission_authority(self):
+        pack,ready = self.mobile_pack()
+        _,_,episodes,_ = verify.inspect_pack(pack,expected_episodes=1)
+        self.assertEqual(episodes[0]['task_id'],verify.MOBILE_TASK_ID)
+        changed = deepcopy(ready);changed.pop('task_id');freeze(pack,changed)
+        with self.assertRaisesRegex(ValueError,'Task identity'):
+            verify.inspect_pack(pack)
+        freeze(pack,ready)
+        admission_path=pack/ready['episodes'][0]['admission_path']
+        admission=verify.read(admission_path)
+        admission['contract']='cvpr-live-pico-handover-independent-admission-v1'
+        write(admission_path,admission)
+        ready['episodes'][0]['admission_sha256']=verify.sha(admission_path)
+        freeze(pack,ready)
+        with self.assertRaisesRegex(ValueError,'admission'):
+            verify.inspect_pack(pack)
+
+    def test_mobile_shared_original_trace_and_capture_sources_cannot_be_rebound_after_packing(self):
+        for role in ('trace','historical_source'):
+            with self.subTest(role=role):
+                root=self.root/role;root.mkdir()
+                pack,ready=self.mobile_pack(root)
+                entry=ready['episodes'][0]
+                archived=(entry['mobile_control_trace_file'] if role=='trace' else
+                          entry['mobile_historical_source_files']['files'][0])
+                (pack/archived['path']).write_bytes(b'changed original evidence after audit')
+                freeze(pack,ready)
+                with self.assertRaisesRegex(ValueError,'shared original'):
+                    verify.inspect_pack(pack)
+
+    def test_mobile_cpu_cache_relocation_preserves_portable_evidence_and_real_array_bytes(self):
+        pack,ready=self.mobile_pack()
+        dino,manifest,receipt=cache_and_transfer_fixture(self.root,pack,ready)
+        original_cache,original_pack=verify.tree_inventory(dino),verify.tree_inventory(pack)
+        report=verify.relocate(pack,dino)
+        self.assertEqual(report['contract'],'cvpr-pico-mobile-pp-dino-host-relocation-v1')
+        self.assertEqual(report['task_id'],verify.MOBILE_TASK_ID)
+        self.assertTrue(report['data_and_features_byte_identical'])
+        self.assertFalse(report['remote_production_ready'])
+        self.assertEqual(verify.tree_inventory(pack),original_pack)
+        self.assertEqual(verify.tree_inventory(self.root/'dino.before-remote-relocation'),original_cache)
+        for name in ('features.npy','frames.npz'):
+            self.assertEqual(verify.identity(dino/'episodes/00000000'/name),receipt['outputs'][name])
+        from curate_handover_dino_cache import extractor
+        cache=extractor().cache
+        loaded=cache.load_episode_cache(dino,0,dataset_root=pack/'train',verify_checksums=True)
+        self.assertEqual(loaded.features.shape,(65,5,1024))
+        np.testing.assert_array_equal(loaded.features,.125)
+        loaded.features._mmap.close()
+        self.assertFalse((self.root/'A100_PICO_DATASET_READY.json').exists())
+
+    def test_mobile_incoming_byte_receipts_cannot_use_handover_contract_or_missing_task(self):
+        pack,ready=self.mobile_pack()
+        cache_and_transfer_fixture(self.root,pack,ready)
+        verify.incoming_transfer_binding(self.root)
+        path=self.root/'A100_BYTE_VERIFICATION.json'
+        original=verify.read(path)
+        changed=deepcopy(original);changed['contract']='cvpr-pico-handover-a100-byte-verification-v1'
+        write(path,changed)
+        with self.assertRaisesRegex(ValueError,'byte verification'):
+            verify.incoming_transfer_binding(self.root)
+        changed=deepcopy(original);changed.pop('task_id');write(path,changed)
+        with self.assertRaisesRegex(ValueError,'task identities'):
+            verify.incoming_transfer_binding(self.root)
 
 
 if __name__=='__main__':unittest.main()

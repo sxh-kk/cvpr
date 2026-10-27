@@ -153,6 +153,10 @@ SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](
 三点参考通过同 tick 当前实际 root 的完整平移／旋转运输。200Hz真实物理、50Hz控制参考、30Hz新token／手指命令及技术完整性验证保持。
 旧策略仅以 `--mobile-control-policy locked_upper_mode0` 显式重现；Handover 默认 mode2 保持。
 资源与输出和 Handover 分开，退出后不自动补图或上传。
+用户采够后另行授权处理当前100条并上传A100，已从121条编号记录冻结100个selected UUID，
+采集器正常退出后进入RTX；不追加或替换样本。显式Mobile独立审计、无损转换、DINO生产读取与上传合同
+已完成准备验证：114项CPU测试、首个实际002的1020帧RTX及10阶段独立审计通过。
+全100条及A100就绪仍按实际阶段回执验收，见[Mobile固定100条数据核定与交付](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md)。
 按用户最新要求，Mobile以`native_only`／`mobile-native-task-success-v2`只筛实际保存的官方native成功，
 移除额外位移、抬升、持物、末段稳定／几何成功门；SHA、时钟、有限性、原始外力等技术完整性保留，异常不能冒充任务失败。
 实际任务绑定`.9`阈值与源码SHA；环境每步两次reward更新，官方eval遇terminated退出，所以`any(native)`表示曾达官方终止成功，环境并不latch。
@@ -168,6 +172,6 @@ SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](
 新review规则本轮通过330项PICO CPU及真实Node页面JS路径验证，另2项CLI通过。
 现场`live_human_004_cpu_isolated`之后因`/home` ENOSPC自行退出；未封存的第27次尝试原件保留且不算任务失败。
 仅将旧uv临时缓存保留迁到/tmp以恢复约2.1GB，未删除采集数据。
-旧v1／v2回执、replay技术失败与超时诊断均保留；完整独立RTX／DINO及训练数据就绪仍未完成。
+旧v1／v2回执、replay技术失败与超时诊断均保留；这些早期回执不代替固定100条的完整RTX／DINO与生产读取验收。
 随后按用户明确要求恢复为独立会话`live_human_005_native_only`；实际源码匹配，planner CPU29、preview CPU30、native v2后台CPU31已核对，
 页面及相机恢复且收到有效全身追踪，操作者已重新跟随。恢复回执见`restore_collection_005/RESTORE_COMPLETE.json`，旧数据保留。

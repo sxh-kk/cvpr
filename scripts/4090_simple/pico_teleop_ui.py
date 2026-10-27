@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 
-COMMANDS = frozenset({"calibrate", "follow", "pause", "record", "save", "discard", "reset", "quit"})
+COMMANDS = frozenset({"calibrate", "follow", "pause", "record", "save", "discard", "reset", "quit", "toggle_navigation"})
 BUSY_STATES = frozenset({"saving", "auditing", "resetting"})
 
 
@@ -41,7 +41,8 @@ button:hover{background:#3b516b}button:disabled{opacity:.5;cursor:wait}.primary{
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}details{margin-top:20px}#phase{font-weight:600}
 </style><h1>PICO 遥操作采集</h1><div class="muted">当前状态：<span id="phase">等待电脑状态</span></div>
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
-<p class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
+<p id="instructions" class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
+<p id="mobile-status" role="status" hidden></p>
 <p id="grasp" role="status">等待抓握反馈</p>
 <p id="preview-feedback" role="status">等待相机</p>
 <p id="last-episode" role="status">上一条：暂无已完成录制</p>
@@ -49,6 +50,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" src="/stream.mjpg" alt="当前仿真相机画面" hidden></div>
 <div class="bar">
 <button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>
+<button data-command="toggle_navigation" hidden>B 切换移动／手臂操作</button>
 <button class="primary" data-command="record">开始录制</button><button class="primary" data-command="save">保存本条</button>
 <button data-command="discard">丢弃上一条</button><button data-command="reset">重置场景</button><button class="danger" data-command="quit">退出</button>
 </div><div id="message" role="status"></div><div id="error" role="alert"></div>
@@ -67,6 +69,9 @@ camera.onerror=reconnectStream;
 camera.onload=()=>{cameraReady=imageAvailable;showCamera();};
 async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
+ const mobile=s.collection_task_profile==='mobile_pp';document.querySelector('button[data-command="toggle_navigation"]').hidden=!mobile;
+ const mobileStatus=document.querySelector('#mobile-status');mobileStatus.hidden=!mobile;
+ if(mobile){document.querySelector('h1').textContent='Mobile P&P 双桌搬运数采';document.querySelector('#instructions').textContent='X 标定 · Y 跟随／暂停 · A 录制／保存 · B 切换移动／手臂操作。移动时左杆向前、右杆转向，上身保持进入时姿态，扳机仍控制抓握。松杆站稳并恢复入场人体姿态后，按B恢复手臂操作。起录后先保持姿势1秒。';mobileStatus.textContent='控制模式：'+({pose:'手臂操作',preparing_navigation:'正在准备移动，请松开摇杆',navigation:'移动：上身保持、手指可控'}[s.mobile_mode]??'等待准备');}
  if(!statusConnected)reconnectStream();statusConnected=true;
  let phase=s.phase??s.state??s.status??'等待运行';if(typeof phase==='object')phase=phase.status??JSON.stringify(phase);
  const labels={paused:'已暂停',following:'正在跟随',saving:'正在封存本条',auditing:'正在物理验收',resetting:'正在重置场景',stopped:'采集已结束'};

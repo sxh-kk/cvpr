@@ -122,6 +122,7 @@ class EntryGuardTests(unittest.TestCase):
         replay = self.replay([raw_packet(10_000_000_000+i*20_000_000) for i in range(3)])
         self.assertEqual(replay.at(.019).sequence,1)
         self.assertEqual(replay.at(.021).sequence,2)
+        self.assertIs(type(replay.at(.021).host_received_s),float)
         self.assertEqual(replay.at(.04).sequence,3)
         with self.assertRaises(EOFError):
             replay.at(.040001)
@@ -425,7 +426,8 @@ class EntryGuardTests(unittest.TestCase):
             'pico_deferred_capture.py','render_deferred_pico.py','finish_pico_session.py',
             'audit_pico_teleop_episode.py','start_pico_teleop.sh',
             'handover_contact_quality.py','handover_geometry_quality.py','pico_episode_history.py',
-            'pico_episode_review.py','pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py'})
+            'pico_episode_review.py','pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py',
+            'pico_mobile_task.py'})
         self.assertTrue(all(len(digest)==64 for digest in identities.values()))
 
     def test_instance_rate_limits_record_before_after_without_clock_changes(self):

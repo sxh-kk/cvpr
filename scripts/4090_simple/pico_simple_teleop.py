@@ -26,6 +26,8 @@ from pico_live_input import PicoReceiver, parse_tracking, validate_frame
 from pico_sonic_reference import PicoSonicReference, WRIST_NAMES, GEAR, body24_to_smpl
 from pico_teleop_recording import AsyncTrainingCapture, CommandLedger, RecordingState
 from pico_hand_control import named_hand_targets, profile_receipt, hand_feedback
+from pico_mobile_task import (task_identity, collection_buttons, require_mobile_transition,
+    require_manipulation_pose_match, MobileStoppedWindow, MobilePreparationReference)
 from pico_cpu_runtime import configure_cpu_runtime
 from pico_capture_start import CaptureStartGate
 from replay_handover_teacher import (MODEL_HAND_NAMES, RENDERER_LINKS, applied_force_state,
@@ -62,12 +64,19 @@ class RecordedInput:
         if elapsed > self.times[-1]:
             raise EOFError('Recorded input ended; refusing to repeat or extrapolate it')
         index = max(0, int(np.searchsorted(self.times, elapsed, side='right'))-1)
-        return replace(self.frames[index], host_received_s=time.monotonic()-(elapsed-self.times[index]))
+        return replace(self.frames[index], host_received_s=float(time.monotonic()-(elapsed-self.times[index])))
 
 
 def root_pose(model, data):
     body = model.body('pelvis').id
     return np.r_[data.xpos[body], data.xquat[body]].copy()
+
+
+def actual_root_velocity(model, data):
+    body = model.body('pelvis').id
+    joint = int(model.body_jntadr[body])
+    dof = int(model.jnt_dofadr[joint])
+    return np.asarray(data.qvel[dof:dof+6]).copy()
 
 
 def physical_snapshot(model, data, body_names):
@@ -120,7 +129,8 @@ def source_code_identities():
              'render_deferred_pico.py','finish_pico_session.py','audit_pico_teleop_episode.py',
              'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py',
              'pico_hand_control.py','pico_episode_history.py','pico_episode_review.py',
-             'pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py')
+             'pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py',
+             'pico_mobile_task.py')
     directory = Path(__file__).resolve().parent
     return {name:file_sha256(directory/name) for name in names}
 
@@ -133,7 +143,9 @@ EPISODE_SESSION_FIELDS = (
     'environment_config_source','replay_source_sha256','controller_identity','encoder_identity',
     'hand_control_profile','egl_backend_selection','actual_mujoco_gl_module',
     'review_mode','review_collection_enabled','cpu_runtime','preview_protocol',
-    'capture_start_protocol','live_status_transport')
+    'capture_start_protocol','live_status_transport','collection_task_profile',
+    'mobile_control_protocol','mobile_planner_model_sha256','actual_task_source_sha256',
+    'actual_native_success_criteria','mobile_cold_start_profile')
 
 
 def episode_session_identity(session_result):
@@ -238,12 +250,14 @@ def configure_unrelated_viewport(viewport, cameras, *, disable=False):
     return receipt
 
 
-def load_environment_config(path, data_root):
-    """Validate a saved Handover layout and all explicit local resource paths."""
+def load_environment_config(path, data_root, *, profile='handover'):
+    """Validate the selected task's saved layout and explicit local resources."""
     path, data_root = Path(path).resolve(strict=True), Path(data_root).resolve(strict=True)
     state = json.loads(path.read_text())
-    if not isinstance(state,dict) or state.get('uid') != 'g1_wholebody_handover_teleop':
-        raise ValueError('Environment config must be the G1 wholebody Handover task')
+    _, expected_uid = task_identity(profile)
+    if not isinstance(state,dict) or state.get('uid') != expected_uid:
+        label = 'Handover task' if profile == 'handover' else expected_uid
+        raise ValueError('Environment config must match the explicit collection '+label)
     if state.get('robot_cfg',{}).get('uid') != 'g1_sonic':
         raise ValueError('Environment config must use the matching G1 SONIC robot')
     if not isinstance(state.get('dr_state_dict'),dict) or not isinstance(state.get('layout'),dict):
@@ -366,8 +380,7 @@ def wait_fresh_command_frame(receiver, previous, last_timestamp_ns, deadline_s, 
 
 
 def rising_operator_commands(buttons, last_buttons):
-    return [action for key, action in (('X','calibrate'),('Y','toggle_follow'),('A','toggle_record'))
-        if buttons.get(key,False) and not last_buttons.get(key,False)]
+    return collection_buttons(buttons,last_buttons)
 
 
 def recording_command_guard(action, *, episode_active, episode_status=None):
@@ -824,6 +837,46 @@ def initialize_pose(raw, default_angles, body_names):
         'object_restores_during_control':False,'external_assistance':False}
 
 
+def load_mobile_cold_start(path, body_names):
+    path = Path(path).resolve(strict=True)
+    value = json.loads(path.read_text())
+    q = np.asarray(value.get('body_q29'),dtype=float)
+    if (value.get('contract') != 'cvpr-mobile-pp-cold-start-profile-v1'
+            or value.get('body_joint_names') != list(body_names)
+            or q.shape != (29,) or not np.isfinite(q).all()
+            or value.get('hand_joint_names') != list(MODEL_HAND_NAMES)
+            or value.get('hand_q14') != [0.]*14
+            or value.get('before_first_physics_step_required') is not True
+            or value.get('maximum_initialization_count') != 1
+            or value.get('online_state_overwrite_allowed') is not False):
+        raise ValueError('Invalid Mobile-only one-time cold start profile')
+    return value,{'path':str(path),'sha256':file_sha256(path),'profile':value}
+
+
+def install_mobile_cold_start(raw, cold_profile, body_names):
+    """Initialize once before reset's implicit first physics step, then unhook."""
+    original = raw.mujoco.step
+    receipt = {}
+    def first_step(*args, **kwargs):
+        if receipt or float(raw.mujoco.mjData.time) != 0.:
+            raise ValueError('Mobile cold start attempted after physical stepping')
+        if cold_profile['body_joint_names'] != list(body_names):
+            raise ValueError('Mobile cold start BODY29 order differs')
+        for name,value in zip(body_names,cold_profile['body_q29']):
+            low,high = raw.mujoco.mjModel.joint(name).range
+            if not low <= value <= high:
+                raise ValueError('Mobile cold start joint out of range: '+name)
+        initialized = initialize_pose(raw,np.asarray(cold_profile['body_q29']),body_names)
+        initialized.update(kind='one_time_mobile_profile_pose_before_first_physics_step',
+            profile_id=cold_profile['profile_id'],initialization_time_s=0.,initialization_count=1,
+            body_joint_names=list(body_names),body_q29=list(cold_profile['body_q29']))
+        receipt.update(initialization=initialized)
+        raw.mujoco.step = original
+        return original(*args,**kwargs)
+    raw.mujoco.step = first_step
+    return receipt
+
+
 def run(args):
     output = args.output.resolve()
     repo = Path(__file__).resolve().parents[2]
@@ -835,14 +888,19 @@ def run(args):
     cpu_runtime = configure_cpu_runtime()
     resources = args.sonic_resources.resolve(strict=True)
     data_root, asset_shas = bound_calibration_assets(args.data_root, calibration_source_identities())
+    profile = getattr(args,'task','handover')
+    task_id,_ = task_identity(profile)
+    mobile = profile == 'mobile_pp'
+    if mobile and (not args.environment_config or args.render_mode != 'mujoco_deferred'):
+        raise ValueError('Mobile P&P requires its saved official scene and deferred capture')
     environment_state = environment_receipt = None
     if args.environment_config:
-        environment_state,environment_receipt = load_environment_config(args.environment_config,data_root)
+        environment_state,environment_receipt = load_environment_config(args.environment_config,data_root,profile=profile)
     os.environ['SIMPLE_DATA_DIR'] = str(data_root)
     rendered = args.render_mode == 'isaac'
     deferred = args.render_mode == 'mujoco_deferred'
     replay = RecordedInput(args.pico_replay) if args.pico_replay else None
-    result = {'status':'initializing','task_id':'simple/G1WholebodyHandoverTeleop-v0',
+    result = {'status':'initializing','task_id':task_id,'collection_task_profile':profile,
         'source_kind':replay.source_kind if replay else 'live_pico_human',
         'accepted_new_dataset':False,'physics_hz':200,'decoder_hz':50,'command_rgb_hz':30,
         'absolute_human_root_translation_encoded':False,'render_mode':args.render_mode,
@@ -859,13 +917,19 @@ def run(args):
         capture_start_protocol='cvpr-pico-frozen-capture-start-v1' if deferred else None,
         live_status_transport='localhost HTTP; periodic disk status only while paused')
     write_json(output/'result.json', result)
-    env = ui = receiver = video_bridge = render_profiler = preview_worker = None
+    env = ui = receiver = video_bridge = render_profiler = preview_worker = mobile_control = None
+    mobile_mode = 'pose'
+    mobile_tick = 0
+    mobile_preparation = None
+    mobile_entry_smpl = None
+    mobile_stopped = MobileStoppedWindow()
     preview_epoch = -1
     preview_frame_receipt = None
     capture_start_receipt = None
     capture = ledger = None
     episode = None
     quality_stream = force_stream = control_trace = None
+    pending_mobile_quality_row = None
     wall_periods = deque(maxlen=3000)
     wall_period_count = 0
     maximum_wall_period = 0.
@@ -881,6 +945,19 @@ def run(args):
         'path':None,'uuid':None,'discarded':False,'error':None}
     operator_message = '请戴好头显、站直并校准，再开始下一条录制。'
     reference = PicoSonicReference(resources, args.human_info)
+    if mobile:
+        from pico_mobile_control import MobilePlannerControl, CONTRACT as MOBILE_CONTROL_CONTRACT
+        from sonic_locomotion_planner import MODEL_SHA256
+        if not getattr(args,'planner_model',None):
+            raise ValueError('Mobile P&P requires the explicit pinned planner model')
+        mobile_control = MobilePlannerControl(args.planner_model)
+        result.update(mobile_control_protocol=MOBILE_CONTROL_CONTRACT,
+            mobile_planner_model_sha256=MODEL_SHA256)
+        for name in ('pico_mobile_control.py','pico_locomotion_reference.py',
+                'sonic_locomotion_planner.py','pico_mobile_quality.py','start_pico_mobile_pp.sh'):
+            result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
+    def operator_buttons(buttons, previous):
+        return collection_buttons(buttons,previous,mobile=mobile)
     pairing = {'body_token_version':'body_token_v1_1','compatibility_verified':True,
         'decoder_sha256':'34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509',
         'evidence':{'scope':'Only new tokens generated here by fixed matching official encoder, not old dataset tokens',
@@ -981,6 +1058,9 @@ def run(args):
             sim_mode='mujoco_isaac' if rendered else 'mujoco',headless=True,dr_level=0,
             sync_mujoco_observations=True,isaac_observation_only=rendered,disable_env_checker=True)
         raw = env.unwrapped
+        result['actual_task_source_sha256'] = file_sha256(__import__('inspect').getfile(type(raw.task)))
+        if mobile:
+            result['actual_native_success_criteria'] = float(raw.task.success_criteria)
         if environment_state:
             result['saved_scene_manager_binding'] = bind_saved_scene_manager(raw.task,environment_state)
         if args.render_mode == 'none':
@@ -992,6 +1072,13 @@ def run(args):
             raw._render_frame = lambda: {}
         elif rendered:
             raw._render_frame = lambda: raw.isaac.render()
+        cold_profile = None
+        if mobile:
+            if not getattr(args,'mobile_cold_start',None):
+                raise ValueError('Mobile P&P requires its verified cold-start profile')
+            cold_profile,result['mobile_cold_start_profile'] = load_mobile_cold_start(
+                args.mobile_cold_start,BODY_JOINT_NAMES)
+            cold_receipt = install_mobile_cold_start(raw,cold_profile,BODY_JOINT_NAMES)
         reset_options = {'state_dict':copy.deepcopy(environment_state),'dr_level':None} if environment_state else None
         obs, _ = env.reset(seed=args.seed,options=reset_options)
         renderer_environment_config = copy.deepcopy(raw.task.state_dict())
@@ -1029,7 +1116,8 @@ def run(args):
         result['hand_control_profile'] = profile_receipt()
         if not np.isclose(model.opt.timestep,.005) or raw.control_decimal != 4 or not np.array_equal(model.opt.gravity,[0,0,-9.81]):
             raise ValueError('Require true 200Hz gravity physics / 50Hz controller')
-        result['initialization'] = initialize_pose(raw, DEFAULT_ANGLES, BODY_JOINT_NAMES)
+        result['initialization'] = (cold_receipt['initialization'] if mobile
+            else initialize_pose(raw,DEFAULT_ANGLES,BODY_JOINT_NAMES))
         if deferred:
             prepared_deferred,preparation = prepare_deferred_cache(prepare_deferred_model,
                 output,deferred_prepare_index,model=model,objects=raw.mujoco.mj_objects,
@@ -1049,7 +1137,7 @@ def run(args):
         substeps = 0
         active_local = None
         def measured_step(*a, **kw):
-            nonlocal substeps
+            nonlocal substeps,pending_mobile_quality_row
             value = original_step(*a, **kw)
             substeps += 1
             force = applied_force_state(data)
@@ -1064,7 +1152,16 @@ def run(args):
                     container_body=raw.mujoco.mj_objects['container'].id,
                     solver_stage='post_mj_step_before_observation_refresh')
                 row['live_contacts_support_sampling_wall_s'] = time.perf_counter()-sample_started
-                quality_stream.write(json_text(row)+'\n')
+                if mobile:
+                    row['actual_root_xyz_m'] = root_pose(model,data)[:3].tolist()
+                    if pending_mobile_quality_row is not None:
+                        raise RuntimeError('Unpublished Mobile quality row from previous control step')
+                    # Contacts/forces remain the original solved-state values.
+                    # The native task flag is not computed until env.step
+                    # returns; bind it then, rather than shifting it by a tick.
+                    pending_mobile_quality_row = row
+                else:
+                    quality_stream.write(json_text(row)+'\n')
             return value
         raw.mujoco.step = measured_step
         control_trace = (output/'control_trace.jsonl').open('x', buffering=1)
@@ -1080,6 +1177,18 @@ def run(args):
         write_json(output/'result.json',result)
         result['standing_warmup_readiness'] = require_standing_warmup(
             result['initial_physical_state'], result['post_warmup_physical_state'])
+        if mobile_control:
+            # Load and verify the separate planner while physics is paused,
+            # before any receiver/recording or real-time deadline exists.
+            mobile_control.boot(root_pose(model,data),
+                physical_snapshot(model,data,BODY_JOINT_NAMES)['body_q29'])
+            mobile_boot_deadline = time.monotonic()+70.
+            while not mobile_control.poll()['ready']:
+                if time.monotonic() >= mobile_boot_deadline:
+                    raise RuntimeError('Mobile planner did not become ready before live collection')
+                time.sleep(.005)
+            result['mobile_planner_startup'] = mobile_control.status()
+            mobile_control.pause('startup_prepared_waiting_for_operator')
         def configure_preview():
             nonlocal preview_worker,preview_epoch,preview_frame_receipt
             if not deferred:
@@ -1147,6 +1256,7 @@ def run(args):
         following = False
         error_text = None
         global_tick = 0
+        last_command_timestamp_ns = None
         wall_deadline = None
         source_elapsed = 0.
         diagnostic_started = False
@@ -1170,11 +1280,20 @@ def run(args):
 
         def invalidate_calibration():
             nonlocal following, command, calibration_fresh, reference_evidence
+            nonlocal mobile_mode,mobile_tick,mobile_preparation,mobile_entry_smpl
+            nonlocal last_command_timestamp_ns
             following = False
             command = reference_evidence = None
             calibration_fresh = False
             reference.calibration = None
             reference.last_body = reference.last_timestamp_ns = None
+            if mobile_control:
+                mobile_control.pause('collector_paused')
+            mobile_mode,mobile_tick = 'pose',0
+            mobile_preparation = None
+            mobile_entry_smpl = None
+            last_command_timestamp_ns = None
+            mobile_stopped.clear()
 
         def reject_and_pause(reason):
             # A bad episode or input cannot close the UI/receiver during live use.
@@ -1219,6 +1338,8 @@ def run(args):
             nonlocal geometry_cache_index,prepared_geometry_cache,substeps,global_tick,command
             nonlocal previous,last_preview_time,last_buttons,reference_evidence,pending_input_commands
             nonlocal wall_deadline,last_step_wall,hands,active_local,quality,operator_message
+            nonlocal pending_mobile_quality_row
+            pending_mobile_quality_row = None
             nonlocal reset_generation
             nonlocal scene_metadata
             if episode is not None:
@@ -1238,6 +1359,8 @@ def run(args):
             if render_profiler:
                 render_profiler.set_context('explicit_environment_reset',None,data.time)
             reset_options = {'state_dict':copy.deepcopy(environment_state),'dr_level':None} if environment_state else None
+            if mobile:
+                cold_receipt = install_mobile_cold_start(raw,cold_profile,BODY_JOINT_NAMES)
             obs, _ = env.reset(seed=args.seed,options=reset_options)
             renderer_environment_config = copy.deepcopy(raw.task.state_dict())
             if environment_state:
@@ -1251,7 +1374,8 @@ def run(args):
                     result['unrelated_viewport'] = configure_unrelated_viewport(
                         get_active_viewport(),raw.isaac.cameras,disable=True)
             model, data = raw.mujoco.mjModel, raw.mujoco.mjData
-            reset_initialization = initialize_pose(raw,DEFAULT_ANGLES,BODY_JOINT_NAMES)
+            reset_initialization = (cold_receipt['initialization'] if mobile
+                else initialize_pose(raw,DEFAULT_ANGLES,BODY_JOINT_NAMES))
             if deferred:
                 deferred_prepare_index += 1
                 prepared_deferred,preparation = prepare_deferred_cache(prepare_deferred_model,
@@ -1321,7 +1445,7 @@ def run(args):
                 quality = validate_frame(frame,previous=previous)
                 if previous is None or frame.sequence != previous.sequence:
                     if quality['valid']:
-                        commands.extend(rising_operator_commands(frame.buttons,last_buttons))
+                        commands.extend(operator_buttons(frame.buttons,last_buttons))
                         last_buttons = dict(frame.buttons)
                     previous = frame
                 if replay and not replay_calibrated:
@@ -1373,6 +1497,62 @@ def run(args):
                         operator_message='正在跟随；按录制键开始新示例。'
                     elif action == 'pause':
                         reject_and_pause('operator_pause')
+                    elif action == 'toggle_navigation':
+                        if not mobile or not following or not quality['valid']:
+                            raise ValueError('移动模式需要有效追踪、标定并开始跟随')
+                        if not mobile_stopped.ready or (episode and episode.status != 'recording'):
+                            operator_message='请松开摇杆并连续站稳半秒后再按B；当前录制继续。'
+                            continue
+                        try:
+                            require_mobile_transition(frame,actual_root_velocity(model,data),
+                                recording_warmup=bool(episode and episode.status != 'recording'))
+                        except ValueError as transition_error:
+                            operator_message=str(transition_error)+'；当前录制继续。'
+                            continue
+                        snapshot = physical_snapshot(model,data,BODY_JOINT_NAMES)
+                        return_pose_receipt = None
+                        if mobile_mode == 'pose':
+                            mobile_entry_smpl,_,_ = body24_to_smpl(frame.body24x7,
+                                reference.rest_joints,reference.fk_parents)
+                            mobile_preparation = MobilePreparationReference(root_pose(model,data),
+                                snapshot['body_q29'],source_sequence=frame.sequence,
+                                device_timestamp_ns=frame.device_timestamp_ns)
+                            mobile_control.boot(root_pose(model,data),snapshot['body_q29'])
+                            mobile_mode,mobile_tick = 'preparing_navigation',0
+                            operator_message='正在准备移动模式，请松开摇杆；准备好后左杆向前、右杆转向。'
+                        elif mobile_mode == 'navigation':
+                            try:
+                                return_human_readiness = require_neutral_calibration(reference,frame.body24x7)
+                                candidate_smpl,_,_ = body24_to_smpl(frame.body24x7,
+                                    reference.rest_joints,reference.fk_parents)
+                                return_pose_receipt = require_manipulation_pose_match(mobile_entry_smpl,
+                                    candidate_smpl)
+                                return_pose_receipt['human_upright'] = return_human_readiness
+                                return_pose_receipt['entry_source_sequence'] = mobile_preparation.source_sequence
+                                return_pose_receipt['entry_device_timestamp_ns'] = mobile_preparation.device_timestamp_ns
+                            except ValueError as pose_error:
+                                operator_message=str(pose_error)+'；保持移动模式，当前录制继续。'
+                                continue
+                            mobile_control.pause('return_to_manipulation')
+                            # Preserve the new robot heading after walking. The
+                            # same live body/wrist calibration avoids snapping
+                            # back to the pre-navigation world orientation.
+                            reference.calibrate(frame.body24x7,root_pose(model,data),
+                                {name:float(data.joint(name).qpos[0]) for name in WRIST_NAMES})
+                            mobile_mode = 'pose'
+                            mobile_preparation = None
+                            mobile_entry_smpl = None
+                            operator_message='已恢复手臂操作，可以放入第二张桌子的容器。'
+                        else:
+                            operator_message='移动模式正在准备，请等候；也可以按Y暂停。'
+                            continue
+                        control_trace.write(json_text({'phase':'mobile_mode_transition',
+                            'tick50':global_tick,'mode':mobile_mode,
+                            'actual_state':snapshot,'source_sequence':frame.sequence,
+                            'source_device_timestamp_ns':frame.device_timestamp_ns,
+                            'source_raw_packet_sha256':hashlib.sha256(json_text(frame.raw_payload).encode()).hexdigest(),
+                            'return_pose_check':return_pose_receipt,
+                            'calibration':reference.calibration})+'\n')
                     elif action == 'record':
                         if episode or not following or not (rendered or deferred):
                             raise ValueError('Recording needs active calibrated control and an explicit rendering/capture mode')
@@ -1485,7 +1665,7 @@ def run(args):
                                 after_frame,_ = wait_fresh_command_frame(receiver,frame,
                                     frame.device_timestamp_ns,setup_started_wall+.20)
                             after_quality = validate_frame(after_frame,previous=frame)
-                            setup_commands = ui.commands()+rising_operator_commands(after_frame.buttons,last_buttons)
+                            setup_commands = ui.commands()+operator_buttons(after_frame.buttons,last_buttons)
                             last_buttons = dict(after_frame.buttons)
                             interrupt = capture_preparation_interrupt(setup_commands)
                             if interrupt == 'quit':
@@ -1517,20 +1697,53 @@ def run(args):
                     actual_before = physical_snapshot(model,data,BODY_JOINT_NAMES)
                     new_command = due or command is None
                     if new_command:
-                        if reference.last_timestamp_ns == frame.device_timestamp_ns:
+                        if last_command_timestamp_ns == frame.device_timestamp_ns:
                             if replay:
                                 raise ValueError('No new recorded PICO frame for a new30Hz command')
                             wait_started = time.perf_counter()
                             frame, quality = wait_fresh_command_frame(receiver, frame,
-                                reference.last_timestamp_ns, wall_deadline+args.max_lateness)
+                                last_command_timestamp_ns, wall_deadline+args.max_lateness)
                             # A short button press in this inspected packet must
                             # survive even if the next callback is its release.
-                            pending_input_commands.extend(rising_operator_commands(frame.buttons,last_buttons))
+                            pending_input_commands.extend(operator_buttons(frame.buttons,last_buttons))
                             last_buttons = dict(frame.buttons)
                             previous = frame
                             input_wait_seconds = time.perf_counter()-wait_started
+                    mobile_value = mobile_evidence = None
+                    if mobile_mode == 'preparing_navigation':
+                        preparing = mobile_control.poll()
+                        if preparing['ready'] and new_command:
+                            mobile_mode = 'navigation'
+                            mobile_tick = 0
+                            operator_message='移动模式：左杆向前、右杆转向，松杆停步；上身保持进入时姿态，手指仍可控。站稳并恢复入场人体姿态后按B恢复手臂。'
+                        else:
+                            mobile_value,mobile_evidence = mobile_preparation.encoder_reference(root_pose(model,data))
+                    if mobile_mode == 'navigation':
+                        mobile_value,mobile_evidence = mobile_control.step(mobile_tick,
+                            root_pose(model,data),actual_before['body_q29'],frame,
+                            tracking_valid=quality['valid'])
+                    if new_command:
                         encode_started = time.perf_counter()
-                        token, evidence = reference.encode(frame.body24x7,root_pose(model,data),frame.device_timestamp_ns)
+                        if mobile_value is not None:
+                            from pico_sonic_reference import ENCODER_SHA256
+                            from prepare_carrybox_v11 import POLICY_TO_BODY
+                            ranges = np.asarray([model.joint(BODY_JOINT_NAMES[i]).range
+                                for i in POLICY_TO_BODY])
+                            forecast_q = mobile_value[0,4:294].reshape(10,29)
+                            if np.any(forecast_q < ranges[None,:,0]-1e-6) or np.any(
+                                    forecast_q > ranges[None,:,1]+1e-6):
+                                raise ValueError('Mobile reference exceeds actual joint limits; no clipping applied')
+                            encoded = np.asarray(reference.session.run([reference.output_name],
+                                {reference.input_name:mobile_value})[0],dtype=np.float32)
+                            if encoded.shape != (1,64) or not np.isfinite(encoded).all():
+                                raise ValueError('Invalid Mobile SONIC token')
+                            token = encoded[0].copy()
+                            evidence = dict(mobile_evidence,model_inference_performed=True,
+                                encoder_sha256=ENCODER_SHA256,token_shape=[64],
+                                token_sha256=hashlib.sha256(token.tobytes()).hexdigest())
+                        else:
+                            token, evidence = reference.encode(frame.body24x7,root_pose(model,data),frame.device_timestamp_ns)
+                        last_command_timestamp_ns = frame.device_timestamp_ns
                         encode_seconds = time.perf_counter()-encode_started
                         reference_evidence = evidence
                         hands = named_hand_targets(raw.task.robot,frame)
@@ -1579,6 +1792,12 @@ def run(args):
                         render_profiler.set_context('pico_follow',global_tick,data.time)
                     step_started = time.perf_counter()
                     obs,reward,terminated,truncated,info = env.step(command)
+                    if pending_mobile_quality_row is not None:
+                        pending_mobile_quality_row['official_task_success'] = bool(terminated)
+                        quality_stream.write(json_text(pending_mobile_quality_row)+'\n')
+                        pending_mobile_quality_row = None
+                    if mobile_mode == 'navigation':
+                        mobile_tick += 1
                     step_seconds = time.perf_counter()-step_started
                     active_local = None
                     control_trace.write(json_text({'phase':'pico_follow','tick50':global_tick,
@@ -1599,6 +1818,9 @@ def run(args):
                     finite = all(np.isfinite(x).all() for x in (data.qpos,data.qvel,data.qacc,data.ctrl))
                     pelvis=model.body('pelvis').id
                     tilt=float(np.degrees(np.arccos(np.clip(data.xmat[pelvis].reshape(3,3)[2,2],-1,1))))
+                    if mobile:
+                        mobile_stopped.observe(global_tick,frame,actual_root_velocity(model,data),
+                            tilt_deg=tilt,tracking_valid=quality['valid'])
                     if not finite or data.xpos[pelvis,2] < .35 or tilt > 75 or truncated:
                         physics_ready = False
                         raise RuntimeError(f'Physical safety check failed: finite={finite}, pelvis_z={data.xpos[pelvis,2]:.3f}, tilt={tilt:.1f}')
@@ -1674,6 +1896,9 @@ def run(args):
                 else:
                     last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
+                'task_id':task_id,'collection_task_profile':profile,'mobile_mode':mobile_mode,
+                'mobile_planner':mobile_control.status() if mobile_control else None,
+                'mobile_stopped_for_mode_transition':mobile_stopped.ready if mobile else None,
                 'operator_message':operator_message,'last_episode':history_status,
                 'background_review':review_status,
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
@@ -1724,7 +1949,7 @@ def run(args):
                 review_queue.close(wait=False)
             except Exception as review_close_error:
                 result.setdefault('cleanup_errors',{})['background_review'] = repr(review_close_error)
-        for name, component in (('receiver',receiver),('headset_video',video_bridge),
+        for name, component in (('receiver',receiver),('mobile_planner',mobile_control),('headset_video',video_bridge),
                                 ('preview_worker',preview_worker),('ui',ui),('control_trace',control_trace),('render_profiler',render_profiler)):
             if component:
                 try:
@@ -1753,6 +1978,9 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     runtime=Path('/home/zxc/CVPR_Evaluation_runtime')
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--task',choices=('handover','mobile_pp'),default='handover')
+    parser.add_argument('--planner-model',type=Path,help='Pinned official planner for Mobile P&P only')
+    parser.add_argument('--mobile-cold-start',type=Path,help='Verified one-time initial BODY29 profile')
     parser.add_argument('--data-root',type=Path,default=runtime/'resources/simple_local_usd_v1')
     parser.add_argument('--sonic-resources',type=Path,default=runtime/'resources/sonic_v1_1')
     parser.add_argument('--human-info',type=Path,default=GEAR/'data/human/human_joints_info.pkl')
@@ -1762,7 +1990,7 @@ def main():
     parser.add_argument('--headset-video',action='store_true')
     parser.add_argument('--profile-render',action='store_true',help='Diagnostic API wall-time profiling without extra render calls')
     parser.add_argument('--disable-unrelated-viewport',action='store_true',help='Opt-in diagnostic: disable only a proven separate viewport render product')
-    parser.add_argument('--environment-config',type=Path,help='Reuse a local saved Handover environment for scene-bound diagnostics')
+    parser.add_argument('--environment-config',type=Path,help='Reuse a local saved environment matching --task')
     parser.add_argument('--pico-ip',default='172.16.20.83',help='Expected headset peer for video bridge')
     parser.add_argument('--seed',type=int,default=20261025)
     parser.add_argument('--port',type=int,default=43100)

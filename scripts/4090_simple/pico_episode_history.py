@@ -122,7 +122,6 @@ def quality_geometry_outcome(directory, outcome):
 
 def _physical_precheck(directory, outcome, metadata):
     """Recompute the existing physical gates; do not trust an outcome boolean."""
-    from handover_contact_quality import evaluate_capture
     reasons, report = [], {}
     if os.path.lexists(directory / "operator_discard.json"):
         reasons.append("操作员已标记丢弃此记录")
@@ -141,6 +140,13 @@ def _physical_precheck(directory, outcome, metadata):
         why = "；".join(str(item) for item in state.get("reasons", []))
         reasons.append("录制中断：" + (why or "未完整保存待验收"))
     try:
+        task_id = metadata.get("task_id")
+        if task_id == "simple/G1WholebodyHandoverTeleop-v0":
+            from handover_contact_quality import evaluate_capture
+        elif task_id == "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0":
+            from pico_mobile_quality import evaluate_mobile_capture as evaluate_capture
+        else:
+            raise ValueError("缺少或不支持的任务身份，不能套用交接验收：" + str(task_id))
         deferred = (directory / "deferred_capture").exists()
         capture_dir = directory / ("deferred_capture" if deferred else "capture")
         if capture_dir.is_symlink():
@@ -242,7 +248,11 @@ def _physical_precheck(directory, outcome, metadata):
             "object_lifted":"物体抬升不足10厘米", "both_hands_released_final_window":"末段未完全松手",
             "final_container_contact_sustained":"末段未持续接触篮筐", "final_object_stable":"末段物体仍在晃动",
             "pelvis_above_fall_threshold":"机器人跌倒", "final_window_complete":"末段稳定观察不足一秒",
-            "stability_window_complete":"末段稳定观察不足一秒"}
+            "stability_window_complete":"末段稳定观察不足一秒",
+            "root_position_evidence_complete":"缺少实际机器人根部位置证据",
+            "lifted_hand_hold_sustained":"未形成持续的单手或双手抬起抓持",
+            "target_and_root_carried_075m":"抓持搬运期间物体与机器人未同时移动至少0.75米（本次数采附加门）",
+            "target_final_transport_075m":"最终物体水平搬运不足0.75米（本次数采附加门）"}
         for key, text in labels.items():
             if checks.get(key) is False:
                 reasons.append(text)
@@ -255,7 +265,13 @@ def _physical_precheck(directory, outcome, metadata):
         if placement.get("legacy_outer_footprint_passed") is False:
             reasons.append("目标未落在篮筐有效范围内")
         if report.get("eligible_physics") is not True and not reasons:
-            reasons.append("物理交接与放置验收未通过")
+            reasons.append("移动抓取与放置验收未通过" if task_id == "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
+                           else "物理交接与放置验收未通过")
+        for error in report.get("capture_validation_errors", []):
+            if "actual_root_xyz_m" in str(error):
+                reasons.append("缺少或无效的实际机器人根部三维位置证据")
+            else:
+                reasons.append("原始物理证据缺失或无效：" + str(error))
         forces = _json(directory / "applied_force_samples.jsonl", lines=True)
         if len(forces) != len(qualities) * 4:
             raise ValueError("缺少原始200Hz外力记录")

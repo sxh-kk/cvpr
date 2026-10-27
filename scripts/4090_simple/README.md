@@ -356,6 +356,8 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 
 ## PICO 仿真遥操作采集
 
+本节默认入口用于 Handover；Mobile P&P 使用下面的独立入口、目录和物理预检查。
+
 `bash scripts/4090_simple/start_pico_teleop.sh` 使用已有 Conda 仿真环境，接入
 PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoCo、
 50Hz decoder、30Hz实际状态和命令录制。默认由独立进程渲染MuJoCo EGL左眼预览，退出后
@@ -395,3 +397,22 @@ RTX补图与完整独立审计仍待完成；丢弃记录被补图和审计入�
 `replay_pico_locomotion_intent.py` 仅读封存动作包，`diagnose_pico_locomotion.py` 仅在独立进程
 执行真实步行检查；当前仅前向通过本地物理门，后退／横移仍有失败，不能视为四方向跟随就绪。
 资源、命令、坐标及验证限制见[独立行走说明](../../docs/PICO_SIMPLE_TELEOP.md#独立人体平移与行走诊断默认关闭)。
+
+## PICO Mobile P&P 独立采集
+
+`bash scripts/4090_simple/start_pico_mobile_pp.sh` 显式选择
+`simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0`，使用官方 scene6 双桌场景和
+`/home/zxc/CVPR_Evaluation_runtime/mobile_pp_teleop_20261027/resources/` 中的固定资源／冷启动 profile。
+输出独立写入该运行根的 `collection/live_时间戳/`，与旧 Handover 及固定 90 条候选分开。
+默认先跟随当前人体姿态，按 B 切换移动；左杆前进、右杆转向，移动时保持切换时的腰／手臂参考，
+手指仍独立控制。松杆且实际连续站稳半秒，并恢复进入移动时的人体／手臂姿态后，再按 B 返回姿态跟随。
+返回门要求 root-local SMPL24 任一点偏差不超过3厘米；不匹配时保持移动／录制并提示。
+该门不代表 decoder 连续性或持物验收通过。
+倒退／横移未开放。设备设置、操作顺序、SHA、时钟与验证边界见
+[Mobile P&P 采集说明](../../docs/PICO_MOBILE_PP_TELEOP.md)。
+
+当前通过资源、CPU 冷启动／站立、短时空手移动及8秒完整入口诊断（真实异步planner／EGL预览／原始采集，
+最大累计lag约4.4ms）；诊断不是真人示例。未完成真人持物或完整任务验收，
+不能宣称 live 采集已就绪。Mobile 物理预检查不要求 Handover 交接顺序；`kept` 仍只代表 raw 物理预检查，
+尚未进入完整独立 RTX／DINO／训练准入。此 launcher 退出后只等待本次后台复核并封存，
+不调用旧 Handover 的 `finish_pico_session.py`／`audit_pico_teleop_episode.py`，不自动补图、上传或启动训练。

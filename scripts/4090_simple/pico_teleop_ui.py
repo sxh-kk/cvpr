@@ -72,9 +72,10 @@ camera.onload=()=>{cameraReady=imageAvailable;showCamera();};
 async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
  document.querySelector('#tracking-status').textContent=trackingFeedbackText(s.tracking);
- const mobile=s.collection_task_profile==='mobile_pp';document.querySelector('button[data-command="toggle_navigation"]').hidden=!mobile;
+ const mobile=s.collection_task_profile==='mobile_pp';const continuous=mobile&&s.mobile_control_policy==='continuous_vr_mode1';document.querySelector('button[data-command="toggle_navigation"]').hidden=!mobile||continuous;
  const mobileStatus=document.querySelector('#mobile-status');mobileStatus.hidden=!mobile;
- if(mobile){document.querySelector('h1').textContent='Mobile P&P 双桌搬运数采';document.querySelector('#instructions').textContent='X 标定 · Y 跟随／暂停 · A 录制／保存 · B 切换移动／手臂操作。移动时左杆向前、右杆转向，上身保持进入时姿态，扳机仍控制抓握。松杆站稳并恢复入场人体姿态后，按B恢复手臂操作。起录后先保持姿势1秒。';mobileStatus.textContent='控制模式：'+({pose:'手臂操作',preparing_navigation:'正在准备移动，请松开摇杆',navigation:'移动：上身保持、手指可控'}[s.mobile_mode]??'等待准备');}
+ if(continuous){document.querySelector('h1').textContent='Mobile P&P 双桌搬运数采';document.querySelector('#instructions').textContent='X 标定 · Y 跟随／暂停 · A 录制／保存。双臂持续跟随，无需B切换。左杆向前、右杆转向，松杆停步；扳机控制抓握。开始前松开摇杆，起录后先保持姿势1秒。';mobileStatus.textContent='控制模式：'+({continuous_paused:'连续控制已暂停',preparing_continuous:'正在准备连续控制，仿真暂停',continuous:'双臂实时跟随＋摇杆移动'}[s.mobile_mode]??'等待标定');}
+ else if(mobile){document.querySelector('h1').textContent='Mobile P&P 双桌搬运数采';document.querySelector('#instructions').textContent='X 标定 · Y 跟随／暂停 · A 录制／保存 · B 切换移动／手臂操作。移动时左杆向前、右杆转向，上身保持进入时姿态，扳机仍控制抓握。松杆站稳并恢复入场人体姿态后，按B恢复手臂操作。起录后先保持姿势1秒。';mobileStatus.textContent='控制模式：'+({pose:'手臂操作',preparing_navigation:'正在准备移动，请松开摇杆',navigation:'移动：上身保持、手指可控'}[s.mobile_mode]??'等待准备');}
  if(!statusConnected)reconnectStream();statusConnected=true;
  let phase=s.phase??s.state??s.status??'等待运行';if(typeof phase==='object')phase=phase.status??JSON.stringify(phase);
  const labels={paused:'已暂停',following:'正在跟随',saving:'正在封存本条',auditing:'正在物理验收',resetting:'正在重置场景',stopped:'采集已结束'};

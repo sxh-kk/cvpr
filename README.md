@@ -147,15 +147,17 @@ PICO 4 双手柄与脚踝定位器通过本机 SONIC v1.1 操控 SIMPLE G1，独
 用户固定90条真人示例的独立审计、无损训练格式转换、DINO及A100交付见[数据核定与交付](docs/PICO_DATASET_ADMISSION.md)；当前采集退出后才执行GPU阶段。
 
 
-SIMPLE Benchmark 的 Mobile P&P 新增独立 [PICO 采集入口与操作说明](docs/PICO_MOBILE_PP_TELEOP.md)：
-当前姿态跟随抓取，按 B 进入左杆前进／右杆转向，持物上身参考保持、手指独立；
-实际连续停稳半秒并恢复进入移动时的人体／手臂姿态后返回姿态模式放置（root-local SMPL24任一点偏差≤3厘米，
-不匹配保持移动／录制；该切换门不等于decoder连续性或持物验收）。资源、输出及物理预检查与Handover分开，退出后不自动补图或上传。
-目前已通过CPU冷启动、短时空手运动及8秒完整入口诊断（异步planner、EGL预览和原始采集，最大累计lag约4.4ms）；
-合成诊断不计真人，真人持物、完整任务及独立RTX／DINO准入仍待验收。
+SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](docs/PICO_MOBILE_PP_TELEOP.md)：
+本轮默认 `--mobile-control-policy continuous_vr_mode1`，左杆前进／右杆转向，双臂 Body22／23 与 neck12
+持续实时跟随，手指独立；取消 B、移动时上身锁定及 3 厘米返回门。腕 tip／颈部按当前实测机器人 FK 标定，
+三点参考通过同 tick 当前实际 root 的完整平移／旋转运输。200Hz真实物理、50Hz控制参考、30Hz新token／手指命令与原质量门保持。
+旧策略仅以 `--mobile-control-policy locked_upper_mode0` 显式重现；Handover 默认 mode2 保持。
+资源、输出及物理预检查与 Handover 分开，退出后不自动补图或上传。
 
-2026-10-27现场`live_human_001`的v1出现未开放方向和mode0未来参考范围硬拒绝两次中断。
-v2改为逐轴屏蔽横移／倒退并留证，未来参考范围只做诊断、不裁切或当作实际PD目标，
-准备时提前推杆保持静态参考并提示，真实物理／时钟／数据质量门不变。
-用户授权后，v2已在`live_human_002_v2`重启，实际场景／EGL的9秒输入恢复检查通过，最大lag约6.43ms。
-新检查仅覆盖空手IDLE模式往返、提前推杆保持和方向屏蔽；旧004仍仅是v1证据，真人持物任务仍待验收。
+新连续策略已通过291项CPU回归（无skip）及两次实际场景／SONIC／异步planner／EGL空手检查：
+14秒面向桌子试验受空间限制，净位移0.0843m；16秒先转再前进试验转向-186.10°、净位移0.54531m，
+最低骨盆0.76586m、最大倾角6.4783°，双臂实关节确有运动；最大lag分别3.8955／3.8082ms。
+原始外力全零、全新token为mode1，raw＋标定重建参考及token身份核对通过；均为合成空手诊断，不能称真人持物或完整任务成功。
+旧`live_human_002_v2`已正常停止并保留原数据；新`live_human_003_continuous_vr1`已加载并核对源码／mode1身份，
+浏览器已刷新显示无B连续双臂控制，核对时暂停、无录制、等待头显Send与标定。
+旧v1／v2回执和首个replay时间技术失败均保留，真人完整任务及独立RTX／DINO训练准入仍待验收。

@@ -77,23 +77,25 @@ def mobile_reference_diagnostics(value, body_names, body_joint_ranges):
     reference = np.asarray(value)
     ranges = np.asarray(body_joint_ranges, dtype=float)
     if (reference.shape != (1,1751) or not np.isfinite(reference).all()
-            or reference[0,0] != 0.):
-        raise ValueError('Mobile mode0 reference must be finite with shape (1,1751)')
+            or reference[0,0] not in (0.,1.)):
+        raise ValueError('Mobile mode0/mode1 reference must be finite with shape (1,1751)')
     if (len(body_names) != 29 or len(set(body_names)) != 29 or ranges.shape != (29,2)
             or not np.isfinite(ranges).all() or np.any(ranges[:,0] >= ranges[:,1])):
         raise ValueError('Mobile reference diagnostics require named actual joint ranges')
-    q = reference[0,4:294].reshape(10,29)
-    policy_ranges = ranges[POLICY_TO_BODY]
+    mode = int(reference[0,0])
+    order = POLICY_TO_BODY if mode == 0 else np.arange(12)
+    q = reference[0,4:294].reshape(10,29) if mode == 0 else reference[0,650:770].reshape(10,12)
+    policy_ranges = ranges[order]
     excess = np.maximum(np.maximum(policy_ranges[None,:,0]-q,q-policy_ranges[None,:,1]),0.)
     violations = []
     for frame, column in np.argwhere(excess > 1e-6):
-        body_index = int(POLICY_TO_BODY[column])
+        body_index = int(order[column])
         violations.append({'reference_frame_index':int(frame),
             'reference_offset_s':float(frame/10.), 'joint_name':body_names[body_index],
             'reference_q_rad':float(q[frame,column]),
             'actual_model_range_rad':ranges[body_index].tolist(),
             'excess_rad':float(excess[frame,column])})
-    return {'contract':'cvpr-sonic-mode0-reference-range-diagnostics-v1',
+    return {'contract':f'cvpr-sonic-mode{mode}-reference-range-diagnostics-v1','encoder_mode':mode,
         'reference_is_actual_state':False,'reference_is_direct_pd_target':False,
         'reference_modified':False,'hard_reject_on_reference_range':False,
         'outside_range_reference_count':len(violations),

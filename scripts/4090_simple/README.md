@@ -404,23 +404,31 @@ RTX补图与完整独立审计仍待完成；丢弃记录被补图和审计入�
 `simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0`，使用官方 scene6 双桌场景和
 `/home/zxc/CVPR_Evaluation_runtime/mobile_pp_teleop_20261027/resources/` 中的固定资源／冷启动 profile。
 输出独立写入该运行根的 `collection/live_时间戳/`，与旧 Handover 及固定 90 条候选分开。
-默认先跟随当前人体姿态，按 B 切换移动；左杆前进、右杆转向，移动时保持切换时的腰／手臂参考，
-手指仍独立控制。松杆且实际连续站稳半秒，并恢复进入移动时的人体／手臂姿态后，再按 B 返回姿态跟随。
-返回门要求 root-local SMPL24 任一点偏差不超过3厘米；不匹配时保持移动／录制并提示。
-该门不代表 decoder 连续性或持物验收通过。
-倒退／横移未开放。现场v1会因这些输入整条暂停；v2将其逐轴屏蔽并保留原始／屏蔽后四轴和忽略原因，
-准备时预先推杆则继续静态保持并提示松杆。用户已授权并重启至`live_human_002_v2`。设备设置、操作顺序、SHA、时钟与验证边界见
+
+本轮默认 `--mobile-control-policy continuous_vr_mode1`：X 校准、Y 跟随，左杆向前／右杆转向；
+双臂 Body22／23 与 neck12 三点参考在移动和停止时都实时更新，手指仍由双侧扳机／侧握独立控制。
+无需 B 切换，不锁上身，也没有旧 3 厘米返回姿态门。腕 tip／颈部参考按当前机器人实测 FK 标定，
+offset 只加一次；每包的局部三点经当前实际 root 完整平移／旋转运输，走动和转向后仍使用当前 root。
+真实物理 200Hz、控制／planner 参考 50Hz、token 与手指新命令 30Hz，原物理／时钟／零外力门保持。
+横移、倒退与未绑定轴仍逐轴屏蔽并留证；连续控制准备时物理暂停，须规划就绪、新有效包与摇杆归中后才启动跟随。
+
+需要重现旧 B 切换、腰／手臂锁定及停稳半秒＋3厘米返回门时，显式加
+`--mobile-control-policy locked_upper_mode0`。Handover 默认 mode2 不变。
+设备设置、操作顺序、FK／坐标约定、SHA 与验证边界见
 [Mobile P&P 采集说明](../../docs/PICO_MOBILE_PP_TELEOP.md)。
 
-当前通过资源、CPU 冷启动／站立、短时空手移动及8秒完整入口诊断（真实异步planner／EGL预览／原始采集，
-最大累计lag约4.4ms）；诊断不是真人示例。未完成真人持物或完整任务验收，
-不能宣称 live 采集已就绪。Mobile 物理预检查不要求 Handover 交接顺序；`kept` 仍只代表 raw 物理预检查，
+新连续策略本轮 **291 项 PICO CPU 回归全部通过，无 skip**，
+`continuous_mode1_001/CONTINUOUS_MODE1_ENTRY_ACCEPTANCE.json` 已通过实际场景／SONIC／异步 planner／EGL 空手检查。
+002为14秒、689个50Hz tick／413个新30Hz token，最大lag3.8955ms；面向桌子受空间限制，净位移仅0.0843m，不能称自由行走。
+003先转再前进16秒、789 tick／473 token，最大lag3.8082ms，实际转向-186.10°、净XY位移0.54531m，
+最低骨盆0.76586m、最大倾角6.4783°，双臂实关节确有运动。两次原始外力全零、全部新token为mode1，
+raw包＋标定重建世界VR参考零误差，token SHA一致；均为合成空手诊断，不计真人／持物／训练准入。
+001诊断 replay 重复包接收时间的技术失败与修复保留，live验证门未改。
+旧`live_human_002_v2`已正常stopped并保留数据；新`live_human_003_continuous_vr1`已加载，
+`continuous_mode1_001/RELOAD_COMPLETE.json`核对实际源码和mode1策略，浏览器已刷新、隐藏B并显示连续双臂说明。
+核对时无错误、暂停未录制、`no_tracking_packet`，等待头显Send与操作者X／Y。
+旧268项CPU回归、9秒v2 IDLE检查及更早004分别只覆盖旧策略。
+
+Mobile 物理预检查不要求 Handover 交接顺序；`kept` 只代表 raw 物理预检查，
 尚未进入完整独立 RTX／DINO／训练准入。此 launcher 退出后只等待本次后台复核并封存，
 不调用旧 Handover 的 `finish_pico_session.py`／`audit_pico_teleop_episode.py`，不自动补图、上传或启动训练。
-
-2026-10-27约15:53，`live_human_001` 的v1在tick926因未开放方向、tick1775因mode0未来参考的关节范围硬拒绝中断。
-本轮源码把1751维mode0参考与实际关节／PD目标区分：保持形状／有限性等校验，范围比较只记录完整诊断，
-不裁切参考，真实物理／时钟／数据质量门不变；暂停信息显示实际原因。移动控制contract升为v2。
-旧`gpu_mode_switch_diagnostic_004`只是v1空手IDLE切换检查，不能证明v2已修复。
-用户授权后已完成v2实际场景／EGL的9秒空手IDLE输入恢复检查，最大lag约6.43ms；
-新会话已加载修复并暂停等待真人标定。该检查不代表持物行走、完整任务或训练数据准入通过。

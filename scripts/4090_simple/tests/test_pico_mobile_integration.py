@@ -10,6 +10,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -63,6 +64,7 @@ class FakeReference:
     def __init__(self):
         self.calls = []
         self.calibrations = []
+        self.continuity_calls = []
         self.input_name, self.output_name = "input", "token"
         self.session = SimpleNamespace(run=self.infer)
         self.last_timestamp_ns = None
@@ -86,18 +88,53 @@ class FakeReference:
         self.last_timestamp_ns = self.last_body = None
         self.calibration = {"actual_root_pose7": root.tolist()}
 
+    def _validate_continuity(self, body, timestamp):
+        if self.last_timestamp_ns is not None and timestamp <= self.last_timestamp_ns:
+            raise ValueError("PICO command timestamp must advance")
+        self.continuity_calls.append((timestamp, body.copy()))
+
+
+class FakeLiveVR:
+    def __init__(self):
+        self.calls = []
+        self.calibration = {"cpu_fixture": True}
+
+    def calibrate(self, body, root, positions, quaternions):
+        self.calibration = {"contract": "cpu_test_vr_calibration", "calibration_sha256": "b" * 64,
+                            "actual_root_pose7": root.tolist()}
+        return copy.deepcopy(self.calibration)
+
+    def prepare(self, body, root):
+        if self.calibration is None:
+            raise ValueError("Live VR calibration required")
+        points = body[[20, 21, 15], :3] + root[None, :3]
+        quaternions = np.tile([1., 0., 0., 0.], (3, 1))
+        self.calls.append((body.copy(), root.copy(), points.copy()))
+        return points, quaternions, {"producer": "cpu_test_current_packet_vr", "encoder_mode": 1}
+
 class FakeMobile:
     def __init__(self):
         self.ticks = []
         self.pauses = []
         self.boots = []
+        self.vr_calls = []
         self.ready = True
 
     def poll(self):
         return {"ready": self.ready}
 
-    def step(self, tick, root, body, frame, *, tracking_valid):
+    def step(self, tick, root, body, frame, *, tracking_valid,
+             vr_world_points=None, vr_world_quaternions=None):
         self.ticks.append((tick, frame.device_timestamp_ns, tracking_valid))
+        if vr_world_points is not None:
+            from pico_locomotion_reference import encoder_reference
+            q = np.repeat(np.r_[root, body][None], 46, axis=0)
+            value, evidence = encoder_reference(q, np.zeros((46, 29)), root,
+                vr_world_points=vr_world_points, vr_world_quaternions=vr_world_quaternions)
+            self.vr_calls.append((frame.sequence, frame.device_timestamp_ns, np.asarray(vr_world_points).copy()))
+            evidence.update(contract="cvpr-pico-mobile-continuous-vr-mode1-async-reference-v1", tick50=tick,
+                reference_policy="continuous_vr_mode1", upper_body_frozen=False)
+            return value, evidence
         return np.zeros((1, 1751), dtype=np.float32), {"encoder_mode": 1, "tick50": tick}
 
     def pause(self, reason):
@@ -117,6 +154,9 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
             model=SimpleNamespace(joint=joint), data=SimpleNamespace(time=0., joint=joint), BODY_JOINT_NAMES=["b" + str(i) for i in range(29)],
             physical_snapshot=lambda *_: {"body_q29": [0.] * 29}, root_pose=lambda *_: root.copy(),
             mobile_mode="navigation", mobile_tick=0, mobile_control=mobile, reference=reference,
+            mobile_continuous=False, mobile_policy="locked_upper_mode0", mobile_vr=None,
+            mobile_follow_source_timestamp=None,
+            mobile_preparation_wall=None,
             mobile_preparation=SimpleNamespace(source_sequence=1, device_timestamp_ns=1_000_000_000),
             mobile_entry_smpl=np.zeros((24, 3)),
             quality={"valid": True}, replay=None, pending_input_commands=[], last_buttons={}, previous=None,
@@ -128,6 +168,7 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
             operator_buttons=lambda *_: [], operator_message="", reference_evidence=None,
             body24_to_smpl=lambda body, *_: (body[:, :3].copy(), np.array([1., 0., 0., 0.]), np.zeros(6)),
             require_neutral_calibration=lambda *_: {"passed": True, "reference_root_tilt_deg": 0.},
+            require_standing_warmup=lambda *_: {"passed": True}, warmup_baseline={},
             _commands=commands, _ledger_rows=ledger_rows)
         return namespace
 
@@ -140,7 +181,7 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
         namespace.update(global_tick=tick, frame=frame or self.frame(tick), state={"local_tick50": tick})
         namespace["data"].time = tick / 50
         execute(command_block(), namespace)
-        if namespace["mobile_mode"] == "navigation":
+        if namespace["mobile_mode"] in ("navigation", "continuous"):
             namespace["mobile_tick"] += 1
 
     def toggle_navigation(self, namespace):
@@ -149,6 +190,187 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
         execute([ast.For(target=ast.Name(id="action", ctx=ast.Store()),
                          iter=ast.List(elts=[ast.Constant(value="toggle_navigation")], ctx=ast.Load()),
                          body=transition.body, orelse=[])], namespace)
+
+    def operator_action(self, action, namespace):
+        branch = next(node for node in ast.walk(run_tree()) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "action == " + repr(action))
+        execute([ast.For(target=ast.Name(id="action", ctx=ast.Store()),
+                         iter=ast.List(elts=[ast.Constant(value=action)], ctx=ast.Load()),
+                         body=branch.body, orelse=[])], namespace)
+
+    def continuous_preparation(self, namespace):
+        branch = next(node for node in ast.walk(run_tree()) if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "mobile_continuous and mobile_mode == 'preparing_continuous'"
+                      and isinstance(node.body[0], ast.Try))
+        execute([branch], namespace)
+
+    def invalidate(self, namespace):
+        node = next(node for node in ast.walk(run_tree()) if isinstance(node, ast.FunctionDef)
+                    and node.name == "invalidate_calibration")
+        node = copy.deepcopy(node)
+        node.body = [ast.Global(names=item.names) if isinstance(item, ast.Nonlocal) else item for item in node.body]
+        execute([node], namespace)
+        namespace["invalidate_calibration"]()
+
+    def test_continuous_live_arms_and_fingers_use_same_packet_at_50_30hz_without_b(self):
+        namespace = self.namespace()
+        vr = FakeLiveVR()
+        namespace.update(mobile_continuous=True, mobile_mode="continuous", mobile_vr=vr,
+            named_hand_targets=lambda _, frame: {"hand": frame.sequence / 100.})
+        for tick in range(5):
+            sample = self.frame(tick)
+            sample.body24x7[20, 0] = tick * .05
+            sample.body24x7[21, 1] = -tick * .04
+            self.tick(namespace, tick, frame=sample)
+        mobile = namespace["mobile_control"]
+        self.assertEqual([item[0] for item in mobile.ticks], list(range(5)))
+        self.assertEqual(len(vr.calls), 5)
+        self.assertEqual([item[0] for item in mobile.vr_calls], [1, 2, 3, 4, 5])
+        self.assertEqual(len(namespace["reference"].calls), 3)
+        self.assertTrue(all(item[0] == "planner_encode" for item in namespace["reference"].calls))
+        self.assertEqual([row[0] for row in namespace["reference"].continuity_calls],
+                         [self.frame(tick).device_timestamp_ns for tick in (0, 2, 4)])
+        self.assertEqual(len(namespace["_ledger_rows"]), 3)
+        for _, row in namespace["_ledger_rows"]:
+            evidence = row["reference_evidence"]
+            self.assertEqual(evidence["encoder_mode"], 1)
+            self.assertEqual(evidence["reference_policy"], "continuous_vr_mode1")
+            self.assertEqual(evidence["live_vr"]["source_sequence"], row["source_sequence"])
+            self.assertEqual(evidence["live_vr"]["source_device_timestamp_ns"], row["device_timestamp_ns"])
+            self.assertEqual(row["named_hand_targets"]["hand"], row["source_sequence"] / 100.)
+            self.assertFalse(evidence["upper_body_frozen"])
+        encoded = [row[1] for row in namespace["reference"].calls]
+        np.testing.assert_array_equal(encoded[0][0, 644:890], encoded[-1][0, 644:890])
+        self.assertFalse(np.array_equal(encoded[0][0, 890:896], encoded[-1][0, 890:896]))
+        self.assertEqual(namespace["reference"].last_timestamp_ns, self.frame(4).device_timestamp_ns)
+        np.testing.assert_array_equal(namespace["reference"].last_body, vr.calls[-1][0])
+
+    def test_continuous_b_has_no_effect_and_physical_b_is_not_bound(self):
+        namespace = self.namespace()
+        episode = SimpleNamespace(status="recording")
+        namespace.update(mobile=True, mobile_continuous=True, mobile_mode="continuous", following=True,
+            episode=episode, frame=self.frame(1), command={"current": True},
+            mobile_stopped=SimpleNamespace(ready=False))
+        old_command = namespace["command"]
+        self.toggle_navigation(namespace)
+        self.assertEqual(namespace["mobile_mode"], "continuous")
+        self.assertIs(namespace["episode"], episode)
+        self.assertIs(namespace["command"], old_command)
+        self.assertEqual(namespace["mobile_control"].pauses, [])
+        self.assertEqual(namespace["reference"].calibrations, [])
+        self.assertIn("无需B", namespace["operator_message"])
+        buttons = next(node for node in ast.walk(run_tree()) if isinstance(node, ast.FunctionDef)
+                       and node.name == "operator_buttons")
+        execute([buttons], namespace)
+        self.assertEqual(namespace["operator_buttons"]({"B": True}, {}), [])
+        namespace["mobile_continuous"] = False
+        self.assertEqual(namespace["operator_buttons"]({"B": True}, {}), ["toggle_navigation"])
+        namespace["mobile"] = False
+        self.assertEqual(namespace["operator_buttons"]({"B": True}, {}), [])
+
+    def test_continuous_follow_prepares_while_paused_then_requires_fresh_neutral_packet(self):
+        namespace = self.namespace()
+        namespace.update(mobile_continuous=True, mobile_mode="continuous_paused", following=False,
+            mobile_vr=FakeLiveVR(), calibration_fresh=True, physics_ready=True, frame=self.frame(0),
+            command={"old": True}, wall_deadline=100., mobile_stopped=SimpleNamespace(clear=lambda: None))
+        namespace["mobile_control"].ready = False
+        self.operator_action("follow", namespace)
+        self.assertFalse(namespace["following"])
+        self.assertEqual(namespace["mobile_mode"], "preparing_continuous")
+        self.assertEqual(len(namespace["mobile_control"].boots), 1)
+        self.assertIsNone(namespace["wall_deadline"])
+        self.assertIsNone(namespace["command"])
+        self.continuous_preparation(namespace)
+        self.assertFalse(namespace["following"])
+        self.assertEqual(namespace["mobile_control"].ticks, [])
+        namespace["mobile_control"].ready = True
+        self.continuous_preparation(namespace)  # old packet is not enough
+        self.assertFalse(namespace["following"])
+        namespace["frame"] = self.frame(1)
+        namespace["frame"].inputs["left_axis_y"] = .8
+        self.continuous_preparation(namespace)
+        self.assertFalse(namespace["following"])
+        namespace["frame"] = self.frame(2)
+        self.continuous_preparation(namespace)
+        self.assertTrue(namespace["following"])
+        self.assertEqual(namespace["mobile_mode"], "continuous")
+        self.assertEqual(namespace["mobile_tick"], 0)
+        self.assertIsNone(namespace["wall_deadline"])
+        self.assertEqual(namespace["data"].time, 0.)
+        self.assertEqual(namespace["mobile_control"].ticks, [])
+
+    def test_continuous_pause_invalidates_vr_and_reference_and_next_follow_must_rebind(self):
+        namespace = self.namespace()
+        namespace.update(mobile_continuous=True, mobile_mode="continuous", following=True,
+            mobile_vr=FakeLiveVR(), command={"active": True}, calibration_fresh=True,
+            mobile_follow_source_timestamp=1000, mobile_preparation_wall=1.,
+            mobile_stopped=SimpleNamespace(clear=lambda: None))
+        self.invalidate(namespace)
+        self.assertFalse(namespace["following"])
+        self.assertEqual(namespace["mobile_mode"], "continuous_paused")
+        self.assertIsNone(namespace["mobile_vr"].calibration)
+        self.assertIsNone(namespace["reference"].calibration)
+        self.assertIsNone(namespace["mobile_follow_source_timestamp"])
+        self.assertIsNone(namespace["mobile_preparation_wall"])
+        self.assertIsNone(namespace["command"])
+        self.assertFalse(namespace["calibration_fresh"])
+        namespace.update(frame=self.frame(1), physics_ready=True)
+        with self.assertRaisesRegex(ValueError, "Calibrate valid tracking"):
+            self.operator_action("follow", namespace)
+
+    def test_continuous_metadata_keeps_mode1_policy_and_vr_identity_separate_from_legacy(self):
+        from test_pico_simple_teleop import episode_metadata_fixture
+        session, scene = episode_metadata_fixture()
+        session.update(task_id="simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0",
+            collection_task_profile="mobile_pp", mobile_control_policy="continuous_vr_mode1",
+            mobile_encoder_mode=1, mobile_vr_source={"source_sha256": {"vr_math": "a" * 64}},
+            mobile_control_protocol="cvpr-pico-mobile-continuous-vr-mode1-async-reference-v1")
+        identity = entry.episode_session_identity(session)
+        metadata = entry.bounded_episode_metadata(identity, scene, human_demo_uuid="cpu-test-uuid",
+            pico_calibration={"encoder_mode": 1, "mobile_vr": {"calibration_sha256": "b" * 64}},
+            initial_target_z_m=.55)
+        self.assertEqual(metadata["mobile_control_policy"], "continuous_vr_mode1")
+        self.assertEqual(metadata["mobile_encoder_mode"], 1)
+        self.assertEqual(metadata["pico_calibration"]["encoder_mode"], 1)
+        self.assertEqual(metadata["mobile_vr_source"], session["mobile_vr_source"])
+        self.assertEqual(metadata["mobile_control_protocol"], session["mobile_control_protocol"])
+        self.assertFalse(metadata["accepted_new_dataset"])
+        session["mobile_vr_source"]["source_sha256"].clear()
+        self.assertEqual(metadata["mobile_vr_source"]["source_sha256"], {"vr_math": "a" * 64})
+
+    def test_continuous_x_calibrates_vr_only_and_saves_no_unused_mode2_wrist_receipt(self):
+        namespace = self.namespace()
+        namespace.update(mobile_continuous=True, mobile_policy="continuous_vr_mode1", mobile_mode="continuous_paused",
+            mobile_vr=FakeLiveVR(), frame=self.frame(0), physics_ready=True, following=False,
+            mobile_actual_vr_bodies=lambda: (np.zeros((3, 3)), np.tile([1., 0., 0., 0.], (3, 1))))
+        namespace["reference"].last_timestamp_ns = 999
+        namespace["reference"].last_body = np.ones((24, 7))
+        with tempfile.TemporaryDirectory() as directory:
+            namespace["output"] = Path(directory)
+            self.operator_action("calibrate", namespace)
+            saved = json.loads((Path(directory) / "last_calibration.json").read_text())
+        self.assertEqual(namespace["reference"].calibrations, [])
+        self.assertEqual(saved["encoder_mode"], 1)
+        self.assertEqual(saved["mobile_vr"]["calibration_sha256"], "b" * 64)
+        self.assertIn("human_readiness", saved)
+        self.assertIn("robot_readiness", saved)
+        self.assertFalse(set(saved) & {"wrist_offset6", "initial_smpl_joints24_sha256", "wrist_source"})
+        self.assertIsNone(namespace["reference"].last_body)
+        self.assertIsNone(namespace["reference"].last_timestamp_ns)
+        self.assertTrue(namespace["calibration_fresh"])
+        self.assertFalse(namespace["following"])
+        self.assertEqual(namespace["mobile_mode"], "continuous_paused")
+
+    def test_legacy_and_handover_x_keep_existing_mode2_calibrator(self):
+        for mobile in (False, True):
+            namespace = self.namespace()
+            namespace.update(mobile=mobile, mobile_continuous=False, frame=self.frame(0),
+                physics_ready=True, following=False)
+            with tempfile.TemporaryDirectory() as directory:
+                namespace["output"] = Path(directory)
+                self.operator_action("calibrate", namespace)
+            self.assertEqual(len(namespace["reference"].calibrations), 1)
+            self.assertTrue(namespace["calibration_fresh"])
 
     def test_actual_dispatch_calls_planner_50hz_and_token_ledger_only_30hz(self):
         namespace = self.namespace()

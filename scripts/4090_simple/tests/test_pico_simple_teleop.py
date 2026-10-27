@@ -130,6 +130,16 @@ class EntryGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 replay.at(invalid)
 
+    def test_replay_repeated_packet_keeps_one_receive_time_during_paused_preparation(self):
+        replay = self.replay([raw_packet(10_000_000_000+i*20_000_000) for i in range(3)])
+        with patch.object(entry.time,'monotonic',side_effect=[100.,100.019]):
+            first = replay.at(.001)
+            held = replay.at(.018)
+            self.assertEqual(first.sequence,held.sequence)
+            self.assertEqual(first.host_received_s,held.host_received_s)
+            new = replay.at(.021)
+        self.assertGreater(new.host_received_s,first.host_received_s)
+
     def test_synthetic_diagnostic_is_never_labelled_human(self):
         kind = 'SYNTHETIC_NEUTRAL_NOT_HUMAN_NOT_TRAINING'
         replay = self.replay([raw_packet(100,kind),raw_packet(200,kind)])

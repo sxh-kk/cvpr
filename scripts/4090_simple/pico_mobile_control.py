@@ -25,6 +25,7 @@ from sonic_locomotion_planner import (
 
 
 CONTRACT = 'cvpr-pico-mobile-frozen-upperbody-async-reference-v2'
+CONTINUOUS_CONTRACT = 'cvpr-pico-mobile-continuous-vr-mode1-async-reference-v1'
 UPPER_BODY_NAMES = tuple(BODY_NAMES[12:])
 CONTROL_DT = .02
 
@@ -132,7 +133,7 @@ class SynchronousDiagnosticWorker:
 
 
 class MobilePlannerControl:
-    """50 Hz asynchronous planner timeline with measured frozen upper body.
+    """50 Hz asynchronous planner with explicit locked or live-VR references.
 
     boot(root, BODY29) starts loading, then poll() until status()['ready'].
     step(tick50, root, BODY29, frame) returns (float32[1,1751], JSON evidence).
@@ -141,8 +142,13 @@ class MobilePlannerControl:
     A fault is sticky: no output until explicit boot after caller recalibration.
     """
     def __init__(self, model_path, *, config=None, planner_worker=None,
-                 clock=time.monotonic, diagnostic_only=False, seed=20261027):
+                 clock=time.monotonic, diagnostic_only=False, seed=20261027,
+                 reference_policy='locked_upper_mode0'):
         self.config = config or MobileControlConfig()
+        if reference_policy not in ('locked_upper_mode0', 'continuous_vr_mode1'):
+            raise ValueError('Explicit supported Mobile reference_policy required')
+        self.reference_policy = reference_policy
+        self.contract = CONTINUOUS_CONTRACT if reference_policy == 'continuous_vr_mode1' else CONTRACT
         self.clock, self.diagnostic_only, self.seed = clock, bool(diagnostic_only), seed
         if type(seed) is not int or not 0 <= seed < 2**63:
             raise ValueError('Nonnegative int64 planner seed required')
@@ -193,7 +199,7 @@ class MobilePlannerControl:
         self.origin_tick, self.boot_wall = 0, now
         self.alignment = WorldAlignment.from_actual(root)
         self.context, self.bootstrap = bootstrap_context(body)
-        self.frozen_upper = body[12:].copy()
+        self.frozen_upper = body[12:].copy() if self.reference_policy == 'locked_upper_mode0' else None
         self.yaw = math.atan2(rotation(root[3:])[1, 0], rotation(root[3:])[0, 0])
         self.last_source_timestamp = self.last_source_sequence = None
         self.last_host_time = now
@@ -352,10 +358,16 @@ class MobilePlannerControl:
             'axis_policy': 'diagnostic_planar_all_directions' if self.config.allow_strafe_backward
                 else 'production_forward_only_with_explicit_lateral_backward_mask'}
 
-    def step(self, tick50, actual_root_pose7, actual_body29, frame, *, now=None, tracking_valid=True):
+    def step(self, tick50, actual_root_pose7, actual_body29, frame, *, now=None, tracking_valid=True,
+             vr_world_points=None, vr_world_quaternions=None):
         if self.phase not in ('ready', 'active'):
             raise MobileControlError('mobile_reference_not_ready: '+str(self.reason or self.phase))
         try:
+            continuous = self.reference_policy == 'continuous_vr_mode1'
+            if continuous and (vr_world_points is None or vr_world_quaternions is None):
+                self._fail('continuous_mode1_requires_live_vr_points_and_quaternions')
+            if not continuous and (vr_world_points is not None or vr_world_quaternions is not None):
+                self._fail('locked_reference_policy_does_not_accept_live_vr_targets')
             now = self._now(now)
             root, _ = self._state(actual_root_pose7, actual_body29)
             expected = 0 if self.last_tick is None else self.last_tick+1
@@ -396,11 +408,34 @@ class MobilePlannerControl:
                 self._consume(tick50, now)
                 cursor = tick50-self.origin_tick
             qpos, dq = future_window(self.active, cursor)
-            qpos[:, 19:36] = self.frozen_upper
-            dq[:, 12:29] = 0.
-            value, evidence = encoder_reference(qpos, dq, root)
+            if continuous:
+                # Only planner lower-body channels enter mode1. Current upper
+                # goals come from the caller's live, explicitly world-bound VR
+                # points; no planner or frozen upper-body pose overwrites them.
+                value, evidence = encoder_reference(qpos, dq, root,
+                    vr_world_points=vr_world_points, vr_world_quaternions=vr_world_quaternions)
+                evidence.update(live_upper_reference={
+                    'source': 'caller_supplied_current_VR_three_point_world_targets',
+                    'source_sequence': source['source_sequence'],
+                    'device_timestamp_ns': source['device_timestamp_ns'],
+                    'point_order': list(evidence['VR_point_order']),
+                    'world_points_already_offset': True,
+                    'world_points_m': np.asarray(vr_world_points, dtype=float).tolist(),
+                    'world_quaternions_wxyz': np.asarray(vr_world_quaternions, dtype=float).tolist(),
+                    'binding_scope': 'collector must bind these targets to the recorded current source packet'},
+                    planner_upper_body_used_as_reference=False,
+                    upper_body_frozen=False)
+            else:
+                qpos[:, 19:36] = self.frozen_upper
+                dq[:, 12:29] = 0.
+                value, evidence = encoder_reference(qpos, dq, root)
+                evidence.update(frozen_upper_body_names=list(UPPER_BODY_NAMES),
+                    frozen_upper_body_q17=self.frozen_upper.tolist(), frozen_upper_body_velocity17=[0.]*17,
+                    frozen_upper_source='actual measured BODY29 at explicit mobile-mode entry',
+                    upper_body_frozen=True)
             self.last_tick, self.last_host_time, self.phase = tick50, now, 'active'
-            evidence.update(contract=CONTRACT, tick50=tick50, cursor50=cursor,
+            evidence.update(contract=self.contract, reference_policy=self.reference_policy,
+                tick50=tick50, cursor50=cursor,
                 timeline_origin_tick50=self.origin_tick, epoch=self.epoch,
                 source=source, desired_command=command, applied_plan_command=self.last_command,
                 movement_scope='diagnostic_all_planar_directions' if self.config.allow_strafe_backward
@@ -408,9 +443,6 @@ class MobilePlannerControl:
                 pending_request_id=self.pending['id'] if self.pending else None,
                 pending_deadline_monotonic=self.pending['expires'] if self.pending else None,
                 last_replan_reason=self.last_replan_reason, last_inference=self.last_inference,
-                frozen_upper_body_names=list(UPPER_BODY_NAMES), frozen_upper_body_q17=self.frozen_upper.tolist(),
-                frozen_upper_body_velocity17=[0.]*17,
-                frozen_upper_source='actual measured BODY29 at explicit mobile-mode entry',
                 finger_targets_source='collector passes current operator finger targets separately',
                 actual_state_written=False, model_forecasts_are_training_labels=False,
                 synchronous_diagnostic_only=self.diagnostic_only,
@@ -422,7 +454,7 @@ class MobilePlannerControl:
             self._fail('mobile_reference_rejected: '+str(exc))
 
     def status(self):
-        return {'contract': CONTRACT, 'status': self.phase,
+        return {'contract': self.contract, 'reference_policy': self.reference_policy, 'status': self.phase,
             'ready': self.phase in ('ready', 'active') and self.active is not None,
             'pause_reason': self.reason, 'last_tick50': self.last_tick,
             'pending_request_id': self.pending['id'] if self.pending else None,

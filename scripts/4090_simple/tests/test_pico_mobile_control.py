@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pico_mobile_control import (
-    MobileControlConfig, MobileControlError, MobilePlannerControl,
+    CONTINUOUS_CONTRACT, MobileControlConfig, MobileControlError, MobilePlannerControl,
     SynchronousDiagnosticWorker, neutral_controls, transition_ready,
 )
 from prepare_carrybox_v11 import POLICY_TO_BODY
@@ -97,12 +97,13 @@ class SpawnFakePlanner:
 
 
 class MobileBridgeTests(unittest.TestCase):
-    def bridge(self, *, ready=True, config=None, diagnostic=False):
+    def bridge(self, *, ready=True, config=None, diagnostic=False, reference_policy='locked_upper_mode0'):
         self.clock = Clock()
         self.worker = FakeWorker(self.clock)
         self.worker.ready = ready
         bridge = MobilePlannerControl('unused_fake_path', config=config,
-            planner_worker=self.worker, clock=self.clock, diagnostic_only=diagnostic)
+            planner_worker=self.worker, clock=self.clock, diagnostic_only=diagnostic,
+            reference_policy=reference_policy)
         self.addCleanup(bridge.close)
         bridge.boot(ROOT, BODY)
         return bridge
@@ -113,9 +114,82 @@ class MobileBridgeTests(unittest.TestCase):
         self.assertTrue(bridge.poll()['ready'])
         return bridge
 
-    def step(self, bridge, tick, **axes):
+    def step(self, bridge, tick, *, vr_world_points=None, vr_world_quaternions=None, **axes):
         self.clock.value = 100.+tick*.02
-        return bridge.step(tick, ROOT, BODY, frame(self.clock(), tick, **axes))
+        return bridge.step(tick, ROOT, BODY, frame(self.clock(), tick, **axes),
+            vr_world_points=vr_world_points, vr_world_quaternions=vr_world_quaternions)
+
+    def live_vr(self):
+        return np.array([[.4, .3, .9], [.4, -.3, .9], [0., 0., 1.3]]), np.tile([1., 0., 0., 0.], (3, 1))
+
+    def test_continuous_mode1_changes_both_live_arms_without_changing_lower_reference(self):
+        points, orientations = self.live_vr()
+        base = self.prepared(reference_policy='continuous_vr_mode1')
+        before_q, before_dq = base.active.qpos50.copy(), base.active.dq29.copy()
+        value, evidence = self.step(base, 0, vr_world_points=points, vr_world_quaternions=orientations)
+        np.testing.assert_array_equal(base.active.qpos50, before_q)
+        np.testing.assert_array_equal(base.active.dq29, before_dq)
+        self.assertIsNone(base.frozen_upper)
+        self.assertEqual(value[0, 0], 1.)
+        self.assertEqual(evidence['encoder_mode'], 1)
+        self.assertEqual(evidence['contract'], CONTINUOUS_CONTRACT)
+        self.assertEqual(evidence['reference_policy'], 'continuous_vr_mode1')
+        self.assertFalse(evidence['upper_body_frozen'])
+        self.assertFalse(evidence['planner_upper_body_used_as_reference'])
+        self.assertFalse(any(key.startswith('frozen_upper') for key in evidence))
+        self.assertEqual(evidence['live_upper_reference']['world_points_m'], points.tolist())
+        self.assertEqual(evidence['live_upper_reference']['source_sequence'], 1)
+        self.assertEqual(base.status()['contract'], CONTINUOUS_CONTRACT)
+        self.assertEqual(base.status()['reference_policy'], 'continuous_vr_mode1')
+        np.testing.assert_array_equal(value[0, 4:644], 0.)  # inactive full-body mode0 channels
+        for side in (0, 1):
+            changed = points.copy(); changed[side] += [.07, .03, -.02]
+            changed_orientations = orientations.copy(); changed_orientations[side] = [0., 0., 0., 1.]
+            other = self.prepared(reference_policy='continuous_vr_mode1')
+            changed_value, changed_evidence = self.step(other, 0,
+                vr_world_points=changed, vr_world_quaternions=changed_orientations)
+            np.testing.assert_array_equal(changed_value[0, 644:890], value[0, 644:890])
+            self.assertFalse(np.array_equal(changed_value[0, 890 + side * 3:893 + side * 3],
+                                           value[0, 890 + side * 3:893 + side * 3]))
+            self.assertFalse(np.array_equal(changed_value[0, 899 + side * 4:903 + side * 4],
+                                           value[0, 899 + side * 4:903 + side * 4]))
+            self.assertEqual(changed_evidence['encoder_mode'], 1)
+
+    def test_continuous_missing_or_invalid_live_vr_never_falls_back_to_mode0(self):
+        points, orientations = self.live_vr()
+        for kwargs in ({}, {'vr_world_points': points}, {'vr_world_quaternions': orientations},
+                {'vr_world_points': np.zeros((2, 3)), 'vr_world_quaternions': orientations},
+                {'vr_world_points': np.full((3, 3), np.nan), 'vr_world_quaternions': orientations},
+                {'vr_world_points': points, 'vr_world_quaternions': np.zeros((3, 4))}):
+            bridge = self.prepared(reference_policy='continuous_vr_mode1')
+            with self.assertRaises(MobileControlError):
+                self.step(bridge, 0, **kwargs)
+            self.assertEqual(bridge.status()['status'], 'paused')
+            self.assertFalse(bridge.status()['ready'])
+
+    def test_reference_policy_is_explicit_and_locked_cannot_silently_ignore_live_vr(self):
+        with self.assertRaises(ValueError):
+            self.bridge(reference_policy='guess')
+        bridge = self.prepared()
+        points, orientations = self.live_vr()
+        with self.assertRaisesRegex(MobileControlError, 'locked_reference_policy'):
+            self.step(bridge, 0, vr_world_points=points, vr_world_quaternions=orientations)
+
+    def test_continuous_keeps_real_tick_progression_with_fresh_vr_each_step(self):
+        bridge = self.prepared(reference_policy='continuous_vr_mode1')
+        points, orientations = self.live_vr()
+        outputs = []
+        for tick in range(4):
+            current = points.copy(); current[0, 0] += tick * .01
+            value, evidence = self.step(bridge, tick, vr_world_points=current,
+                vr_world_quaternions=orientations)
+            outputs.append(value[0, 890])
+            self.assertEqual(evidence['tick50'], tick)
+            self.assertEqual(evidence['live_upper_reference']['device_timestamp_ns'],
+                             frame(self.clock(), tick)['device_timestamp_ns'])
+        self.assertTrue(all(b > a for a, b in zip(outputs, outputs[1:])))
+        with self.assertRaisesRegex(MobileControlError, 'nonconsecutive'):
+            self.step(bridge, 5, vr_world_points=points, vr_world_quaternions=orientations)
 
     def test_boot_waits_for_model_load_before_short_inference_deadline(self):
         bridge = self.bridge(ready=False)

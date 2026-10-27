@@ -58,6 +58,7 @@ class RecordedInput:
         if np.any(np.diff(self.times) <= 0):
             raise ValueError('Recorded device timestamps must strictly increase')
         self.times = (self.times-self.times[0])/1e9
+        self._last_index = self._last_received_s = None
 
     def at(self, elapsed):
         if not np.isfinite(elapsed) or elapsed < 0:
@@ -65,7 +66,13 @@ class RecordedInput:
         if elapsed > self.times[-1]:
             raise EOFError('Recorded input ended; refusing to repeat or extrapolate it')
         index = max(0, int(np.searchsorted(self.times, elapsed, side='right'))-1)
-        return replace(self.frames[index], host_received_s=float(time.monotonic()-(elapsed-self.times[index])))
+        # One recorded packet has one emulated receive time. Recomputing it
+        # on every paused planner poll can move it backwards by scheduling
+        # jitter and also falsely refresh a held packet.
+        if index != self._last_index:
+            self._last_received_s = float(time.monotonic()-(elapsed-self.times[index]))
+            self._last_index = index
+        return replace(self.frames[index], host_received_s=self._last_received_s)
 
 
 def root_pose(model, data):
@@ -145,7 +152,8 @@ EPISODE_SESSION_FIELDS = (
     'hand_control_profile','egl_backend_selection','actual_mujoco_gl_module',
     'review_mode','review_collection_enabled','cpu_runtime','preview_protocol',
     'capture_start_protocol','live_status_transport','collection_task_profile',
-    'mobile_control_protocol','mobile_planner_model_sha256','actual_task_source_sha256',
+    'mobile_control_protocol','mobile_control_policy','mobile_encoder_mode','mobile_vr_source',
+    'mobile_planner_model_sha256','actual_task_source_sha256',
     'actual_native_success_criteria','mobile_cold_start_profile')
 
 
@@ -900,6 +908,8 @@ def run(args):
     profile = getattr(args,'task','handover')
     task_id,_ = task_identity(profile)
     mobile = profile == 'mobile_pp'
+    mobile_policy = getattr(args,'mobile_control_policy','continuous_vr_mode1')
+    mobile_continuous = mobile and mobile_policy == 'continuous_vr_mode1'
     if mobile and (not args.environment_config or args.render_mode != 'mujoco_deferred'):
         raise ValueError('Mobile P&P requires its saved official scene and deferred capture')
     environment_state = environment_receipt = None
@@ -927,11 +937,14 @@ def run(args):
         live_status_transport='localhost HTTP; periodic disk status only while paused')
     write_json(output/'result.json', result)
     env = ui = receiver = video_bridge = render_profiler = preview_worker = mobile_control = None
-    mobile_mode = 'pose'
+    mobile_mode = 'continuous_paused' if mobile_continuous else 'pose'
     mobile_tick = 0
     mobile_preparation = None
     mobile_entry_smpl = None
     mobile_stopped = MobileStoppedWindow()
+    mobile_vr = None
+    mobile_follow_source_timestamp = None
+    mobile_preparation_wall = None
     preview_epoch = -1
     preview_frame_receipt = None
     capture_start_receipt = None
@@ -955,18 +968,26 @@ def run(args):
     operator_message = '请戴好头显、站直并校准，再开始下一条录制。'
     reference = PicoSonicReference(resources, args.human_info)
     if mobile:
-        from pico_mobile_control import MobilePlannerControl, CONTRACT as MOBILE_CONTROL_CONTRACT
+        from pico_mobile_control import (MobilePlannerControl, CONTRACT as MOBILE_CONTROL_CONTRACT,
+            CONTINUOUS_CONTRACT)
+        if mobile_continuous:
+            from pico_mobile_vr_reference import MobileVRReference
+            mobile_vr = MobileVRReference()
+            MOBILE_CONTROL_CONTRACT = CONTINUOUS_CONTRACT
         from sonic_locomotion_planner import MODEL_SHA256
         if not getattr(args,'planner_model',None):
             raise ValueError('Mobile P&P requires the explicit pinned planner model')
-        mobile_control = MobilePlannerControl(args.planner_model)
+        mobile_control = MobilePlannerControl(args.planner_model,reference_policy=mobile_policy)
         result.update(mobile_control_protocol=MOBILE_CONTROL_CONTRACT,
+            mobile_control_policy=mobile_policy,mobile_encoder_mode=1 if mobile_continuous else 'legacy_mode2_mode0',
+            mobile_vr_source=mobile_vr.identity if mobile_vr else None,
             mobile_planner_model_sha256=MODEL_SHA256)
         for name in ('pico_mobile_control.py','pico_locomotion_reference.py',
-                'sonic_locomotion_planner.py','pico_mobile_quality.py','start_pico_mobile_pp.sh'):
+                'sonic_locomotion_planner.py','pico_mobile_quality.py','pico_mobile_vr_reference.py',
+                'handover_sonic_teleop_reference.py','start_pico_mobile_pp.sh'):
             result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
     def operator_buttons(buttons, previous):
-        return collection_buttons(buttons,previous,mobile=mobile)
+        return collection_buttons(buttons,previous,mobile=mobile and not mobile_continuous)
     pairing = {'body_token_version':'body_token_v1_1','compatibility_verified':True,
         'decoder_sha256':'34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509',
         'evidence':{'scope':'Only new tokens generated here by fixed matching official encoder, not old dataset tokens',
@@ -1287,10 +1308,15 @@ def run(args):
         loop_timer = None
         last_loop_wall_timing = None
 
+        def mobile_actual_vr_bodies():
+            ids = [model.body(name).id for name in
+                ('left_wrist_yaw_link','right_wrist_yaw_link','torso_link')]
+            return np.asarray(data.xpos[ids]).copy(),np.asarray(data.xquat[ids]).copy()
+
         def invalidate_calibration():
             nonlocal following, command, calibration_fresh, reference_evidence
             nonlocal mobile_mode,mobile_tick,mobile_preparation,mobile_entry_smpl
-            nonlocal last_command_timestamp_ns
+            nonlocal last_command_timestamp_ns,mobile_follow_source_timestamp,mobile_preparation_wall
             following = False
             command = reference_evidence = None
             calibration_fresh = False
@@ -1298,7 +1324,10 @@ def run(args):
             reference.last_body = reference.last_timestamp_ns = None
             if mobile_control:
                 mobile_control.pause('collector_paused')
-            mobile_mode,mobile_tick = 'pose',0
+            mobile_mode,mobile_tick = ('continuous_paused' if mobile_continuous else 'pose'),0
+            mobile_follow_source_timestamp = mobile_preparation_wall = None
+            if mobile_vr:
+                mobile_vr.calibration = None
             mobile_preparation = None
             mobile_entry_smpl = None
             last_command_timestamp_ns = None
@@ -1435,6 +1464,10 @@ def run(args):
             if args.seconds and time.monotonic()-started_wall >= args.seconds:
                 break
             if replay:
+                if mobile_continuous and mobile_mode == 'preparing_continuous':
+                    now_preparation = time.monotonic()
+                    source_elapsed += now_preparation-mobile_preparation_wall
+                    mobile_preparation_wall = now_preparation
                 try:
                     frame = replay.at(source_elapsed)
                 except EOFError:
@@ -1472,7 +1505,7 @@ def run(args):
             for action in scene_bound_commands(commands,lambda:
                     reset_this_batch or reset_generation != reset_generation_at_loop_start):
                 if action == 'toggle_follow':
-                    action = 'pause' if following else 'follow'
+                    action = 'pause' if following or mobile_mode == 'preparing_continuous' else 'follow'
                 if action == 'toggle_record':
                     action = 'save' if episode else 'record'
                 command_notice = recording_command_guard(action,episode_active=episode is not None,
@@ -1489,8 +1522,16 @@ def run(args):
                         human_readiness = require_neutral_calibration(reference,frame.body24x7)
                         robot_readiness = require_standing_warmup(warmup_baseline,
                             physical_snapshot(model,data,BODY_JOINT_NAMES))
-                        reference.calibrate(frame.body24x7,root_pose(model,data),
-                            {name:float(data.joint(name).qpos[0]) for name in WRIST_NAMES})
+                        if mobile_continuous:
+                            positions,quaternions = mobile_actual_vr_bodies()
+                            reference.calibration = {'encoder_mode':1,'mobile_control_policy':mobile_policy,
+                                'mobile_vr':mobile_vr.calibrate(frame.body24x7,root_pose(model,data),
+                                    positions,quaternions)}
+                            reference.last_body = reference.last_timestamp_ns = None
+                            mobile_mode = 'continuous_paused'
+                        else:
+                            reference.calibrate(frame.body24x7,root_pose(model,data),
+                                {name:float(data.joint(name).qpos[0]) for name in WRIST_NAMES})
                         reference.calibration.update(human_readiness=human_readiness,
                             robot_readiness=robot_readiness)
                         following = False; error_text = None; calibration_fresh = True
@@ -1502,12 +1543,28 @@ def run(args):
                         require_neutral_calibration(reference,frame.body24x7)
                         require_standing_warmup(warmup_baseline,
                             physical_snapshot(model,data,BODY_JOINT_NAMES))
-                        following = True; wall_deadline = None; command = None
+                        wall_deadline = None; command = None
                         error_text = None
-                        operator_message='正在跟随；按录制键开始新示例。'
+                        if mobile_continuous:
+                            from pico_mobile_control import neutral_controls
+                            if not neutral_controls(frame):
+                                raise ValueError('开始跟随前请松开两个摇杆')
+                            mobile_control.boot(root_pose(model,data),
+                                physical_snapshot(model,data,BODY_JOINT_NAMES)['body_q29'])
+                            mobile_follow_source_timestamp = frame.device_timestamp_ns
+                            mobile_preparation_wall = time.monotonic()
+                            mobile_mode,mobile_tick = 'preparing_continuous',0
+                            following = False
+                            operator_message='正在准备连续控制，仿真暂停；请松开摇杆。双臂将持续跟随，无需B切换。'
+                        else:
+                            following = True
+                            operator_message='正在跟随；按录制键开始新示例。'
                     elif action == 'pause':
                         reject_and_pause('operator_pause')
                     elif action == 'toggle_navigation':
+                        if mobile_continuous:
+                            operator_message='连续控制无需B切换：双臂始终跟随，左杆前进、右杆转向。'
+                            continue
                         if not mobile or not following or not quality['valid']:
                             raise ValueError('移动模式需要有效追踪、标定并开始跟随')
                         if not mobile_stopped.ready or (episode and episode.status != 'recording'):
@@ -1622,6 +1679,22 @@ def run(args):
                     if replay:
                         raise
             loop_timer.enter('control')
+            if mobile_continuous and mobile_mode == 'preparing_continuous':
+                try:
+                    if not quality['valid']:
+                        raise ValueError('Tracking rejected: '+','.join(quality['reasons']))
+                    preparing = mobile_control.poll()
+                    from pico_mobile_control import neutral_controls
+                    if (preparing['ready'] and frame.device_timestamp_ns > mobile_follow_source_timestamp
+                            and neutral_controls(frame)):
+                        mobile_mode,mobile_tick = 'continuous',0
+                        mobile_preparation_wall = None
+                        following = True; wall_deadline = None; command = None
+                        operator_message='连续控制：双臂始终跟随；左杆前进、右杆转向，松杆停步，扳机抓握。无需按B。'
+                except Exception as preparation_error:
+                    reject_and_pause(str(preparation_error))
+                    if replay:
+                        raise
             if following and not quality['valid']:
                 reject_and_pause('Tracking rejected: '+','.join(quality['reasons']))
             if following:
@@ -1731,7 +1804,15 @@ def run(args):
                             mobile_value,mobile_evidence = mobile_preparation.encoder_reference(root_pose(model,data))
                             if preparing['ready']:
                                 operator_message='移动规划已就绪；请先松开两个摇杆，进入移动模式后再推杆。当前姿态保持、录制继续。'
-                    if mobile_mode == 'navigation':
+                    if mobile_continuous and mobile_mode == 'continuous':
+                        current_root = root_pose(model,data)
+                        vr_points,vr_quaternions,vr_evidence = mobile_vr.prepare(frame.body24x7,current_root)
+                        mobile_value,mobile_evidence = mobile_control.step(mobile_tick,
+                            current_root,actual_before['body_q29'],frame,tracking_valid=quality['valid'],
+                            vr_world_points=vr_points,vr_world_quaternions=vr_quaternions)
+                        mobile_evidence['live_vr'] = dict(vr_evidence,source_sequence=frame.sequence,
+                            source_device_timestamp_ns=frame.device_timestamp_ns)
+                    elif mobile_mode == 'navigation':
                         mobile_value,mobile_evidence = mobile_control.step(mobile_tick,
                             root_pose(model,data),actual_before['body_q29'],frame,
                             tracking_valid=quality['valid'])
@@ -1741,11 +1822,16 @@ def run(args):
                             from pico_sonic_reference import ENCODER_SHA256
                             reference_range_diagnostics = mobile_reference_diagnostics(mobile_value,
                                 BODY_JOINT_NAMES,[model.joint(name).range for name in BODY_JOINT_NAMES])
+                            if mobile_continuous:
+                                reference._validate_continuity(frame.body24x7,frame.device_timestamp_ns)
                             encoded = np.asarray(reference.session.run([reference.output_name],
                                 {reference.input_name:mobile_value})[0],dtype=np.float32)
                             if encoded.shape != (1,64) or not np.isfinite(encoded).all():
                                 raise ValueError('Invalid Mobile SONIC token')
                             token = encoded[0].copy()
+                            if mobile_continuous:
+                                reference.last_body = frame.body24x7.copy()
+                                reference.last_timestamp_ns = frame.device_timestamp_ns
                             evidence = dict(mobile_evidence,model_inference_performed=True,
                                 encoder_sha256=ENCODER_SHA256,token_shape=[64],
                                 reference_range_diagnostics=reference_range_diagnostics,
@@ -1805,7 +1891,7 @@ def run(args):
                         pending_mobile_quality_row['official_task_success'] = bool(terminated)
                         quality_stream.write(json_text(pending_mobile_quality_row)+'\n')
                         pending_mobile_quality_row = None
-                    if mobile_mode == 'navigation':
+                    if mobile_mode in ('navigation','continuous'):
                         mobile_tick += 1
                     step_seconds = time.perf_counter()-step_started
                     active_local = None
@@ -1906,6 +1992,7 @@ def run(args):
                     last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
                 'task_id':task_id,'collection_task_profile':profile,'mobile_mode':mobile_mode,
+                'mobile_control_policy':mobile_policy if mobile else None,
                 'mobile_planner':mobile_control.status() if mobile_control else None,
                 'mobile_stopped_for_mode_transition':mobile_stopped.ready if mobile else None,
                 'operator_message':operator_message,'last_episode':history_status,
@@ -1988,6 +2075,8 @@ def main():
     runtime=Path('/home/zxc/CVPR_Evaluation_runtime')
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--task',choices=('handover','mobile_pp'),default='handover')
+    parser.add_argument('--mobile-control-policy',choices=('continuous_vr_mode1','locked_upper_mode0'),
+        default='continuous_vr_mode1',help='Mobile default: live arms and joystick legs, no B switch')
     parser.add_argument('--planner-model',type=Path,help='Pinned official planner for Mobile P&P only')
     parser.add_argument('--mobile-cold-start',type=Path,help='Verified one-time initial BODY29 profile')
     parser.add_argument('--data-root',type=Path,default=runtime/'resources/simple_local_usd_v1')

@@ -250,6 +250,18 @@ await vm.runInContext('refresh()',context);
 element('#message').textContent='已提交，等待电脑执行：标定';
 await vm.runInContext('refresh()',context);
 assert.equal(element('#message').textContent,'已暂停：等待恢复追踪');
+// Continuous Mobile exposes one arm+locomotion mode and no B control.
+context.fetch=async()=>({ok:true,json:async()=>({status:{status:'following',collection_task_profile:'mobile_pp',mobile_control_policy:'continuous_vr_mode1',mobile_mode:'continuous'},image_available:false,image_version:0})});
+await vm.runInContext('refresh()',context);
+assert.equal(element('button[data-command="toggle_navigation"]').hidden,true);
+assert.ok(element('#instructions').textContent.includes('双臂持续跟随'));
+assert.ok(element('#mobile-status').textContent.includes('双臂实时跟随'));
+assert.ok(!element('#instructions').textContent.includes('3厘米'));
+context.fetch=async()=>({ok:true,json:async()=>({status:{status:'following',collection_task_profile:'mobile_pp',mobile_control_policy:'locked_upper_mode0',mobile_mode:'navigation'},image_available:false,image_version:0})});
+await vm.runInContext('refresh()',context);
+assert.equal(element('button[data-command="toggle_navigation"]').hidden,false);
+assert.ok(element('#mobile-status').textContent.includes('上身保持'));
+
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
         result = subprocess.run([node, "-e", runner], input=script, text=True,

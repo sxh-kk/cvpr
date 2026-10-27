@@ -257,6 +257,16 @@ assert.equal(element('button[data-command="toggle_navigation"]').hidden,true);
 assert.ok(element('#instructions').textContent.includes('双臂持续跟随'));
 assert.ok(element('#mobile-status').textContent.includes('双臂实时跟随'));
 assert.ok(!element('#instructions').textContent.includes('3厘米'));
+// Classifications come from the reviewed policy; technical blockage takes
+// precedence over the preserved old directory disposition.
+for(const [episode,expected] of [
+ [{uuid:'native',number:4,disposition:'kept',selection_policy:'native_only'},'004 · 官方任务成功，已保留'],
+ [{uuid:'legacy',number:5,disposition:'kept'},'005 · 物理验收通过，已保留'],
+ [{uuid:'blocked',number:6,disposition:'kept',selection_status:'technical_evidence_incomplete'},'006 · 技术异常，原件保留'],
+ [{uuid:'blocked',number:7,disposition:'discarded',status:'technical_blocked'},'007 · 技术异常，原件保留'],
+ [{uuid:'failed',number:8,disposition:'discarded',selection_status:'official_task_not_successful'},'008 · 未达到官方任务成功条件']]){
+ context.episode=episode;assert.equal(vm.runInContext('episodeText(episode)',context),expected);
+}
 context.fetch=async()=>({ok:true,json:async()=>({status:{status:'following',collection_task_profile:'mobile_pp',mobile_control_policy:'locked_upper_mode0',mobile_mode:'navigation'},image_available:false,image_version:0})});
 await vm.runInContext('refresh()',context);
 assert.equal(element('button[data-command="toggle_navigation"]').hidden,false);

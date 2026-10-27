@@ -1,4 +1,4 @@
-"""CPU-only task isolation, real-carry and unchanged placement regressions."""
+"""CPU-only native Mobile task selection and task dispatch regressions."""
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from handover_contact_quality import SOLVED_STATE_STAGE, evaluate_capture
+from handover_contact_quality import SOLVED_STATE_STAGE
 from pico_mobile_quality import GATE_VERSION, MOBILE_TASK_ID, evaluate_mobile_capture
 from pico_episode_history import _physical_precheck
 from test_audit_pico_teleop_episode import make_episode
@@ -34,100 +34,134 @@ class MobileQualityTests(unittest.TestCase):
     def check(self, rows):
         return evaluate_mobile_capture(rows, initial_target_z_m=.55)
 
-    def test_single_hand_truth_passes_without_handover_sequence_or_native_success(self):
-        rows = mobile_rows(); before = deepcopy(rows)
+    def native_rows(self, flags=(False, True, False)):
+        return [{"completed_steps": index + 1, "sim_time_s": (index + 1) / 50,
+                 "solver_stage": SOLVED_STATE_STAGE, "official_task_success": flag}
+                for index, flag in enumerate(flags)]
+
+    def assert_technical_failure(self, report, error_text):
+        self.assertFalse(report["eligible_physics"], report)
+        self.assertFalse(report["verified_mobile_pick_place_success"])
+        self.assertFalse(report["native_success_evidence_complete"])
+        self.assertIsNone(report["official_task_success"])
+        self.assertEqual(report["selection_status"], "technical_evidence_incomplete")
+        self.assertTrue(any(error_text in error for error in report["capture_validation_errors"]), report)
+
+    def test_native_true_passes_without_lift_transport_contacts_or_geometry(self):
+        rows = self.native_rows(); before = deepcopy(rows)
         report = self.check(rows)
         self.assertTrue(report["eligible_physics"], report)
+        self.assertTrue(report["verified_mobile_pick_place_success"])
+        self.assertEqual(report["acceptance_gate_version"], "mobile-native-task-success-v2")
         self.assertEqual(report["acceptance_gate_version"], GATE_VERSION)
-        self.assertEqual(report["final_placement_geometric_validation"]["gate_version"], "placement-necessary-geometry-v2")
-        self.assertFalse(report["official_task_success_observed"])
-        self.assertFalse(report["native_success_used_as_physical_gate"])
+        self.assertEqual(report["task_id"], MOBILE_TASK_ID)
+        self.assertEqual(report["selection_policy"], "native_only")
+        self.assertEqual(report["selection_status"], "selected")
+        self.assertTrue(report["official_task_success"])
+        self.assertTrue(report["official_task_success_observed"])
+        self.assertTrue(report["native_success_evidence_complete"])
+        self.assertTrue(report["native_success_used_as_physical_gate"])
+        self.assertFalse(report["official_task_flag_modified"])
         self.assertFalse(report["dataset_ready"])
+        self.assertEqual(report["capture_validation_errors"], [])
+        self.assertEqual(report["official_task_success_measured_frames"], len(rows))
+        self.assertEqual(report["official_task_success_expected_frames"], len(rows))
         self.assertNotIn("verified_handover_success", report)
-        self.assertFalse(report["contact_evidence"]["handover_contact_order_required"])
-        self.assertFalse(evaluate_capture(rows, initial_target_z_m=.55)["eligible_physics"])
+        self.assertNotIn("contact_evidence", report)
+        self.assertNotIn("final_placement_geometric_validation", report)
         self.assertEqual(rows, before)
 
-    def test_right_single_hand_both_hands_and_hand_switch_are_all_legal(self):
-        for mode in ("right", "both", "switch"):
+    def test_any_original_native_true_is_selected_even_if_final_flag_false(self):
+        for success_index in (0, 51, 154):
             rows = mobile_rows()
-            for index, row in enumerate(rows):
-                if row["contacts"]["left_hand"]:
-                    row["contacts"].update(left_hand=mode == "both" or mode == "switch" and index < 50,
-                                           right_hand=mode != "switch" or index >= 50)
-            self.assertTrue(self.check(rows)["eligible_physics"], mode)
+            rows[success_index]["official_task_success"] = True
+            report = self.check(rows)
+            self.assertTrue(report["eligible_physics"], success_index)
+            self.assertEqual(report["official_task_success_measured_frames"], 155)
+            self.assertEqual(report["capture_validation_errors"], [])
 
-    def test_native_true_does_not_override_failed_physics_and_is_saved_separately(self):
-        rows = mobile_rows()
+    def test_all_native_false_fails_even_when_old_additional_physics_gates_pass(self):
+        rows = mobile_rows(); before = deepcopy(rows)
+        report = self.check(rows)
+        self.assertFalse(report["eligible_physics"])
+        self.assertFalse(report["verified_mobile_pick_place_success"])
+        self.assertFalse(report["official_task_success"])
+        self.assertFalse(report["official_task_success_observed"])
+        self.assertTrue(report["native_success_evidence_complete"])
+        self.assertEqual(report["selection_status"], "official_task_not_successful")
+        self.assertEqual(report["capture_validation_errors"], [])
+        self.assertEqual(rows, before)
+
+    def test_extra_physics_fields_do_not_override_native_true(self):
+        rows = self.native_rows()
         for row in rows:
-            row["actual_root_xyz_m"][0] = 0.
-            row["official_task_success"] = True
+            row.update(actual_root_xyz_m=None, actual_target_xyz_m=[0., 0., 0.],
+                       pelvis_z_m=0., contacts={"left_hand": True}, container_geometry=None)
+        self.assertTrue(self.check(rows)["eligible_physics"])
+
+    def test_initial_height_is_only_a_compatibility_argument(self):
+        rows = self.native_rows()
+        for initial in (None, float("nan"), "unused", -100):
+            report = evaluate_mobile_capture(rows, initial_target_z_m=initial)
+            self.assertTrue(report["eligible_physics"], initial)
+        self.assertTrue(evaluate_mobile_capture(rows)["eligible_physics"])
+
+    def test_missing_native_boolean_is_technical_even_with_other_native_true(self):
+        rows = self.native_rows()
+        rows[0].pop("official_task_success")
         report = self.check(rows)
+        self.assert_technical_failure(report, "official_task_success")
         self.assertTrue(report["official_task_success_observed"])
-        self.assertEqual(report["official_task_success_measured_frames"], len(rows))
-        self.assertFalse(report["eligible_physics"])
+        self.assertEqual(report["official_task_success_measured_frames"], 2)
+        self.assertEqual(report["official_task_success_expected_frames"], 3)
 
-    def test_target_and_root_each_must_move_in_same_lifted_held_interval(self):
-        for mode in ("target", "root", "split", "short", "airborne_no_hands"):
-            rows = mobile_rows()
-            for index, row in enumerate(rows):
-                if mode == "target": row["actual_target_xyz_m"][0] = 0.
-                if mode == "root": row["actual_root_xyz_m"][0] = 0.
-                if mode == "split" and index < 105: row["actual_root_xyz_m"][0] = 0.
-                if mode == "short":
-                    row["actual_target_xyz_m"][0] *= .749 / .8
-                    row["actual_root_xyz_m"][0] *= .749 / .8
-                if mode == "airborne_no_hands": row["contacts"]["left_hand"] = False
-            self.assertFalse(self.check(rows)["eligible_physics"], mode)
-
-    def test_touching_or_shuffling_on_table_does_not_establish_lift(self):
-        rows = mobile_rows()
-        for row in rows: row["actual_target_xyz_m"][2] = .55
-        self.assertFalse(self.check(rows)["eligible_physics"])
-
-    def test_returning_target_to_pickup_point_is_not_transport(self):
-        rows = mobile_rows()
-        for row in rows[-50:]: row["actual_target_xyz_m"][0] = 0.
+    def test_invalid_native_values_are_not_coerced_to_success_or_task_failure(self):
+        for value in (None, 0, 1, "true", "false", float("nan"), [], {}):
+            with self.subTest(value=value):
+                rows = self.native_rows((False, False, False))
+                rows[1]["official_task_success"] = value
+                self.assert_technical_failure(self.check(rows), "official_task_success")
+        rows = self.native_rows((None,))
         report = self.check(rows)
-        self.assertTrue(report["contact_evidence"]["checks"]["target_and_root_carried_075m"])
-        self.assertFalse(report["eligible_physics"])
+        self.assert_technical_failure(report, "official_task_success")
+        self.assertIsNone(report["official_task_success_observed"])
 
-    def test_final_release_and_pairwise_stability_cannot_be_hidden_by_endpoint(self):
-        for mode in ("left", "right", "motion"):
-            rows = mobile_rows()
-            if mode == "motion": rows[-20]["actual_target_xyz_m"][1] = .006
-            else: rows[-1]["contacts"][mode + "_hand"] = True
-            self.assertFalse(self.check(rows)["eligible_physics"], mode)
+    def test_nonfinite_and_invalid_clocks_are_technical_failures(self):
+        for value in (float("nan"), float("inf"), float("-inf"), True, None, ".04"):
+            with self.subTest(value=value):
+                rows = self.native_rows()
+                rows[1]["sim_time_s"] = value
+                self.assert_technical_failure(self.check(rows), "sim_time_s")
 
-    def test_contact_and_solved_support_allow_exactly_one_missing_final_frame(self):
-        for field in ("contact", "support"):
-            rows = mobile_rows()
-            def drop(row):
-                if field == "contact": row["contacts"]["container"] = False
-                else: row["container_geometry"]["container_support_weight_fraction"] = .49
-            drop(rows[-1])
-            self.assertTrue(self.check(rows)["eligible_physics"], field)
-            drop(rows[-2])
-            self.assertFalse(self.check(rows)["eligible_physics"], field)
+    def test_clock_must_cover_every_original_50hz_step(self):
+        for clock in (.02, .041, .08):
+            rows = self.native_rows()
+            rows[1]["sim_time_s"] = clock
+            self.assert_technical_failure(self.check(rows), "real50Hz")
 
-    def test_geometry_upright_inside_overlap_and_original_support_are_required(self):
-        for key, value in (("container_upright_cosine", .8), ("inside_container_footprint", False),
-                           ("collision_vertical_ranges_overlap", False), ("support_measurement", "pose_reconstruction")):
-            rows = mobile_rows()
-            for row in rows[-50:]: row["container_geometry"][key] = value
-            self.assertFalse(self.check(rows)["eligible_physics"], key)
+    def test_steps_must_be_original_dense_integers_starting_at_one(self):
+        for value in (None, True, 2., 1, 3, 900):
+            with self.subTest(value=value):
+                rows = self.native_rows()
+                rows[1]["completed_steps"] = value
+                self.assert_technical_failure(self.check(rows), "completed_steps")
+        rows = self.native_rows()
+        for row in rows:
+            row["completed_steps"] += 50
+        self.assert_technical_failure(self.check(rows), "completed_steps")
 
-    def test_missing_invalid_root_and_other_evidence_fail_closed(self):
-        for key, value in (("actual_root_xyz_m", None), ("actual_root_xyz_m", [0., float("nan"), .7]),
-                           ("actual_root_xyz_m", [0., 0.]), ("actual_root_xyz_m", [False, 0., .7]),
-                           ("solver_stage", "post_forward"), ("completed_steps", 900), ("sim_time_s", 9.),
-                           ("container_geometry", None), ("pelvis_z_m", .39)):
-            rows = mobile_rows(); rows[-1][key] = value
-            self.assertFalse(self.check(rows)["eligible_physics"], (key, value))
-        rows = mobile_rows(); rows[-1]["contacts"].pop("right_hand")
-        self.assertFalse(self.check(rows)["eligible_physics"])
-        self.assertFalse(self.check([])["eligible_physics"])
-        self.assertFalse(self.check([None])["eligible_physics"])
+    def test_unsolved_or_missing_acquisition_stage_is_technical(self):
+        rows = self.native_rows()
+        rows[1]["solver_stage"] = "post_forward"
+        self.assert_technical_failure(self.check(rows), "solved")
+        rows[1].pop("solver_stage")
+        self.assert_technical_failure(self.check(rows), "solved")
+
+    def test_empty_and_nonmapping_samples_are_technical(self):
+        self.assert_technical_failure(self.check([]), "no measured samples")
+        self.assert_technical_failure(self.check([None]), "not a mapping")
+        rows = self.native_rows(); rows[0] = None
+        self.assert_technical_failure(self.check(rows), "not a mapping")
 
 
 class MobileHistoryDispatchTests(unittest.TestCase):
@@ -139,32 +173,44 @@ class MobileHistoryDispatchTests(unittest.TestCase):
     def load(self, filename):
         return json.loads((self.directory / filename).read_text())
 
-    def install_mobile(self):
-        path = self.directory / "quality_samples.jsonl"
-        rows = [json.loads(line) for line in path.read_text().splitlines()]
+    def write_rows(self, filename, rows):
+        (self.directory / filename).write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def install_mobile(self, *, successful=True):
+        rows = [json.loads(line) for line in (self.directory / "quality_samples.jsonl").read_text().splitlines()]
         for index, row in enumerate(rows):
-            phase = index - 50
-            x = 0. if phase < 0 else min(.8, phase * .8 / 49)
-            row["actual_root_xyz_m"] = [x, 0., .75]
-            row["actual_target_xyz_m"] = [x, 0., .55 if phase < 0 else .7 if phase < 50 else .61]
-            row["contacts"] = {"left_hand": 0 <= phase < 50, "right_hand": False, "container": phase >= 50}
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-        metadata = self.load("metadata.json"); metadata["task_id"] = MOBILE_TASK_ID
+            row["official_task_success"] = successful and index == 10
+        self.write_rows("quality_samples.jsonl", rows)
+        metadata = self.load("metadata.json")
+        metadata.update(task_id=MOBILE_TASK_ID,
+            actual_task_source_sha256="fee537d56e134b0399ff147013438168601498ab9b3ee068658dcad5fb8ca521",
+            actual_native_success_criteria=.9)
+        (self.directory / "metadata.json").write_text(json.dumps(metadata) + "\n")
         return metadata, self.load("episode.json"), rows
 
-    def test_mobile_dispatch_excludes_real_warmup_and_retains_force_integrity(self):
-        metadata, outcome, _ = self.install_mobile()
+    def assert_technical(self, report):
+        self.assertFalse(report["eligible_physics"], report)
+        self.assertTrue(report["technical_blocked"])
+        self.assertTrue(report["technical_errors"])
+        self.assertEqual(report["selection_status"], "technical_evidence_incomplete")
+        self.assertIsNone(report["official_task_success"])
+
+    def test_mobile_dispatch_uses_all_original_native_steps_and_retains_force_integrity(self):
+        metadata, outcome, rows = self.install_mobile()
         with patch("handover_contact_quality.evaluate_capture", side_effect=AssertionError("must not use handover")):
             reasons, report = _physical_precheck(self.directory, outcome, metadata)
         self.assertEqual(reasons, [], report)
         self.assertTrue(report["eligible_physics"])
-        self.assertEqual(report["excluded_unsupervised_warmup_ticks50"], 50)
-        path = self.directory / "applied_force_samples.jsonl"
-        forces = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(report["excluded_unsupervised_warmup_ticks50"], 0)
+        self.assertEqual(report["official_task_success_measured_frames"], len(rows))
+        self.assertEqual(report["selection_policy"], "native_only")
+        self.assertFalse(report["technical_blocked"])
+        forces = [json.loads(line) for line in (self.directory / "applied_force_samples.jsonl").read_text().splitlines()]
         forces[1]["all_zero"] = False
-        path.write_text("".join(json.dumps(row) + "\n" for row in forces))
-        reasons, _ = _physical_precheck(self.directory, outcome, metadata)
+        self.write_rows("applied_force_samples.jsonl", forces)
+        reasons, report = _physical_precheck(self.directory, outcome, metadata)
         self.assertTrue(any("200Hz外力" in reason for reason in reasons), reasons)
+        self.assert_technical(report)
 
     def test_unknown_or_missing_task_never_defaults_to_handover(self):
         metadata = self.load("metadata.json"); outcome = self.load("episode.json")
@@ -181,32 +227,90 @@ class MobileHistoryDispatchTests(unittest.TestCase):
         self.assertTrue(report["verified_handover_success"])
         self.assertEqual(report["acceptance_gate_version"], "handover-physics-v2")
 
-    def test_mobile_failed_gate_has_chinese_transport_reason(self):
-        metadata, outcome, rows = self.install_mobile()
-        for row in rows: row["actual_root_xyz_m"][0] = 0.
-        (self.directory / "quality_samples.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    def test_complete_all_false_is_task_failure_without_additional_success_reasons(self):
+        metadata, outcome, _ = self.install_mobile(successful=False)
         reasons, report = _physical_precheck(self.directory, outcome, metadata)
         self.assertFalse(report["eligible_physics"])
-        self.assertTrue(any("0.75米" in reason for reason in reasons), reasons)
-        self.assertFalse(any("右手→双手→左手" in reason for reason in reasons))
+        self.assertFalse(report["official_task_success"])
+        self.assertFalse(report["technical_blocked"])
+        self.assertEqual(report["selection_status"], "official_task_not_successful")
+        self.assertEqual(reasons, ["官方任务成功标志未出现"])
+        self.assertFalse(any("0.75米" in reason or "右手→双手→左手" in reason for reason in reasons))
 
-    def test_missing_mobile_root_reports_a_specific_chinese_evidence_error(self):
+    def test_extra_root_contact_geometry_lift_and_initial_height_are_not_required(self):
         metadata, outcome, rows = self.install_mobile()
-        rows[60].pop("actual_root_xyz_m")
-        (self.directory / "quality_samples.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        metadata.pop("initial_target_z_m")
+        rows = [{key: row[key] for key in
+                 ("completed_steps", "sim_time_s", "solver_stage", "official_task_success")} for row in rows]
+        self.write_rows("quality_samples.jsonl", rows)
         reasons, report = _physical_precheck(self.directory, outcome, metadata)
-        self.assertFalse(report["eligible_physics"])
-        self.assertIn("缺少或无效的实际机器人根部三维位置证据", reasons)
+        self.assertEqual(reasons, [], report)
+        self.assertTrue(report["eligible_physics"])
 
-    def test_warmup_grab_and_capture_sha_tamper_remain_rejected(self):
+    def test_raw_native_evidence_takes_priority_over_completed_geometry_quality(self):
+        metadata, outcome, rows = self.install_mobile(successful=False)
+        raw = deepcopy(rows); raw[10]["official_task_success"] = True
+        self.write_rows("raw_quality_samples.jsonl", raw)
+        reasons, report = _physical_precheck(self.directory, outcome, metadata)
+        self.assertEqual(reasons, [], report)
+        self.assertTrue(report["eligible_physics"])
+        self.assertEqual(report["native_flag_source_file"], "raw_quality_samples.jsonl")
+        raw[0].pop("official_task_success")
+        self.write_rows("raw_quality_samples.jsonl", raw)
+        rows[-1]["official_task_success"] = True
+        self.write_rows("quality_samples.jsonl", rows)
+        reasons, report = _physical_precheck(self.directory, outcome, metadata)
+        self.assert_technical(report)
+        self.assertTrue(any("official_task_success" in reason for reason in reasons), reasons)
+
+    def test_missing_or_nonboolean_native_is_technical_even_with_other_true(self):
+        for value in (None, 1, "true"):
+            metadata, outcome, rows = self.install_mobile()
+            rows[0]["official_task_success"] = value
+            self.write_rows("quality_samples.jsonl", rows)
+            reasons, report = _physical_precheck(self.directory, outcome, metadata)
+            self.assert_technical(report)
+            self.assertTrue(any("official_task_success" in reason for reason in reasons), reasons)
+            self.assertNotIn("官方任务成功标志未出现", reasons)
+
+    def test_initial_warmup_contact_or_motion_is_not_an_extra_mobile_success_gate(self):
         metadata, outcome, rows = self.install_mobile()
         rows[10]["contacts"]["left_hand"] = True
-        (self.directory / "quality_samples.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
-        reasons, _ = _physical_precheck(self.directory, outcome, metadata)
-        self.assertTrue(any("起始无监督历史" in reason for reason in reasons), reasons)
+        rows[10]["actual_target_xyz_m"] = [10., 10., 10.]
+        self.write_rows("quality_samples.jsonl", rows)
+        reasons, report = _physical_precheck(self.directory, outcome, metadata)
+        self.assertEqual(reasons, [], report)
+        self.assertTrue(report["eligible_physics"])
+
+    def test_capture_sha_tamper_remains_a_technical_failure(self):
+        metadata, outcome, _ = self.install_mobile()
         with (self.directory / "capture/events.jsonl").open("a") as stream: stream.write("\n")
-        reasons, _ = _physical_precheck(self.directory, outcome, metadata)
+        reasons, report = _physical_precheck(self.directory, outcome, metadata)
         self.assertTrue(any("SHA" in reason for reason in reasons), reasons)
+        self.assert_technical(report)
+
+    def test_native_clock_nan_is_technical_not_official_task_failure(self):
+        metadata, outcome, rows = self.install_mobile()
+        rows[2]["sim_time_s"] = float("nan")
+        self.write_rows("quality_samples.jsonl", rows)
+        reasons, report = _physical_precheck(self.directory, outcome, metadata)
+        self.assert_technical(report)
+        self.assertNotIn("官方任务成功标志未出现", reasons)
+
+    def test_missing_or_wrong_official_task_binding_is_technical(self):
+        for key, value in (("actual_task_source_sha256", None), ("actual_task_source_sha256", "0" * 64),
+                           ("actual_native_success_criteria", None), ("actual_native_success_criteria", .8),
+                           ("actual_native_success_criteria", True)):
+            with self.subTest(key=key, value=value):
+                metadata, outcome, _ = self.install_mobile()
+                if value is None:
+                    metadata.pop(key)
+                else:
+                    metadata[key] = value
+                reasons, report = _physical_precheck(self.directory, outcome, metadata)
+                self.assert_technical(report)
+                self.assertFalse(report["task_identity_validation"]["passed"])
+                self.assertNotIn("官方任务成功标志未出现", reasons)
 
 
 if __name__ == "__main__":

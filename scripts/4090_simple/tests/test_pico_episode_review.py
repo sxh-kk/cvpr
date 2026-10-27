@@ -1,4 +1,5 @@
 """Isolated CPU fixtures exercise the queue; never touch real recordings."""
+import fcntl
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -433,6 +435,330 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertEqual(status["worker"]["threads_per_library"], 1)
         self.assertTrue(status["worker"]["cpu_only"])
         self.assertFalse(status["worker"]["ready"])
+
+
+    def _queue_file_bytes(self):
+        return {str(path.relative_to(self.queue.spool)): path.read_bytes()
+                for path in self.queue.spool.rglob("*") if path.is_file()}
+
+    def _new_selection_view(self, identity):
+        index = review._read(self.index)
+        index["entries"][identity].update(selection_policy="native_only", selection_status="selected",
+            official_task_success_observed=True, acceptance_gate_version="mobile-native-task-success-v2")
+        write(self.index, index)
+
+    def _owned_worker_command(self, *, index=None):
+        return b"\0".join(os.fsencode(value) for value in (sys.executable,
+            str(Path(review.__file__).resolve()), "--worker", "--index", str(index or self.index),
+            "--spool", str(self.queue.spool))) + b"\0"
+
+    def test_rotate_only_at_job_boundary_holds_both_locks_and_keeps_pending_job(self):
+        directory = self.episode()
+        self.queue.submit(directory)
+        control = self.queue._load()
+        control["worker"] = {"pid": 123456, "ready": True, "cpu_only": True}
+        self.queue._publish(control)
+        job_path = self.queue.spool / "jobs" / (directory.name + ".json")
+        original_job, original_seal = job_path.read_bytes(), (directory / "episode.json").read_bytes()
+        def terminate(pid):
+            self.assertEqual(pid, 123456)
+            for path in (self.queue.spool / "queue.lock", EpisodeHistory(self.index).lock_path):
+                with path.open("a+b") as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        def start():
+            for path in (self.queue.spool / "queue.lock", EpisodeHistory(self.index).lock_path):
+                with path.open("a+b") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+            return self.queue
+        self.queue._process = object()
+        with patch.object(self.queue, "_terminate_owned_worker", side_effect=terminate) as kill, \
+                patch.object(self.queue, "start", side_effect=start) as restart:
+            result = self.queue.rotate_worker_at_boundary()
+        self.assertTrue(result["rotated"])
+        self.assertFalse(result["collector_modified"])
+        self.assertEqual(result["previous_worker"]["pid"], 123456)
+        kill.assert_called_once_with(123456); restart.assert_called_once_with()
+        self.assertIsNone(self.queue._process)
+        self.assertEqual(job_path.read_bytes(), original_job)
+        self.assertEqual((directory / "episode.json").read_bytes(), original_seal)
+        self.assertEqual(self.queue.snapshot()["latest_finished_uuid"], directory.name)
+        self.assertEqual(self.queue.snapshot()["pending_count"], 1)
+        self.assertFalse(self.queue.snapshot()["worker"]["ready"])
+        self.assertTrue(self.queue.snapshot()["worker"]["reload_requested"])
+
+    def test_rotate_with_running_job_never_signals_or_mutates(self):
+        directory = self.episode(); self.queue.submit(directory)
+        job_path = self.queue.spool / "jobs" / (directory.name + ".json")
+        job = review._read(job_path); job["status"] = "running"; write(job_path, job)
+        before = self._queue_file_bytes()
+        with patch.object(self.queue, "_terminate_owned_worker") as kill, \
+                patch.object(self.queue, "start") as restart, \
+                patch.object(EpisodeHistory, "_locked", side_effect=AssertionError("must not enter History")):
+            result = self.queue.rotate_worker_at_boundary()
+        self.assertEqual(result, {"rotated": False, "reason": "active_review_job"})
+        kill.assert_not_called(); restart.assert_not_called()
+        self.assertEqual(self._queue_file_bytes(), before)
+
+    def test_rotate_recovery_and_startup_barriers_never_signal(self):
+        directory = self.episode(); self.queue.submit(directory)
+        for name in ("recovery_required.json", "startup_scan_required.json"):
+            with self.subTest(name=name):
+                barrier = self.queue.spool / name
+                write(barrier, {"fixture": True})
+                before = self._queue_file_bytes()
+                with patch.object(self.queue, "_terminate_owned_worker") as kill, \
+                        patch.object(self.queue, "start") as restart:
+                    result = self.queue.rotate_worker_at_boundary()
+                self.assertEqual(result, {"rotated": False, "reason": "queue_recovery_pending"})
+                kill.assert_not_called(); restart.assert_not_called()
+                self.assertEqual(self._queue_file_bytes(), before)
+                barrier.unlink()
+
+    def test_rotate_can_retire_without_starting_a_worker(self):
+        with (self.queue.spool / "worker.lock").open("a+b") as old_worker:
+            fcntl.flock(old_worker, fcntl.LOCK_EX)
+            with patch.object(self.queue, "_terminate_owned_worker") as kill, \
+                    patch.object(self.queue, "start") as restart, \
+                    patch.object(review.time, "monotonic", side_effect=AssertionError("must not wait")):
+                result = self.queue.rotate_worker_at_boundary(start_new=False)
+        self.assertTrue(result["rotated"])
+        kill.assert_not_called(); restart.assert_not_called()
+
+    def test_rotate_waits_for_old_singleton_outside_data_locks_before_start(self):
+        with (self.queue.spool / "worker.lock").open("a+b") as old_worker:
+            fcntl.flock(old_worker, fcntl.LOCK_EX)
+            def release_old_lock(_seconds):
+                restart.assert_not_called()
+                for path in (self.queue.spool / "queue.lock", EpisodeHistory(self.index).lock_path):
+                    with path.open("a+b") as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                fcntl.flock(old_worker, fcntl.LOCK_UN)
+            with patch.object(self.queue, "_terminate_owned_worker") as kill, \
+                    patch.object(self.queue, "start") as restart, \
+                    patch.object(review.time, "sleep", side_effect=release_old_lock) as wait:
+                result = self.queue.rotate_worker_at_boundary()
+        self.assertTrue(result["rotated"])
+        kill.assert_not_called(); restart.assert_called_once_with()
+        wait.assert_called_once_with(.02)
+
+    def test_rotate_singleton_release_timeout_does_not_start_replacement(self):
+        with (self.queue.spool / "worker.lock").open("a+b") as old_worker:
+            fcntl.flock(old_worker, fcntl.LOCK_EX)
+            with patch.object(self.queue, "_terminate_owned_worker") as kill, \
+                    patch.object(self.queue, "start") as restart, \
+                    patch.object(review.time, "monotonic", side_effect=(0., 3.)), \
+                    patch.object(review.time, "sleep") as wait:
+                with self.assertRaisesRegex(TimeoutError, "replacement not started"):
+                    self.queue.rotate_worker_at_boundary()
+        kill.assert_not_called(); restart.assert_not_called(); wait.assert_not_called()
+
+    def test_signal_helper_binds_pidfd_and_checks_owned_exact_command_arguments(self):
+        pid, descriptor = 123456, 987654
+        with patch.object(review.os, "pidfd_open", return_value=descriptor, create=True) as opened, \
+                patch.object(review.signal, "pidfd_send_signal", create=True) as signal_worker, \
+                patch.object(review.os, "kill") as kill, patch.object(review.os, "close") as close, \
+                patch.object(Path, "read_bytes", return_value=self._owned_worker_command()) as read:
+            self.assertTrue(self.queue._terminate_owned_worker(pid))
+        opened.assert_called_once_with(pid)
+        signal_worker.assert_called_once_with(descriptor, review.signal.SIGTERM)
+        kill.assert_not_called(); close.assert_called_once_with(descriptor)
+        read.assert_called_once_with()
+
+    def test_signal_helper_refuses_other_queue_or_collector_without_signaling(self):
+        commands = (self._owned_worker_command(index=self.root / "other.json"),
+                    self._owned_worker_command().replace(b"--worker", b"--collector"),
+                    self._owned_worker_command().replace(os.fsencode(Path(review.__file__).resolve()), b"collector.py"))
+        for command in commands:
+            with self.subTest(command=command), \
+                    patch.object(review.os, "pidfd_open", return_value=987654, create=True), \
+                    patch.object(review.signal, "pidfd_send_signal", create=True) as signal_worker, \
+                    patch.object(review.os, "kill") as kill, patch.object(review.os, "close") as close, \
+                    patch.object(Path, "read_bytes", return_value=command):
+                with self.assertRaises(ValueError): self.queue._terminate_owned_worker(123456)
+                signal_worker.assert_not_called(); kill.assert_not_called()
+                close.assert_called_once_with(987654)
+        for pid in (None, True, 0, 1, -1, "123456"):
+            with self.subTest(pid=pid), patch.object(review.os, "pidfd_open", create=True) as opened:
+                with self.assertRaises(ValueError): self.queue._terminate_owned_worker(pid)
+                opened.assert_not_called()
+
+    def test_signal_helper_missing_worker_is_safe_without_fallback_signal(self):
+        with patch.object(review.os, "pidfd_open", side_effect=ProcessLookupError, create=True), \
+                patch.object(review.signal, "pidfd_send_signal", create=True) as signal_worker, \
+                patch.object(review.os, "kill") as kill:
+            self.assertFalse(self.queue._terminate_owned_worker(123456))
+        signal_worker.assert_not_called(); kill.assert_not_called()
+
+    def test_refresh_updates_same_uuid_from_history_and_preserves_new_pending_latest(self):
+        first = self.episode("a"); self.queue.submit(first); self.process()
+        second = self.episode("b"); self.queue.submit(second)
+        self._new_selection_view(first.name)
+        index_before, original_files, status_before = self.index.read_bytes(), self._queue_file_bytes(), self.queue.snapshot()
+        seals = {name: (first / name).read_bytes() for name in
+                 ("episode.json", "metadata.json", "collection_record.json", "quality_geometry_completion.json")}
+        revision = str(uuid.uuid4())
+        result = self.queue.refresh_reselection_results([first.name], revision)
+        self.assertTrue(result["refreshed"])
+        self.assertFalse(result["accepted_new_dataset"])
+        self.assertEqual(result["revision_id"], revision)
+        self.assertEqual(result["updated_results"], 1)
+        after = self.queue.snapshot()
+        self.assertEqual(after["latest_finished_uuid"], second.name)
+        self.assertEqual(after["latest_episode"], status_before["latest_episode"])
+        self.assertEqual(after["pending_uuids"], status_before["pending_uuids"])
+        self.assertEqual(after["latest_completed"]["uuid"], first.name)
+        self.assertEqual(after["latest_completed"]["number"], 1)
+        self.assertEqual(after["latest_completed"]["sequence"], 1)
+        self.assertEqual(after["latest_completed"]["selection_policy"], "native_only")
+        self.assertEqual(after["latest_completed"]["selection_status"], "selected")
+        self.assertTrue(after["latest_completed"]["official_task_success_observed"])
+        self.assertEqual(after["latest_completed"]["acceptance_gate_version"], "mobile-native-task-success-v2")
+        self.assertEqual(self.queue._load()["next_sequence"], 3)
+        self.assertEqual(self.index.read_bytes(), index_before)
+        for name, before in seals.items(): self.assertEqual((first / name).read_bytes(), before)
+        self.assertEqual((self.queue.spool / "jobs" / (second.name + ".json")).read_bytes(),
+                         original_files["jobs/" + second.name + ".json"])
+        archive = self.queue.spool / "reselections" / revision
+        for name in ("queue.json", "status.json", "jobs/" + first.name + ".json"):
+            self.assertEqual((archive / name).read_bytes(), original_files[name])
+        self.assertFalse((archive / "jobs" / (second.name + ".json")).exists())
+        self.assertEqual(review._read(archive / "refresh_complete.json"), result)
+        job = review._read(self.queue.spool / "jobs" / (first.name + ".json"))
+        self.assertEqual(job["reselection_revision"], revision)
+        self.assertEqual(job["result"], after["latest_completed"])
+
+    def test_refresh_latest_completed_updates_all_caches_and_is_idempotent(self):
+        directory = self.episode(); self.queue.submit(directory); self.process()
+        self._new_selection_view(directory.name)
+        revision = str(uuid.uuid4())
+        self.queue.refresh_reselection_results([directory.name], revision)
+        status = self.queue.snapshot()
+        self.assertEqual(status["latest_episode"], status["latest_completed"])
+        self.assertEqual(status["latest_results"][-1], status["latest_completed"])
+        before = self._queue_file_bytes()
+        with patch.object(self.queue, "_publish", side_effect=AssertionError("no rewrite")), \
+                patch.object(EpisodeHistory, "_view", side_effect=AssertionError("already refreshed")):
+            result = self.queue.refresh_reselection_results([directory.name], revision)
+        self.assertTrue(result["already_refreshed"])
+        self.assertEqual(self._queue_file_bytes(), before)
+        with self.assertRaises(ValueError): self.queue.refresh_reselection_results([str(uuid.uuid4())], revision)
+        self.assertEqual(self._queue_file_bytes(), before)
+
+    def test_refresh_rejects_pending_running_and_missing_targets_before_any_mutation(self):
+        first = self.episode("a"); self.queue.submit(first); self.process()
+        second = self.episode("b"); self.queue.submit(second)
+        job_path = self.queue.spool / "jobs" / (second.name + ".json")
+        for state in ("pending", "running", "missing"):
+            with self.subTest(state=state):
+                if state == "missing": job_path.unlink()
+                else:
+                    job = review._read(job_path); job["status"] = state; write(job_path, job)
+                before = self._queue_file_bytes()
+                with patch.object(EpisodeHistory, "_view", side_effect=AssertionError("preflight first")):
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        self.queue.refresh_reselection_results([first.name, second.name], str(uuid.uuid4()))
+                self.assertEqual(self._queue_file_bytes(), before)
+                self.assertFalse((self.queue.spool / "reselections").exists())
+
+    def test_refresh_rejects_noncanonical_or_duplicate_identity_and_recovery_barrier(self):
+        directory = self.episode(); self.queue.submit(directory); self.process()
+        for identities, revision in (([], str(uuid.uuid4())), ([directory.name, directory.name], str(uuid.uuid4())),
+                                     (["bad-uuid"], str(uuid.uuid4())), ([directory.name], "bad-revision")):
+            before = self._queue_file_bytes()
+            with self.assertRaises(ValueError): self.queue.refresh_reselection_results(identities, revision)
+            self.assertEqual(self._queue_file_bytes(), before)
+        write(self.queue.spool / "recovery_required.json", {"fixture": True})
+        before = self._queue_file_bytes()
+        with self.assertRaises(ValueError):
+            self.queue.refresh_reselection_results([directory.name], str(uuid.uuid4()))
+        self.assertEqual(self._queue_file_bytes(), before)
+
+    def test_refresh_rejects_completed_job_with_pending_operator_discard_without_mutation(self):
+        directory = self.episode(); self.queue.submit(directory); self.process()
+        self.queue.request_discard(directory.name)
+        self.assertEqual(self.queue.snapshot()["latest_episode"]["status"], "pending_discard")
+        self.assertEqual(review._read(self.queue.spool / "jobs" / (directory.name + ".json"))["status"], "completed")
+        before = self._queue_file_bytes()
+        with self.assertRaises(ValueError):
+            self.queue.refresh_reselection_results([directory.name], str(uuid.uuid4()))
+        self.assertEqual(self._queue_file_bytes(), before)
+        self.assertFalse((self.queue.spool / "reselections").exists())
+        self.assertTrue(review.discard_requested(directory))
+
+    def test_refresh_crash_recovers_same_jobs_without_renumbering_or_overwriting_old_snapshots(self):
+        directory = self.episode(); self.queue.submit(directory); self.process()
+        self._new_selection_view(directory.name)
+        index_before, original_files = self.index.read_bytes(), self._queue_file_bytes()
+        revision = str(uuid.uuid4())
+        with patch.object(self.queue, "_publish", side_effect=Crash):
+            with self.assertRaises(Crash):
+                self.queue.refresh_reselection_results([directory.name], revision)
+        self.assertTrue((self.queue.spool / "recovery_required.json").exists())
+        restarted = review.ReviewQueue(self.index)
+        self.assertEqual(restarted.snapshot()["status"], "recovering")
+        with patch.object(restarted, "_publish", side_effect=Crash):
+            with self.assertRaises(Crash): restarted._recover()
+        with self.assertRaises(ValueError):
+            restarted.refresh_reselection_results([directory.name], revision)
+        restarted._recover()
+        self.assertFalse((restarted.spool / "recovery_required.json").exists())
+        self.assertEqual(restarted.snapshot()["latest_episode"]["selection_policy"], "native_only")
+        self.assertEqual(restarted.snapshot()["latest_episode"]["number"], 1)
+        self.assertEqual(review._read(self.index)["next_number"], 2)
+        self.assertEqual(self.index.read_bytes(), index_before)
+        archive = restarted.spool / "reselections" / revision
+        for name in ("queue.json", "status.json", "jobs/" + directory.name + ".json"):
+            self.assertEqual((archive / name).read_bytes(), original_files[name])
+        self.assertTrue(restarted.refresh_reselection_results([directory.name], revision)["already_refreshed"])
+
+    def test_mobile_geometry_is_not_recomputed_or_required_and_old_receipt_is_preserved(self):
+        directory = self.episode()
+        metadata = review._read(directory / "metadata.json")
+        metadata["task_id"] = "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
+        write(directory / "metadata.json", metadata)
+        receipt_path = directory / "quality_geometry_completion.json"
+        old_receipt = b'{"status":"error","error":"preserved old extra geometry failure"}\n'
+        receipt_path.write_bytes(old_receipt)
+        self.queue.submit(directory)
+        job = review._read(self.queue.spool / "jobs" / (directory.name + ".json"))
+        (directory / "container_geometry_cache.json").unlink()
+        with patch("pico_simple_teleop.complete_quality_geometry", side_effect=AssertionError("no extra geometry")):
+            result = review.complete_geometry(directory, job)
+        self.assertEqual(result["status"], "not_required")
+        self.assertEqual(result["selection_policy"], "native_only")
+        self.assertEqual(receipt_path.read_bytes(), old_receipt)
+        self.assertFalse((directory / "quality_samples.jsonl").exists())
+        metadata["task_id"] = "changed-after-seal"
+        write(directory / "metadata.json", metadata)
+        with self.assertRaises(ValueError): review.complete_geometry(directory, job)
+
+    def test_nonpending_geometry_still_verifies_metadata_sha_before_short_circuit(self):
+        for mobile in (True, False):
+            with self.subTest(mobile=mobile):
+                directory = self.episode("nonpending-" + str(mobile))
+                outcome = review._read(directory / "episode.json")
+                outcome["geometry_pending"] = False
+                write(directory / "episode.json", outcome)
+                metadata = review._read(directory / "metadata.json")
+                if mobile:
+                    metadata["task_id"] = "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
+                    write(directory / "metadata.json", metadata)
+                self.queue.submit(directory)
+                job = review._read(self.queue.spool / "jobs" / (directory.name + ".json"))
+                with patch("pico_simple_teleop.complete_quality_geometry", side_effect=AssertionError("no geometry")):
+                    result = review.complete_geometry(directory, job)
+                if mobile:
+                    self.assertEqual(result["status"], "not_required")
+                else:
+                    self.assertIsNone(result)
+                metadata["tampered_after_submission"] = True
+                write(directory / "metadata.json", metadata)
+                with self.assertRaisesRegex(ValueError, "metadata SHA"):
+                    review.complete_geometry(directory, job)
 
 
 if __name__ == "__main__":

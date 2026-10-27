@@ -15,6 +15,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import signal
+import copy
 import sys
 import tempfile
 import time
@@ -81,7 +83,8 @@ def _identity(value):
 def _summary(value):
     """Bound results before exposing them to the real-time process/browser."""
     keys = ("uuid", "status", "number", "disposition", "available", "pending", "path",
-            "source_path", "sequence", "collection_enabled", "pendingRTX", "discarded", "ended_time_ns")
+            "source_path", "sequence", "collection_enabled", "pendingRTX", "discarded", "ended_time_ns",
+            "selection_policy", "selection_status", "official_task_success_observed", "acceptance_gate_version")
     result = {key: value.get(key) for key in keys}
     result["reasons"] = [str(reason)[:320] for reason in value.get("reasons", [])[:8]]
     result["error"] = str(value["error"])[:640] if value.get("error") else None
@@ -252,6 +255,164 @@ class ReviewQueue:
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                 env=environment, start_new_session=True, close_fds=True)
         return self
+
+    def _terminate_owned_worker(self, pid):
+        """Caller holds queue/history locks and has excluded any running job."""
+        if type(pid) is not int or pid <= 1:
+            raise ValueError("Invalid owned review worker PID")
+        descriptor = None
+        try:
+            if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+                descriptor = os.pidfd_open(pid)
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            if not (os.fsencode(Path(__file__).resolve()) in command and b"--worker" in command
+                    and os.fsencode(self.index_path) in command and os.fsencode(self.spool) in command):
+                raise ValueError("Refusing to signal a process outside this review queue")
+            if descriptor is not None:
+                signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        except FileNotFoundError:
+            return False
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        return True
+
+    def rotate_worker_at_boundary(self, *, start_new=True):
+        """Reload review code only between jobs; never signal the collector.
+
+        Queue lock excludes a new job claim, history lock excludes a pending
+        history mutation before that claim. An active job is never interrupted.
+        Queued jobs and original evidence remain unchanged.
+        """
+        from pico_episode_history import EpisodeHistory
+        with self._locked():
+            if any((self.spool / name).exists() for name in
+                    ("recovery_required.json", "startup_scan_required.json")):
+                return {"rotated":False,"reason":"queue_recovery_pending"}
+            jobs = [_read(path) for path in (self.spool / "jobs").glob("*.json")]
+            if any(job.get("status") == "running" for job in jobs):
+                return {"rotated":False,"reason":"active_review_job"}
+            history = EpisodeHistory(self.index_path)
+            with history._locked():
+                control = self._load()
+                old_worker = copy.deepcopy(control.get("worker", {}))
+                pid = old_worker.get("pid")
+                if pid is not None:
+                    self._terminate_owned_worker(pid)
+                control["worker"] = {**old_worker,"ready":False,
+                    "retired_at_job_boundary_utc":_now(),"reload_requested":True}
+                self._publish(control)
+                self._process = None
+        if start_new:
+            # SIGTERM delivery is asynchronous. Wait outside both data locks
+            # until the old singleton releases its worker lock, otherwise the
+            # replacement can lose that lock and exit before becoming ready.
+            deadline = time.monotonic() + 2.
+            with (self.spool / "worker.lock").open("a+b") as lock:
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Retired review worker has not released its singleton lock; replacement not started")
+                        time.sleep(.02)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            self.start()
+        return {"rotated":True,"previous_worker":old_worker,"collector_modified":False}
+
+    @staticmethod
+    def _archive_bytes(source, destination):
+        """Preserve exact previous bytes once, without replacing an archive."""
+        if source.is_symlink() or destination.is_symlink():
+            raise ValueError("Reselection archive cannot use symlinks")
+        data = source.read_bytes()
+        if destination.exists():
+            if destination.read_bytes() != data:
+                raise ValueError("Existing reselection backup differs; refusing overwrite")
+            return
+        with destination.open("xb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+
+    def refresh_reselection_results(self, identities, revision_id):
+        """Publish revised History views for explicit already-completed UUIDs.
+
+        Old job/queue/status bytes are archived. A recovery barrier makes a
+        partially written refresh recoverable without re-enqueueing, renumbering
+        or changing raw capture files. Pending/latest-newer work is preserved.
+        """
+        from pico_episode_history import EpisodeHistory
+        revision_id = _identity(revision_id)
+        identities = [_identity(value) for value in identities]
+        if not identities or len(set(identities)) != len(identities):
+            raise ValueError("Explicit unique completed UUIDs required")
+        archive = self.spool / "reselections" / revision_id
+        done = archive / "refresh_complete.json"
+        with self._locked():
+            if (self.spool / "recovery_required.json").exists():
+                raise ValueError("Queue transaction is awaiting recovery")
+            if done.exists():
+                previous = _read(done)
+                if previous.get("uuids") != identities:
+                    raise ValueError("Revision ID already belongs to another UUID set")
+                return {**previous,"already_refreshed":True}
+            control = self._load()
+            for identity in identities:
+                intent_path = self.spool / "discard_requests" / (identity + ".json")
+                if (identity in control.get("pending", []) or identity in control.get("pending_discards", [])
+                        or (intent_path.exists() and _read(intent_path).get("completed") is not True)):
+                    raise ValueError("Cannot refresh a review with pending work or operator discard intent")
+            jobs = {}
+            for identity in identities:
+                job = _read(self.spool / "jobs" / (identity + ".json"))
+                if job.get("status") != "completed":
+                    raise ValueError("Cannot refresh a pending or running review job")
+                jobs[identity] = job
+            history = EpisodeHistory(self.index_path)
+            with history._locked():
+                index = history._load()
+                views = {identity:history._view({**index,"latest_uuid":identity}) for identity in identities}
+            results = {}
+            for identity, job in jobs.items():
+                view = views[identity]
+                result = _summary({**view,"uuid":identity,"sequence":job["sequence"],
+                    "ended_time_ns":job.get("sealed_mtime_ns"),"collection_enabled":job["collection_enabled"],
+                    "pending":False})
+                results[identity] = result
+                job.update(result=result,reselection_revision=revision_id,reselected_utc=_now())
+            for field in ("latest_episode","latest_completed"):
+                old = control.get(field) or {}
+                if old.get("uuid") in results:
+                    control[field] = results[old["uuid"]]
+            control["latest_results"] = [results.get(item.get("uuid"),item)
+                for item in control.get("latest_results",[])]
+            for directory in (archive.parent,archive,archive / "jobs"):
+                directory.mkdir(exist_ok=True)
+                if directory.is_symlink():
+                    raise ValueError("Unsafe reselection archive path")
+            for name in ("queue.json","status.json"):
+                if (self.spool / name).exists():
+                    self._archive_bytes(self.spool / name,archive / name)
+            for identity in identities:
+                self._archive_bytes(self.spool / "jobs" / (identity + ".json"),
+                    archive / "jobs" / (identity + ".json"))
+            receipt = {"refreshed":True,"revision_id":revision_id,"uuids":identities,
+                "updated_results":len(results),"completed_utc":_now(),"accepted_new_dataset":False}
+            barrier = {"operation":"selection_refresh","jobs":list(jobs.values()),
+                "control":control,"receipt":receipt,"receipt_relative_path":str(done.relative_to(self.spool))}
+            _atomic(self.spool / "recovery_required.json",barrier)
+            for identity,job in jobs.items():
+                _atomic(self.spool / "jobs" / (identity + ".json"),job)
+            self._publish(control)
+            _atomic(done,receipt)
+            (self.spool / "recovery_required.json").unlink()
+            return receipt
 
     def _marker(self, job):
         return {"contract": SUBMISSION_CONTRACT, "uuid": job["uuid"],
@@ -483,6 +644,14 @@ class ReviewQueue:
                 identity, result = barrier["uuid"], barrier["result"]
                 self._complete_intent(identity, result)
                 self._merge_manual_result(control, identity, result)
+            elif barrier["operation"] == "selection_refresh":
+                for job in barrier["jobs"]:
+                    _atomic(self.spool / "jobs" / (_identity(job["uuid"]) + ".json"),job)
+                control = barrier["control"]
+                relative = Path(barrier["receipt_relative_path"])
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError("Invalid reselection recovery receipt path")
+                _atomic(self.spool / relative,barrier["receipt"])
             elif barrier["operation"] == "result":
                 job = barrier["job"]
                 _atomic(self.spool / "jobs" / (job["uuid"] + ".json"), job)
@@ -680,13 +849,16 @@ def complete_geometry(directory, job):
     if _sha(episode_path) != job["episode_json_sha256"]:
         raise ValueError("复核前封存回执SHA不一致")
     outcome = _read(episode_path)
-    if outcome.get("geometry_pending") is not True:
-        return  # Compatible older completed geometry is rechecked by History.
-    receipt_path = directory / "quality_geometry_completion.json"
     metadata = _read(metadata_path) if metadata_path.exists() else {}
     current_metadata_sha = _sha(metadata_path) if metadata_path.exists() else None
     if current_metadata_sha != job.get("metadata_sha256"):
         raise ValueError("封存时绑定的metadata SHA已变化")
+    if metadata.get("task_id") == "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0":
+        return {"status":"not_required","selection_policy":"native_only",
+            "reason":"Official native success is already recorded in original solved samples; extra geometry gate disabled"}
+    if outcome.get("geometry_pending") is not True:
+        return  # Compatible older completed geometry is rechecked by History.
+    receipt_path = directory / "quality_geometry_completion.json"
     receipt = {"contract": COMPLETION_CONTRACT, "status": "error", "human_demo_uuid": job["uuid"],
         "source_kind": job["source_kind"], "episode_json_sha256": job["episode_json_sha256"],
         "metadata_sha256": _sha(metadata_path) if metadata_path.exists() else None,
@@ -775,6 +947,11 @@ def _worker_main(queue, *, once=False, idle_timeout=300.):
         # Warm CPU imports before declaring ready; no SDK/simulator construction.
         from pico_episode_history import EpisodeHistory
         from pico_simple_teleop import complete_quality_geometry as _prewarmed
+        from pico_mobile_quality import GATE_VERSION as mobile_selection_gate
+        policy.update(mobile_selection_gate_version=mobile_selection_gate,
+            review_code_sha256=_sha(Path(__file__)),
+            history_code_sha256=_sha(Path(__file__).with_name("pico_episode_history.py")),
+            mobile_quality_code_sha256=_sha(Path(__file__).with_name("pico_mobile_quality.py")))
         queue._recover()
         queue._discover_orphans()
         with queue._locked():

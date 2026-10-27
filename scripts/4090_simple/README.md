@@ -356,7 +356,7 @@ python scripts/4090_simple/finetune_lift_box_hold_joint.py \
 
 ## PICO 仿真遥操作采集
 
-本节默认入口用于 Handover；Mobile P&P 使用下面的独立入口、目录和物理预检查。
+本节默认入口用于 Handover；Mobile P&P 使用下面的独立入口、目录及官方 native 成功筛选。
 
 `bash scripts/4090_simple/start_pico_teleop.sh` 使用已有 Conda 仿真环境，接入
 PICO 原始单包全身输入、固定 SONIC v1.1 SMPL mode2、真实200Hz MuJoCo、
@@ -430,8 +430,24 @@ raw包＋标定重建世界VR参考零误差，token SHA一致；均为合成空
 当时暂停未录制、等待追踪，该快照不是故障后或当前新会话状态。
 旧268项CPU回归、9秒v2 IDLE检查及更早004分别只覆盖旧策略。
 
-Mobile 物理预检查不要求 Handover 交接顺序；`kept` 只代表 raw 物理预检查，
-尚未进入完整独立 RTX／DINO／训练准入。此 launcher 退出后只等待本次后台复核并封存，
+Mobile 按用户要求使用 `selection_policy=native_only`、版本 `mobile-native-task-success-v2`：
+技术证据完整时，原始 bool `official_task_success` 曾为 true 即表示曾达官方终止成功。
+0.75m、10cm、持续持物、额外末段释放／稳定／几何与承重等成功门全部移除；捕获、SHA、时钟、有限性和原始外力技术完整性仍验证。
+技术异常记录为技术证据不完整，不能改判成官方任务失败；缺失 native 保持未知。
+实际任务源码SHA与`.9`阈值逐条绑定；该环境每步`compute_reward`与`check_success`会两次更新reward，`.9`不是持续0.9秒。
+环境不latch，官方eval遇terminated退出，因此`any(native)`表示曾达官方终止，不等于末帧持续成功。本轮不改SIMPLE源码。
+冻结001–026已完成revision `f35b782f-0bab-4910-85ce-c84de56e8d43`重筛并刷新全部26个完成job缓存，UUID／编号保持。
+结果18条selected/kept，恢复002/004/006/010/011/020/023共7条；003/015/017官方未成功，001/016/025/026为技术阻塞、不能算task false。
+021虽然原生成功，仍保留既有人工丢弃意图，未当质量失败。
+旧index/log/record在`collection/reclassification_archive/该revision/`，队列旧缓存在`.pico_episode_review/reselections/该revision/`；
+运行回执为`mobile_pp_teleop_20261027/native_reselection_001/applied_receipt.json`，状态committed、cache更新26条。
+新review worker PID3909051已核对CPU31/nice19/隐藏GPU、三个源码SHA及nativev2；空闲后可正常退出。
+本轮330项PICO CPU及真实Node页面JS路径验证通过，另CLI2项父侧实测通过（0.544秒），总计330＋2。
+独立`native_reselection_001/post_apply_verification.json`通过：364个原始文件共5,235,085,470字节SHA不变，
+26份旧集合回执SHA、编号／UUID alias、26个queue缓存分类和路径对应；无pending事务，第27次未封存尝试的10个原文件SHA也未变。
+筛选规则更新不停止collector，review只在job边界轮换。
+新策略下`kept`只代表官方native成功且技术完整性通过，尚未进入完整独立RTX／DINO／训练准入。
+此 launcher 退出后只等待本次后台复核并封存，
 不调用旧 Handover 的 `finish_pico_session.py`／`audit_pico_teleop_episode.py`，不自动补图、上传或启动训练。
 
 Mobile 本轮针对 `planner_request_expired_no_reference` 修订 CPU 分配与故障诊断。
@@ -451,3 +467,8 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 实际planner PID3812334在CPU29、preview PID3812414在CPU30，review在CPU31。
 浏览器只读核对无error、`no_tracking_packet`、暂停未录制，连续双臂说明且无B按钮；操作者需开启头显Send，再X校准／Y跟随。
 详情和原始证据路径见[Mobile超时诊断](../../docs/PICO_MOBILE_PP_TELEOP.md#异步-planner-超时与-cpu-分配修订)。
+
+后续`live_human_004_cpu_isolated`因`/home`写满的ENOSPC自行退出，43100连接拒绝，未被人为停止或重启。
+第27次未封存尝试`f0cdd5fa-3c2f-4791-9c25-79c96ae11d9e`的start receipt、capture.json和states.npy为0B，无episode.json，
+原件保留、未正式编号且排除冻结001–026，不能算官方任务失败。仅把13个旧uv.tmp缓存保留迁到/tmp并原路径symlink，恢复约2.1GB，未删除采集数据。
+该技术事故不改变18条kept的准入范围，RTX／DINO／生产读取与训练数据就绪仍未完成。

@@ -150,14 +150,22 @@ PICO 4 双手柄与脚踝定位器通过本机 SONIC v1.1 操控 SIMPLE G1，独
 SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](docs/PICO_MOBILE_PP_TELEOP.md)：
 本轮默认 `--mobile-control-policy continuous_vr_mode1`，左杆前进／右杆转向，双臂 Body22／23 与 neck12
 持续实时跟随，手指独立；取消 B、移动时上身锁定及 3 厘米返回门。腕 tip／颈部按当前实测机器人 FK 标定，
-三点参考通过同 tick 当前实际 root 的完整平移／旋转运输。200Hz真实物理、50Hz控制参考、30Hz新token／手指命令与原质量门保持。
+三点参考通过同 tick 当前实际 root 的完整平移／旋转运输。200Hz真实物理、50Hz控制参考、30Hz新token／手指命令及技术完整性验证保持。
 旧策略仅以 `--mobile-control-policy locked_upper_mode0` 显式重现；Handover 默认 mode2 保持。
-资源、输出及物理预检查与 Handover 分开，退出后不自动补图或上传。
+资源与输出和 Handover 分开，退出后不自动补图或上传。
+按用户最新要求，Mobile以`native_only`／`mobile-native-task-success-v2`只筛实际保存的官方native成功，
+移除额外位移、抬升、持物、末段稳定／几何成功门；SHA、时钟、有限性、原始外力等技术完整性保留，异常不能冒充任务失败。
+实际任务绑定`.9`阈值与源码SHA；环境每步两次reward更新，官方eval遇terminated退出，所以`any(native)`表示曾达官方终止成功，环境并不latch。
+冻结001–026已按revision `f35b782f-0bab-4910-85ce-c84de56e8d43`重筛并刷新26个job缓存：18条保留，恢复旧附加门丢弃的7条；
+3条官方未成功、4条技术阻塞、1条原生成功但人工丢弃意图保留。UUID／编号和revision旧回执保留；kept仍不代表RTX／DINO训练准入。
+独立核对364个原始文件（5,235,085,470字节）SHA、26份旧回执、UUID alias和26个缓存均通过；未封存尝试的10个原文件也未改，无pending事务。
 
 新连续策略已通过291项CPU回归（无skip）及两次实际场景／SONIC／异步planner／EGL空手检查：
 14秒面向桌子试验受空间限制，净位移0.0843m；16秒先转再前进试验转向-186.10°、净位移0.54531m，
 最低骨盆0.76586m、最大倾角6.4783°，双臂实关节确有运动；最大lag分别3.8955／3.8082ms。
 原始外力全零、全新token为mode1，raw＋标定重建参考及token身份核对通过；均为合成空手诊断，不能称真人持物或完整任务成功。
-旧`live_human_002_v2`已正常停止并保留原数据；新`live_human_003_continuous_vr1`已加载并核对源码／mode1身份，
-浏览器已刷新显示无B连续双臂控制，核对时暂停、无录制、等待头显Send与标定。
-旧v1／v2回执和首个replay时间技术失败均保留，真人完整任务及独立RTX／DINO训练准入仍待验收。
+后续CPU隔离修订通过294项PICO CPU回归与生产几何负载并行的18秒空手入口检查；
+新review规则本轮通过330项PICO CPU及真实Node页面JS路径验证，另2项CLI通过。
+现场`live_human_004_cpu_isolated`之后因`/home` ENOSPC自行退出，未人为停止或重启；未封存的第27次尝试原件保留且不算任务失败。
+仅将旧uv临时缓存保留迁到/tmp以恢复约2.1GB，未删除采集数据。
+旧v1／v2回执、replay技术失败与超时诊断均保留；完整独立RTX／DINO及训练数据就绪仍未完成。

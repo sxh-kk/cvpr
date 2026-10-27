@@ -1,12 +1,14 @@
-"""Locked, recoverable numbering and physical precheck of ended human attempts.
+"""Locked numbering and recoverable selection of ended human attempts.
 
-The collection keeps original evidence byte-for-byte. ``kept`` means only the
-unchanged physical precheck passed; RTX, independent admission and training
-packaging remain pending. No SDK, simulator or inference is initialized here.
+The collection keeps original evidence byte-for-byte. Handover retains its
+physical precheck; Mobile uses captured official native success with bound task
+identity and recording integrity. ``kept`` still leaves RTX, independent
+admission and training packaging pending. No SDK, simulator or inference starts.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 import ctypes
 from datetime import datetime, timezone
 import fcntl
@@ -24,6 +26,10 @@ import numpy as np
 INDEX_CONTRACT = "cvpr-pico-episode-collection-index-v1"
 RECORD_CONTRACT = "cvpr-pico-episode-collection-record-v1"
 DISCARD_CONTRACT = "cvpr-pico-operator-discard-v1"
+MOBILE_TASK_ID = "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
+MOBILE_OFFICIAL_SOURCE_SHA256 = "fee537d56e134b0399ff147013438168601498ab9b3ee068658dcad5fb8ca521"
+MOBILE_NATIVE_SUCCESS_CRITERIA = .9
+RESELECT_CONTRACT = "cvpr-pico-mobile-native-reselection-v1"
 
 
 def _now():
@@ -36,6 +42,58 @@ def _sha(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _json_sha(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+        allow_nan=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _selection_fields(report):
+    return {key: deepcopy(report[key]) for key in ("selection_policy", "selection_status",
+        "acceptance_gate_version", "official_task_success_observed", "official_task_success",
+        "native_success_evidence_complete", "technical_blocked", "evaluator_source_sha256") if key in report}
+
+
+def _preserve_bytes(source, target):
+    """Exclusive durable evidence backup; an existing different backup is fatal."""
+    data = source.read_bytes()
+    if target.exists():
+        if target.is_symlink() or target.read_bytes() != data:
+            raise ValueError("旧证据备份已存在但内容不同：" + str(target))
+        return
+    with target.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    descriptor = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _file_inventory(directory):
+    """Original evidence bindings; collection decisions are backed up separately."""
+    result = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("原始示例内不允许符号链接：" + str(path))
+        if path.is_file() and path.name not in ("collection_record.json", "operator_discard.json"):
+            result[str(path.relative_to(directory))] = {"bytes": path.stat().st_size, "sha256": _sha(path)}
+    return result
+
+
+def _verify_inventory(directory, inventory):
+    # Concurrent later review may add a separate receipt. Every pre-existing
+    # evidence file must still exist unchanged; directory rename preserves extras.
+    for relative, expected in inventory.items():
+        path = directory / relative
+        if (Path(relative).is_absolute() or ".." in Path(relative).parts or path.is_symlink()
+                or any(parent.is_symlink() for parent in path.parents if parent != directory and parent.is_relative_to(directory))
+                or not path.is_file() or path.stat().st_size != expected["bytes"]
+                or _sha(path) != expected["sha256"]):
+            raise ValueError("重筛迁移中的原始证据身份变化：" + relative)
 
 
 def _json(path, *, lines=False):
@@ -121,29 +179,57 @@ def quality_geometry_outcome(directory, outcome):
 
 
 def _physical_precheck(directory, outcome, metadata):
-    """Recompute the existing physical gates; do not trust an outcome boolean."""
+    """Check raw recording integrity plus the explicitly dispatched task policy.
+
+    Mobile selects any captured native success from the fixed official task;
+    Handover retains its existing physical/geometry gates. Neither trusts an
+    outcome summary boolean or relabels technical failure as official failure.
+    """
     reasons, report = [], {}
+    mobile = metadata.get("task_id") == MOBILE_TASK_ID
+    technical = []
+    native_identity = None
+    if mobile:
+        supplied_source = metadata.get("actual_task_source_sha256")
+        supplied_criteria = metadata.get("actual_native_success_criteria")
+        source_valid = supplied_source == MOBILE_OFFICIAL_SOURCE_SHA256
+        criteria_valid = type(supplied_criteria) in (int, float) and supplied_criteria == MOBILE_NATIVE_SUCCESS_CRITERIA
+        native_identity = {"expected_task_source_sha256": MOBILE_OFFICIAL_SOURCE_SHA256,
+            "recorded_task_source_sha256": supplied_source, "source_sha256_matches": source_valid,
+            "expected_success_criteria": MOBILE_NATIVE_SUCCESS_CRITERIA,
+            "recorded_success_criteria": supplied_criteria, "success_criteria_matches": criteria_valid,
+            "passed": source_valid and criteria_valid,
+            "identity_scope": "fixed audited official task, independent of currently installed source or old collection gates"}
+        if not source_valid:
+            technical.append("官方Mobile任务模块SHA缺失或不匹配固定官方实现")
+        if not criteria_valid:
+            technical.append("官方Mobile success_criteria缺失或不等于0.9")
+        reasons.extend(technical)
     if os.path.lexists(directory / "operator_discard.json"):
         reasons.append("操作员已标记丢弃此记录")
     if "physical_gate_error" in outcome:
         reasons.append("收尾物理验收失败：" + str(outcome["physical_gate_error"]))
+        technical.append(reasons[-1])
     if "finalization_errors" in outcome:
         reasons.append("录制收尾失败：" + str(outcome["finalization_errors"]))
-    try:
-        outcome = quality_geometry_outcome(directory, outcome)
-        if "physical_gate_error" in outcome:
-            reasons.append("后台物理几何复核失败：" + str(outcome["physical_gate_error"]))
-    except Exception as error:
-        reasons.append("后台几何复核未完成或回执无效：" + str(error))
+        technical.append(reasons[-1])
+    if not mobile:
+        try:
+            outcome = quality_geometry_outcome(directory, outcome)
+            if "physical_gate_error" in outcome:
+                reasons.append("后台物理几何复核失败：" + str(outcome["physical_gate_error"]))
+        except Exception as error:
+            reasons.append("后台几何复核未完成或回执无效：" + str(error))
     state = outcome["state"]
     if state.get("status") != "pending_audit" or state.get("pending_audit") is not True:
         why = "；".join(str(item) for item in state.get("reasons", []))
         reasons.append("录制中断：" + (why or "未完整保存待验收"))
+        technical.append(reasons[-1])
     try:
         task_id = metadata.get("task_id")
         if task_id == "simple/G1WholebodyHandoverTeleop-v0":
             from handover_contact_quality import evaluate_capture
-        elif task_id == "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0":
+        elif task_id == MOBILE_TASK_ID:
             from pico_mobile_quality import evaluate_mobile_capture as evaluate_capture
         else:
             raise ValueError("缺少或不支持的任务身份，不能套用交接验收：" + str(task_id))
@@ -181,7 +267,7 @@ def _physical_precheck(directory, outcome, metadata):
         if not events or len(events) != capture["event_count"] or _sha(event_path) != capture["events_sha256"]:
             raise ValueError("capture事件缺帧或SHA不一致")
         warmup = round(float(capture["warmup_seconds"]) * 50)
-        if warmup < 50 or warmup % 5:
+        if warmup < (0 if mobile else 50) or warmup % 5:
             raise ValueError("缺少真实一秒起始历史")
         start = float(events[0]["sim_time_s"])
         for index, event in enumerate(events):
@@ -197,14 +283,36 @@ def _physical_precheck(directory, outcome, metadata):
                         or _sha(image) != event["rgb"]["file_sha256"]):
                     raise ValueError("RGB图像缺失、路径越界或SHA不一致")
         initial = np.asarray(events[0]["objects"]["target"]["pose7"][:3], dtype=float)
-        if "initial_target_z_m" not in metadata:
+        if not mobile and "initial_target_z_m" not in metadata:
             raise ValueError("缺少绑定的初始物体高度元数据")
-        initial_z = metadata["initial_target_z_m"]
-        if (initial.shape != (3,) or not np.isfinite(initial).all() or type(initial_z) not in (int, float)
+        initial_z = metadata.get("initial_target_z_m")
+        if not mobile and (initial.shape != (3,) or not np.isfinite(initial).all() or type(initial_z) not in (int, float)
                 or not math.isfinite(initial_z) or abs(initial_z - initial[2]) > 1e-9):
             raise ValueError("初始物体高度未绑定首个实际状态")
-        qualities = _json(directory / "quality_samples.jsonl", lines=True)
-        if metadata.get("quality_geometry_mode") == "deferred_geometry_with_original_solved_support":
+        quality_path = directory / ("raw_quality_samples.jsonl" if mobile and os.path.lexists(
+            directory / "raw_quality_samples.jsonl") else "quality_samples.jsonl")
+        qualities = _json(quality_path, lines=True)
+        if mobile:
+            raw_digest = _sha(quality_path)
+            prior_record_path = directory / "collection_record.json"
+            if prior_record_path.exists():
+                prior_report = _json(prior_record_path).get("physical_report", {})
+                if (prior_report.get("native_flag_source_file") == quality_path.name
+                        and prior_report.get("native_flag_source_sha256") not in (None, raw_digest)):
+                    raise ValueError("原始native记录与此前筛选回执SHA不一致")
+            old_sources = outcome.get("quality_geometry_sources", {})
+            geometry_receipt = directory / "quality_geometry_completion.json"
+            if geometry_receipt.exists():
+                old_receipt = _json(geometry_receipt)
+                if (old_receipt.get("episode_json_sha256") != _sha(directory / "episode.json")
+                        or old_receipt.get("metadata_sha256") != _sha(directory / "metadata.json")):
+                    raise ValueError("旧几何回执的原始身份已变化")
+                old_sources = old_receipt.get("quality_geometry_sources", old_sources)
+            if quality_path.name == "raw_quality_samples.jsonl" and isinstance(old_sources, dict):
+                bound_raw = old_sources.get("raw_samples_sha256")
+                if bound_raw is not None and bound_raw != raw_digest:
+                    raise ValueError("原始native物理记录与旧SHA绑定不一致")
+        if not mobile and metadata.get("quality_geometry_mode") == "deferred_geometry_with_original_solved_support":
             # finalize can write completed geometry and subsequently fail its
             # source/cache check. A readable quality file is not proof that the
             # unchanged original solved-support evidence was actually retained.
@@ -226,23 +334,27 @@ def _physical_precheck(directory, outcome, metadata):
             cache = _json(directory / "container_geometry_cache.json")
             if complete_quality_geometry(raw, cache) != qualities:
                 raise ValueError("几何补算与原始已解算接触/支撑记录不一致")
-        if len(qualities) <= warmup or len(events) != (len(qualities) - 1) * 30 // 50 + 1:
+        if len(qualities) <= (0 if mobile else warmup) or len(events) != (len(qualities) - 1) * 30 // 50 + 1:
             raise ValueError("50Hz物理记录或30Hz状态记录不完整")
         for index, row in enumerate(qualities):
             if row["completed_steps"] != index + 1 or not math.isclose(row["sim_time_s"], start + (index + 1) / 50, rel_tol=0, abs_tol=1e-6):
                 raise ValueError("50Hz物理记录时钟不连续")
         if state.get("local_tick50") != len(qualities) - 1:
             raise ValueError("结束步数与物理记录不一致")
-        if len(events) - warmup * 30 // 50 < 30:
+        if not mobile and len(events) - warmup * 30 // 50 < 30:
             raise ValueError("有效动作记录不足一秒")
-        for row in qualities[:warmup]:
+        for row in ([] if mobile else qualities[:warmup]):
             if (row["contacts"].get("left_hand") is not False or row["contacts"].get("right_hand") is not False
                     or np.linalg.norm(np.asarray(row["actual_target_xyz_m"]) - initial) > .01):
                 reasons.append("起始无监督历史中已开始抓取或移动物体")
                 break
-        supervised = [{**row, "completed_steps": index + 1} for index, row in enumerate(qualities[warmup:])]
+        supervised = qualities if mobile else [{**row, "completed_steps": index + 1}
+                                               for index, row in enumerate(qualities[warmup:])]
         report = evaluate_capture(supervised, initial_target_z_m=initial_z)
-        report["excluded_unsupervised_warmup_ticks50"] = warmup
+        report["excluded_unsupervised_warmup_ticks50"] = 0 if mobile else warmup
+        if mobile:
+            report["native_flag_source_file"] = quality_path.name
+            report["native_flag_source_sha256"] = _sha(quality_path)
         checks = (report.get("contact_evidence") or {}).get("checks", {})
         labels = {"contact_data_complete":"接触记录不完整", "ordered_lifted_right_both_left":"未完成右手→双手→左手交接",
             "object_lifted":"物体抬升不足10厘米", "both_hands_released_final_window":"末段未完全松手",
@@ -264,10 +376,14 @@ def _physical_precheck(directory, outcome, metadata):
         placement = report.get("final_placement_geometric_validation") or {}
         if placement.get("legacy_outer_footprint_passed") is False:
             reasons.append("目标未落在篮筐有效范围内")
-        if report.get("eligible_physics") is not True and not reasons:
+        if not mobile and report.get("eligible_physics") is not True and not reasons:
             reasons.append("移动抓取与放置验收未通过" if task_id == "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
                            else "物理交接与放置验收未通过")
         for error in report.get("capture_validation_errors", []):
+            if mobile:
+                technical.append("原始官方成功证据无效：" + str(error))
+                reasons.append(technical[-1])
+                continue
             if "actual_root_xyz_m" in str(error):
                 reasons.append("缺少或无效的实际机器人根部三维位置证据")
             else:
@@ -283,6 +399,21 @@ def _physical_precheck(directory, outcome, metadata):
                 raise ValueError("原始200Hz外力记录非零或时钟缺失")
     except Exception as error:
         reasons.append("记录完整性验收失败：" + str(error))
+        technical.append(reasons[-1])
+    if mobile:
+        from pico_mobile_quality import GATE_VERSION
+        report.update(selection_policy="native_only", technical_errors=list(dict.fromkeys(technical)),
+                      technical_blocked=bool(technical), acceptance_gate_version=GATE_VERSION, evaluator_source_sha256={
+                          "pico_episode_history.py": _sha(Path(__file__)),
+                          "pico_mobile_quality.py": _sha(Path(__file__).with_name("pico_mobile_quality.py"))})
+        report["task_identity_validation"] = native_identity
+        if technical:
+            report.setdefault("official_task_success_observed", None)
+            report.setdefault("native_success_evidence_complete", False)
+            report.update(selection_status="technical_evidence_incomplete", eligible_physics=False,
+                          official_task_success=None)
+        elif report.get("eligible_physics") is not True:
+            reasons.append("官方任务成功标志未出现")
     return list(dict.fromkeys(reasons)), report
 
 
@@ -293,6 +424,7 @@ class EpisodeHistory:
         self.root = self.index_path.parent
         self.lock_path = self.index_path.with_name(self.index_path.name + ".lock")
         self.log_path = self.root / "collection_records.jsonl"
+        self.reselection_path = self.root / ".pico_mobile_native_reselection_pending.json"
 
     def _safe(self, path, *, allow_leaf_link=False):
         path = Path(path)
@@ -446,6 +578,8 @@ class EpisodeHistory:
         for identity, entry in index["entries"].items():
             if entry.get("status") != "committed":
                 self._finish(index, identity)
+        if os.path.lexists(self.reselection_path):
+            self._finish_mobile_reselection(index, _json(self.reselection_path))
 
     def _view(self, index):
         identity = index.get("latest_uuid")
@@ -463,11 +597,13 @@ class EpisodeHistory:
         if entry["disposition"] == "kept" and os.path.lexists(target / "operator_discard.json"):
             raise ValueError("发现丢弃标记但实际目录尚未分流，保留记录等待恢复")
         discarded = entry["disposition"] == "discarded" or os.path.lexists(target / "operator_discard.json")
-        return {"status": "discarded" if discarded else "ready", "available": not discarded,
+        selection = _selection_fields({**record.get("physical_report", {}), **entry})
+        blocked = selection.get("technical_blocked") is True
+        return {"status": "technical_blocked" if blocked else "discarded" if discarded else "ready", "available": not discarded and not blocked,
             "path": str(target), "source_path": str(self._safe(entry["source_relative_path"], allow_leaf_link=True)),
             "uuid": identity, "number": entry["number"], "disposition": entry["disposition"],
             "reasons": entry["reasons"], "discarded": discarded, "error": None,
-            "pendingRTX": entry.get("pendingRTX", False), "accepted_new_dataset": False}
+            "pendingRTX": entry.get("pendingRTX", False), "accepted_new_dataset": False, **selection}
 
     def _guard_unregistered_attempts(self, index):
         """Never silently fall back to an older pointer after index I/O loss.
@@ -544,14 +680,211 @@ class EpisodeHistory:
                 "episode_json_sha256": _sha(path / "episode.json"), "recorded_utc": _now(),
                 "pendingRTX": pending_rtx, "accepted_new_dataset": False, "eligible_for_packing": False,
                 "scope": "仅现有物理门禁预验收；保留不代表RTX、独立验收或训练数据已通过"}
+            record.update(_selection_fields(physical))
+            if metadata.get("task_id") == MOBILE_TASK_ID:
+                record["scope"] = "仅官方native成功筛选及原始记录完整性；RTX、独立验收和训练准入仍待完成"
             index["entries"][identity] = {"number": number, "disposition": disposition, "status": "prepared",
                 "source_relative_path": str(path.relative_to(self.root)), "from_relative_path": str(path.relative_to(self.root)),
                 "episode_json_sha256": record["episode_json_sha256"], "reasons": reasons, "pendingRTX": pending_rtx,
                 "planned_record": record, "operation_id": "remember:" + identity}
+            index["entries"][identity].update(_selection_fields(physical))
             index.update(next_number=number + 1, latest_uuid=identity)
             _atomic(self.index_path, index)
             self._finish(index, identity)
             return self._view(index)
+        return self._run(operation)
+
+    def _mobile_snapshot(self, index, identities):
+        if not isinstance(identities, (list, tuple)) or not identities or len(set(identities)) != len(identities):
+            raise ValueError("重筛必须提供非空且不重复的显式Mobile UUID集合")
+        selected = []
+        for identity in identities:
+            if str(uuid.UUID(identity)) != identity or identity not in index["entries"]:
+                raise ValueError("重筛UUID尚未登记或格式无效：" + str(identity))
+            entry = index["entries"][identity]
+            target = self._target(entry["disposition"], entry["number"])
+            actual, outcome, metadata = self._episode(target)
+            if actual != identity or metadata.get("task_id") != MOBILE_TASK_ID or entry.get("status") != "committed":
+                raise ValueError("重筛仅支持已提交的Mobile真人记录")
+            if _sha(target / "episode.json") != entry["episode_json_sha256"]:
+                raise ValueError("原始结束回执与索引SHA不一致")
+            record = _json(target / "collection_record.json")
+            if (record.get("human_demo_uuid") != identity or record.get("number") != entry["number"]
+                    or record.get("disposition") != entry["disposition"] or record.get("status") != "committed"):
+                raise ValueError("原集合回执与索引身份不一致")
+            source = self._safe(entry["source_relative_path"], allow_leaf_link=True)
+            if not source.is_symlink() or source.resolve(strict=True) != target:
+                raise ValueError("原UUID alias未指向已登记编号目录")
+            from pico_episode_review import discard_requested
+            operator = target / "operator_discard.json"
+            if operator.is_symlink():
+                raise ValueError("原手动丢弃标记不能为符号链接")
+            manual = bool(operator.exists() or discard_requested(target))
+            if operator.exists():
+                marker = _json(operator)
+                if marker.get("human_demo_uuid") != identity or marker.get("operator_discarded") is not True:
+                    raise ValueError("原手动丢弃标记身份无效")
+            samples = target / ("raw_quality_samples.jsonl" if os.path.lexists(
+                target / "raw_quality_samples.jsonl") else "quality_samples.jsonl")
+            force = target / "applied_force_samples.jsonl"
+            if samples.is_symlink() or force.is_symlink():
+                raise ValueError("原始native/外力记录不能为符号链接")
+            selected.append({"uuid": identity, "number": entry["number"],
+                "entry_sha256": _json_sha(entry), "actual_relative_path": str(target.relative_to(self.root)),
+                "source_relative_path": entry["source_relative_path"],
+                "episode_json_sha256": entry["episode_json_sha256"],
+                "metadata_sha256": _sha(target / "metadata.json"),
+                "collection_record_sha256": _sha(target / "collection_record.json"),
+                "native_source_file": samples.name,
+                "native_source_sha256": _sha(samples) if samples.is_file() else None,
+                "force_source_sha256": _sha(force) if force.is_file() else None,
+                "operator_discard_sha256": _sha(operator) if operator.exists() else None,
+                "manual_discard_intent": manual})
+        selected.sort(key=lambda item: item["number"])
+        return {"contract": RESELECT_CONTRACT, "selection_policy": "native_only", "root": str(self.root),
+            "index_sha256": _sha(self.index_path), "next_number": index["next_number"],
+            "latest_uuid": index["latest_uuid"], "selected": selected}
+
+    def snapshot_mobile_native(self, identities):
+        """Freeze caller-selected completed UUIDs; never silently expand a batch."""
+        return self._run(lambda index: self._mobile_snapshot(index, identities))
+
+    def _finish_mobile_reselection(self, index, transaction):
+        if transaction.get("contract") != RESELECT_CONTRACT or transaction.get("root") != str(self.root):
+            raise ValueError("重筛恢复事务身份无效")
+        operation = str(uuid.UUID(transaction["operation_uuid"]))
+        archive = self._safe(self.root / "reclassification_archive" / operation)
+        saved = _json(archive / "transaction.json")
+        if saved != transaction:
+            raise ValueError("重筛事务与不可变归档不一致")
+        results = []
+        for plan in transaction["plans"]:
+            identity = plan["uuid"]
+            entry = index["entries"][identity]
+            if entry["number"] != plan["number"] or entry["episode_json_sha256"] != plan["episode_json_sha256"]:
+                raise ValueError("恢复重筛时原编号或UUID身份已变化")
+            previous = self._safe(plan["previous_relative_path"])
+            target = self._target(plan["disposition"], plan["number"])
+            target.parent.mkdir(exist_ok=True)
+            if previous != target and target.exists() and previous.exists():
+                raise ValueError("重筛目标编号已有另一份数据，拒绝覆盖")
+            location = target if target.exists() else previous
+            actual_identity, _, _ = self._episode(location)
+            if actual_identity != identity or _sha(location / "episode.json") != plan["episode_json_sha256"]:
+                raise ValueError("重筛恢复目标的原始结束回执身份不同")
+            _verify_inventory(location, plan["evidence_inventory"])
+            if previous != target and not target.exists():
+                _rename_no_replace(previous, target)
+                for parent in (previous.parent, target.parent):
+                    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+            record = plan["new_record"]
+            _atomic(target / "collection_record.json", record)
+            self._alias(self._safe(entry["source_relative_path"], allow_leaf_link=True), target, previous)
+            self._log(record, plan["operation_id"])
+            entry.update(disposition=plan["disposition"], reasons=plan["reasons"], status="committed",
+                actual_relative_path=str(target.relative_to(self.root)), operation_id=plan["operation_id"],
+                reclassification_archive=str(archive.relative_to(self.root)), **_selection_fields(plan["physical_report"]))
+            _atomic(self.index_path, index)
+            results.append({"uuid": identity, "number": plan["number"], "previous_disposition": plan["previous_disposition"],
+                "disposition": plan["disposition"], "path": str(target), "reasons": plan["reasons"],
+                "manual_discard_preserved": plan["manual_discard_intent"], **_selection_fields(plan["physical_report"])})
+        receipt = {"contract": RESELECT_CONTRACT, "status": "committed", "operation_uuid": operation,
+            "selection_policy": "native_only", "snapshot_sha256": transaction["snapshot_sha256"],
+            "selected_uuids": [plan["uuid"] for plan in transaction["plans"]], "results": results,
+            "original_index_sha256": transaction["snapshot"]["index_sha256"],
+            "committed_index_sha256": _sha(self.index_path), "archive": str(archive),
+            "numbering_preserved": True, "manual_discard_policy": "preserve_independent_operator_intent",
+            "accepted_new_dataset": False, "eligible_for_packing": False,
+            "scope": "官方native筛选重新分类；保留不代表RTX、独立验收和训练准入通过"}
+        receipt_path = archive / "receipt.json"
+        if receipt_path.exists() and _json(receipt_path) != receipt:
+            raise ValueError("已存在不同的重筛完成回执，保留事务等待核对")
+        if not receipt_path.exists():
+            _atomic(receipt_path, receipt)
+        self.reselection_path.unlink()
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return receipt
+
+    def reselect_mobile_native(self, snapshot, *, operation_uuid):
+        """Explicit recoverable reclassification; never overrides manual discard.
+
+        Caller retries a changed global index with a NEW snapshot. Once the
+        prepared transaction exists, ordinary History operations recover it
+        first. Old decisions/index/journal are retained byte-for-byte and no
+        original episode, metadata, capture, force or geometry file is edited.
+        """
+        def operation(index):
+            operation_id = str(uuid.UUID(operation_uuid))
+            if operation_id != operation_uuid or snapshot.get("contract") != RESELECT_CONTRACT:
+                raise ValueError("重筛操作UUID或快照格式无效")
+            archive = self._safe(self.root / "reclassification_archive" / operation_id)
+            receipt_path = archive / "receipt.json"
+            if receipt_path.exists():
+                receipt = _json(receipt_path)
+                if receipt.get("snapshot_sha256") != _json_sha(snapshot):
+                    raise ValueError("同一重筛操作不能绑定不同集合快照")
+                return receipt
+            current = self._mobile_snapshot(index, [item["uuid"] for item in snapshot["selected"]])
+            if current != snapshot:
+                raise ValueError("重筛快照已过期，索引或记录身份变化；请重新快照，未静默追加新记录")
+            plans = []
+            created = _now()
+            for item in snapshot["selected"]:
+                identity = item["uuid"]
+                entry = index["entries"][identity]
+                previous = self._target(entry["disposition"], entry["number"])
+                _, outcome, metadata = self._episode(previous)
+                reasons, report = _physical_precheck(previous, outcome, metadata)
+                manual = item["manual_discard_intent"]
+                if manual:
+                    reasons = list(dict.fromkeys(reasons + ["操作员手动丢弃意图独立保留"])); disposition = "discarded"
+                    report["selection_status"] = "operator_discarded"
+                elif report.get("technical_blocked"):
+                    disposition = entry["disposition"]
+                else:
+                    disposition = "kept" if report.get("eligible_physics") is True else "discarded"
+                target = self._target(disposition, entry["number"])
+                if target != previous and os.path.lexists(target):
+                    raise ValueError("重筛目标编号已存在；未覆盖任何记录")
+                record = _json(previous / "collection_record.json")
+                record.update(disposition=disposition, reasons=reasons, physical_report=report,
+                    episode_directory=str(target), status="committed", reclassified_utc=created,
+                    reclassification_receipt=str(archive / "receipt.json"),
+                    scope="官方native成功筛选及原始记录完整性；RTX、独立验收和训练准入仍待完成",
+                    **_selection_fields(report))
+                plans.append({"uuid": identity, "number": entry["number"], "episode_json_sha256": entry["episode_json_sha256"],
+                    "previous_relative_path": str(previous.relative_to(self.root)),
+                    "previous_disposition": entry["disposition"], "disposition": disposition,
+                    "manual_discard_intent": manual, "reasons": reasons, "physical_report": report,
+                    "new_record": record, "evidence_inventory": _file_inventory(previous),
+                    "operation_id": "reselect_mobile_native:" + operation_id + ":" + identity})
+            archive.mkdir(parents=True, exist_ok=True)
+            _preserve_bytes(self.index_path, archive / "before_index.json")
+            if self.log_path.exists():
+                _preserve_bytes(self.log_path, archive / "before_collection_records.jsonl")
+            for plan in plans:
+                previous = self._safe(plan["previous_relative_path"])
+                item_archive = self._safe(archive / plan["uuid"])
+                item_archive.mkdir(exist_ok=True)
+                _preserve_bytes(previous / "collection_record.json", item_archive / "collection_record.before.json")
+                if (previous / "operator_discard.json").exists():
+                    _preserve_bytes(previous / "operator_discard.json", item_archive / "operator_discard.before.json")
+            transaction = {"contract": RESELECT_CONTRACT, "root": str(self.root), "operation_uuid": operation_id,
+                "prepared_utc": created, "snapshot": snapshot, "snapshot_sha256": _json_sha(snapshot), "plans": plans}
+            transaction_path = archive / "transaction.json"
+            if transaction_path.exists() and _json(transaction_path) != transaction:
+                raise ValueError("重筛归档已有不同事务，请使用新操作UUID")
+            _atomic(transaction_path, transaction)
+            _atomic(self.reselection_path, transaction)
+            return self._finish_mobile_reselection(index, transaction)
         return self._run(operation)
 
     def _discard(self, index, identity):
@@ -571,9 +904,13 @@ class EpisodeHistory:
         if os.path.lexists(target):
             raise ValueError("discarded同编号目录已存在，未覆盖")
         record.update(disposition="discarded", reasons=reasons, episode_directory=str(target), status="prepared")
+        if record.get("selection_policy") == "native_only":
+            record["selection_status"] = "operator_discarded"
         entry.update(disposition="discarded", reasons=reasons, status="prepared", manual_discard=True,
             from_relative_path=str(previous.relative_to(self.root)), planned_record=record,
             operation_id="operator_discard:" + identity)
+        if record.get("selection_policy") == "native_only":
+            entry["selection_status"] = "operator_discarded"
         _atomic(self.index_path, index)
         self._finish(index, identity)
         return {**self._view({**index, "latest_uuid": identity}), "already_discarded": False}

@@ -12,7 +12,9 @@
 **本轮 CPU 分配与诊断修订已通过 294 项 PICO CPU 回归及生产几何复核并行的 18 秒空手入口检查。
 旧 `live_human_003_continuous_vr1` 的超时证据与原数据保留，已正常退出；
 新 `live_human_004_cpu_isolated` 已实际加载并核对源码、planner CPU29 和预览 CPU30。
-页面检查时无错误、暂停且未录制，等待头显 Send／X 校准／Y 跟随。真人持物、完整抓放任务与训练数据准入仍未验收。**
+加载页面快照无错误、暂停且未录制；操作者随后继续录制，之后 collector 因磁盘 ENOSPC 自行退出，未重启。
+本轮仅官方 native 筛选已应用到冻结的 001–026：18 条保留、3 条官方未成功、4 条技术阻塞、1 条人工丢弃意图保留；26 个完成 job 缓存已刷新。
+未封存的第 27 次尝试另保留为技术故障。独立 RTX／DINO 和训练数据就绪仍未完成。**
 下面把新操作方式与旧版证据分开说明。旧 Handover 默认 mode2、原固定 90 条候选及其交付范围保持独立。
 
 ## 独立入口与资源
@@ -95,9 +97,9 @@ PICO 的 XRoboToolkit 设备设置、单接收器限制、有效全身追踪和�
    机器人腿部接受 planner 参考，双臂与颈部参考继续实时更新；松杆发出停止意图，机器人仍需真实减速。
    横移、倒退和右杆纵向未开放，按原逐轴规则屏蔽并保存原始四轴、实际采用四轴及忽略原因；
    有效前进和转向部分分别保留。缺轴、非法幅值、非有限值、过期／逆序输入等保护仍适用。
-5. 到第二张桌子后松杆，确认机器人实际停稳，再把目标放入容器，双手彻底松开并保持物体稳定至少一秒。
+5. 到第二张桌子后松杆，确认机器人实际停稳，再把目标放入容器并松手，观察原生成功标志。
    **不需要 B 返回、恢复移动前的手臂姿态或满足旧 3 厘米姿态门**；连续策略中双臂一直在跟随。
-   停稳仍是实际操作要求，不把松杆等同于已停止或夹持稳定。
+   这些是操作建议，任务成功只依下文绑定的官方 native 结果，不增加位移、抬升或稳定时长门。
 6. 按 **A 保存结束**。原始写入封存后重置并暂停，下一条重新 X 校准、Y 跟随。
    **Y 暂停**会中断正在录制的条目并保留原因。页面“丢弃当前／上一条”沿用 UUID 与编号归档，保留原始证据。
 
@@ -116,7 +118,7 @@ offset 只应用一次。腕部位置／朝向与颈部朝向都绑定当前实�
 保留真实积分状态、时间对齐和原始包，不以 planner 未来参考填充真实状态。
 异步 planner 启动准备时物理时钟保持暂停，不生成跟随动作；等就绪、收到新的有效人体包且摇杆归中后，再启动连续控制时钟。
 追踪无效、时间倒退、planner 结果过期或超过实时延迟预算等仍会暂停并留证，不补造物理帧或复用旧包冒充新输入。
-取消旧模式门不放宽身体物理、实时、零外力或数据质量门。
+取消旧模式门不放宽实时、有限性和零外力等技术保护；任务成功筛选遵循下文的 native_only 策略。
 
 ## 显式保留的旧锁上身策略
 
@@ -134,7 +136,7 @@ bash scripts/4090_simple/start_pico_mobile_pp.sh \
 这些 B、上身锁与 3 厘米条件只属于 legacy，不应用于默认连续策略，也不等于 decoder 连续性或持物验收。
 旧 v1／v2 的诊断与现场中断证据保留在下方历史记录。
 
-## 输出和物理预检查
+## 输出与官方成功筛选
 
 默认输出与集合目录为：
 
@@ -154,18 +156,100 @@ bash scripts/4090_simple/start_pico_mobile_pp.sh \
 200 Hz 外力、实际积分状态以及本次任务、场景、冷启动和 planner 身份。
 控制策略、encoder mode、人体参考来源、实测 FK 标定与当前 root 运输证据单独绑定；legacy 的模式切换也留证。
 
-`pico_episode_history.py` 按明确的任务 ID 分派到 `pico_mobile_quality.py`，不会套用 Handover 的手间交接顺序。
-Mobile 的新增采集预检查要求：目标被手接触且抬升至少 0.10 米，在同一段连续持物区间内，
-目标与机器人根的水平净位移均至少 0.75 米；最终目标水平净位移也至少 0.75 米。
-最后 50 个真实 50 Hz 状态中，双手全部释放，至少 49 帧有容器接触，目标最大两点位移小于 5 毫米，
-并通过既有承接几何／支撑必要条件、完整时钟、归档和 200 Hz 零外力检查。
-这些是本次采集额外质量门，不是官方 benchmark 成功规则；原生成功标志单独保存，不改写。
+`pico_episode_history.py` 按明确任务 ID 分派到 `pico_mobile_quality.py`。
+按用户最新要求，Mobile 的筛选策略改为 **`selection_policy=native_only`**，版本为
+**`mobile-native-task-success-v2`**：技术证据完整时，只判断录制中是否曾有原始布尔
+`official_task_success=true`。该字段来自实际环境返回的 `terminated`，不重算或改写官方标志。
+原 0.75 米位移、10 厘米抬升、持续持物、额外末段释放／稳定窗口、容器几何／承重等条件
+全部退出任务成功筛选；Handover 交接顺序也不适用。旧测量可保留为诊断，不能继续否决官方成功。
 
-**`kept` 只表示原始物理预检查通过，`eligible_for_packing` 仍为 false。**
+### 绑定的实际官方语义
+
+实际使用的任务源码为：
+
+```text
+/home/zxc/CVPR_Evaluation/VLMExpert/third_party/SIMPLE/src/simple/tasks/g1_wholebody_locomotion_pick_between_tables_teleop.py
+```
+
+本批元数据中的 `actual_task_source_sha256` 为
+`fee537d56e134b0399ff147013438168601498ab9b3ee068658dcad5fb8ca521`，
+`actual_native_success_criteria=0.9`；筛选必须核对本条实际绑定，不能替换为镜像中另一阈值或推测的任务版本。
+任务依据原始容器接触判定和无手接触条件累积 reward，每次满足加 0.02，否则归零，
+`check_success` 比较累计 reward 是否达到 `.9`。容器判定沿用该源码的原始布尔表达式，
+不把更严格的理想容器几何另行冒充官方实现。
+
+当前实际 `SonicLocoManipEnv.step` 先调用 `compute_reward`，再调用 `check_success`，而后者又调用一次
+`compute_reward`，因此同一 50 Hz 步实际执行两次奖励更新；条件持续满足时每步累计 0.04，
+从零开始约 23 步就可达到 `.9`。**`.9` 是累计阈值，不能解释为额外要求持续 0.9 秒。**
+本轮不修改 SIMPLE 任务、奖励或环境源码，保留它们实际运行的语义。
+
+环境每步直接令 `_success=terminated`，并非一旦成功永久为真的 latch。
+官方 `cli/eval.py` 在 `terminated or truncated` 时退出，再读取 `_success`。
+遥操作为方便继续操作和保存，在某步 terminated 后仍可继续物理步进；因此
+`any(official_task_success)` 表示 **“曾达到官方终止成功”**，既不要求最终一帧仍为 true，
+也不声称官方环境具有 latch。每个样本必须是原始 bool，缺失或无效时不能用 truthy 值或补造 false 代替。
+
+### 技术完整性与旧记录重筛
+
+原始 capture 封存、文件身份与 SHA、30／50／200 Hz 时钟、状态有限性、原始外力等技术完整性继续验证。
+完整性异常须记录为技术证据不完整／技术失败并保留原件，不能冒充“官方任务未成功”；
+技术证据未知时，核定后的官方成功结果也保持未知。只有证据完整且原始 native 从未为 true，
+才能按官方任务未成功筛除。人工丢弃标记仍保留，不因改规则自动复活人工丢弃记录。
+
+本轮重筛保持原 **UUID 和编号**，将旧集合回执、旧索引／复核结果保存为 revision archive，
+然后以新版本记录重筛结果；原始录制、native 布尔、metadata 和旧证据不覆盖。
+已完成的后台 job 与 `EpisodeHistory.remember` 会返回旧缓存，不能仅重新 submit 就声称重筛完成；
+需显式更新新旧规则的回执和队列 completed／latest 结果。后台 Python worker 的导入也不会因磁盘改代码自动更新。
+
+规则更新不重启或改动 collector／SDK／控制循环；review worker 只允许在 **job 边界**轮换，不中断正在处理的 job。
+本次重筛与缓存刷新已完成，范围和异常分类见下面的实际回执；后续 collector 的 ENOSPC 自行退出单独留证，不能解释为规则更新停止了采集。
+
+**在新策略下，`kept` 表示官方 native 曾成功且技术完整性通过，`eligible_for_packing` 仍为 false。**
 它不表示 RTX 图像、完整独立审计、clean DINO、训练格式或生产读取已经通过。
 独立 CPU 后台复核完成后，launcher 只封存并报告 raw 证据，**不自动补图、不上传、不启动训练**。
 旧 `audit_pico_teleop_episode.py`、`finish_pico_session.py` 和固定 90 条 Handover 的准入／打包入口
 尚不支持本次 Mobile 任务，不能直接套用。完整 Mobile 独立 RTX／DINO 准入仍待实现和验收。
+
+### 001–026 的实际重筛结果
+
+本次显式冻结原编号 **001–026**，revision 为 `f35b782f-0bab-4910-85ce-c84de56e8d43`。
+CLI 重筛回执 `native_reselection_001/applied_receipt.json` 的 `status=committed`，
+`review_cache_refresh.refreshed=true` 且 `updated_results=26`。原 UUID 和编号保持，结果为：
+
+- **18 条 `selected`／`kept`**。其中 002、004、006、010、011、020、023 共 **7 条**由旧附加门的丢弃恢复为保留。
+- **003、015、017**：完整原始证据中官方 native 从未成功，状态 `official_task_not_successful`。
+- **001、016、025、026**：录制中断或原始 capture 不完整，状态 `technical_evidence_incomplete`／`technical_blocked`，官方核定结果未知，不能算任务失败。
+- **021**：原生成功，但已有独立的操作者丢弃意图，保留为 `operator_discarded`；不计质量失败，也不自动恢复。
+
+旧集合索引、journal 和每条旧回执保存在：
+
+```text
+/home/zxc/CVPR_Evaluation_runtime/mobile_pp_teleop_20261027/collection/
+  reclassification_archive/f35b782f-0bab-4910-85ce-c84de56e8d43/
+```
+
+重筛运行回执为
+`/home/zxc/CVPR_Evaluation_runtime/mobile_pp_teleop_20261027/native_reselection_001/applied_receipt.json`；
+完成 job、队列和页面摘要旧字节另在 `.pico_episode_review/reselections/同revision/` 留存，26 条新摘要已显式刷新。
+新 review worker PID3909051 使用 CPU31、nice19、隐藏 GPU，三个筛选源码 SHA 与 `mobile-native-task-success-v2` 匹配并已就绪；
+空闲后会按原机制正常退出，不把持久常驻当就绪要求。本轮 330 项 PICO CPU 与真实 Node 页面 JavaScript 路径验证通过，另有 2 项 CLI 验证通过。
+独立 `native_reselection_001/post_apply_verification.json` 已通过：
+**364 个原始文件、共 5,235,085,470 字节的 SHA 保持不变**，26 份旧集合回执 SHA 核对通过，
+原编号、UUID alias 与26个队列缓存的新分类／路径逐条对应，无 pending 事务。
+未封存第27次尝试的全部10个原有文件 SHA 也保持不变。CLI父侧2项实测通过（0.544秒），总验证为330＋2项。
+这些结果不把 `kept` 升为训练数据就绪，仍没有自动 RTX、DINO、上传或训练动作。
+
+### 磁盘写满与未封存尝试
+
+`live_human_004_cpu_isolated` 后续因 `/home` 写满而发生 `OSError: ENOSPC`，collector **自行退出**，
+43100 连接拒绝；本轮没有人为停止或重启它。第 27 次尝试 UUID
+`f0cdd5fa-3c2f-4791-9c25-79c96ae11d9e` 没有封存 `episode.json`，
+`capture_start_receipt.json`、`deferred_capture/capture.json` 和 `deferred_capture/states.npy` 为 0 字节。
+该原件完整保留在原 UUID 目录，**未正式编号，也不纳入冻结 001–026 或官方任务失败统计**；
+不能用已有零散 raw 行补造封存或宣称成功数据已可用。
+
+为恢复写入空间，只将 13 个既有 uv 旧 `.tmp` 缓存保留迁移到 `/tmp`，在原路径建立符号链接，释放约 **2.1GB**；
+没有删除采集数据。磁盘恢复不等于未封存尝试已恢复完整，也不代表 collector 已恢复运行。
 
 ## 连续 mode1 初版的实测结果与范围
 
@@ -196,7 +280,7 @@ live 输入验证门没有更改。没有把诊断工具技术失败当作数据
 当时浏览器显示“双臂持续跟随，无需B切换”，B 按钮隐藏，桌面与双手预览可见；该加载快照不代表后续无超时，
 也不是当前运行状态。003 的后续故障与本轮修订见下节。
 本轮短时空手结果与旧 v2 的 268 项 CPU 回归／9 秒 IDLE 诊断分开，后者不验证连续 mode1。
-真人的抓取、持物行走／转向、完整放置及独立 RTX／DINO 准入仍需各自实际验收，不能把短时入口检查称作完整任务就绪。
+真人示例的任务成功现按下文 native_only 新回执核定；上述合成空手诊断不能替代真人 native 记录，独立 RTX／DINO 准入另行验收。
 
 ## 异步 planner 超时与 CPU 分配修订
 
@@ -272,7 +356,7 @@ SONIC 预热、真实异步 CPU planner、MuJoCo EGL 预览，以及 30／50／2
 未完成抓放任务，结束时也未保存为成功示例，因此不计入真人数据或训练准入。
 该结果覆盖完整入口短时接线，不能证明人体模式切换、持物稳定或独立 RTX 训练图像质量。
 
-正式采集就绪仍需本次连续策略的实际 PICO 输入、真人抓取／持物转向／放置，以及独立 RTX 图像等验收。
+这些旧入口检查本身不包含真人任务成功；本批真人的任务选择按 native_only 重筛，独立 RTX 图像及训练数据准入仍需另行验收。
 本入口不改动或启动 A100 训练，后续训练数据交付另行审核。
 
 `gpu_mode_switch_diagnostic_004` 又完成 9 秒合成输入的实际入口往返切换：
@@ -329,7 +413,7 @@ deadzone 判定前的数值，最终控制意图见 `desired_command`。缺轴�
 `gpu_mode_switch_diagnostic_004` 仍只证明旧 v1 的 IDLE 切换 scope，不作为新版本证据。
 当时已有 268 项 PICO CPU 回归全部通过，包含实际页面 JavaScript 状态测试、
 越界参考原样送入 encoder、非有限参考拒绝、方向屏蔽和准备阶段提前推杆等待；没有跳过项目。
-完整真人持物、任务成功和 RTX／DINO 训练准入结论仍保持待验收。
+当时尚未核定真人任务成功或 RTX／DINO 训练准入；当前真人任务选择以 native_only 新回执为准。
 
 该次旧策略重启回执位于运行根 `restart_v2_001/RESTART_COMPLETE.json`：旧 `live_human_001`
 通过控制接口正常退出，原日志／故障证据保留，没有修改 PC 接收服务或 A100 任务。

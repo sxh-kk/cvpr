@@ -521,4 +521,10 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 实际fresh0及每完成1000步记录完整EVAL5／clean TRAIN probe5的FM loss；各组40窗采样body／hand L1单列。
 4k起每500步保存，共33份模型，最新2份完整恢复状态；原数据／DINO／统计与旧实验不变。
 新划分、路径、SHA、运行边界和命令见[95／5诊断协议](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#固定100条的95训练5验证与20k过拟合诊断)。
+本次实际A100 fresh0完整诊断及2／20优化步八卡健康门已通过，仍在20k训练中；
+完整验证FM基线5.494083、clean训练probe5.484605，尚不能判断过拟合。
+匹配初态入口用manifest／case／expected-training-split-SHA三参数；只取原capture row0，之后全新历史。
+已通过case0真实RTX零步首态／112mesh／43具名映射，未做完整策略闭环；001／002技术失败保留。
+新`prepare_mobile_pp95_eval5_eval.py`须等本次真实20k终验和备份收据后才准备4k／best／20k，
+从新联合权重严格导出Motion，保持原统计／DINO；当前只通过隔离CPU测试，未消费尚未产生的权重。
 另清理约3.2GB可重建的Omniverse编译纹理缓存，原始资源及采集数据未删；恢复时观测`/home`可用约338GB，不将全部容量变化归因于这次缓存清理。

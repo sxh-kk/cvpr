@@ -547,3 +547,69 @@ FM loss覆盖各自全部2,564／2,435窗口，按窗口数给micro、按episode
 本次应结合clean训练probe与Mobile验证曲线、早晚权重的同口径闭环表现判断；
 5条规模很小且来自同场景，若据其选择checkpoint，它们是validation，不是独立test或新场景泛化证明。
 训练启动／完成及实际过拟合结论须以新的运行回执为准，本节描述冻结协议，不宣称已经完成20k。
+
+### 本次实际启动与评测入口验收
+
+训练入口提交`3e412c68596eefb694e24bf869a9ba83039e9a11`已推送；
+实际A100根为`/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp95_eval5_20k_20261028/run_001`，
+其`training/posttrain/mobile_pp95_eval5_joint38000_statekeep_8gpu.us.flow1000.cosine.lr1.0e-05.b64.gpus8.261028073258`
+于UTC2026-10-28 07:36:26（北京时间15:36:26）启动。
+配置SHA为`8464d90a6a7fa4c3b303f7132ad5b6f9738dc171f43a9fb8d6980a0f39012468`。
+部署的训练wrapper／数据／指标helper封存在同父目录`launcher_001`，不随本地后续评测修改而变更。
+新95／5分区实际A100 CPU生产读取通过，完整原100的READY及数值审计复用，未重复验帧或提特征。
+
+实际fresh0诊断通过：EVAL完整2,564窗FM micro为5.494083136413101、episode macro为5.521463940963139；
+clean TRAIN probe完整2,435窗FM micro为5.484604628815544、episode macro为5.481355528428457。
+这些是训练前基线，不能拿它们与旧run末batch随机训练loss直接比较并判断过拟合。
+实际完成2、20优化步的8卡健康门均通过，每卡actions为8×30×80、每batch同步梯度，
+fused后端、全rank有限性与每个可训练tensor前4值的跨卡探针通过（每rank7,700值，不是全参数逐位一致性证明）。
+20步训练batch loss为5.131587028503418；训练进程均全CPU0–127／nice0，检查器自身CPU127／nice19且GPU隐藏。
+本地`STARTUP_AND_UPDATE20_ACCEPTANCE_001.json`的SHA为
+`df317137308dedc25c71d6684f4f0dbb2add9b32ba18d4a4b12a177c367f0e6a`，明确`training_completed=false`。
+此时没有4k后的checkpoint，20k完整训练、恢复状态终验与闭环成功率均未完成；后续状态不覆盖这份启动快照。
+
+匹配初态对照固定TRAIN probe case0–4／heldout case5–9，来源是本节已冻结的10个episode。
+`mobile_pp_initial_state.py`只读取已准入capture的NPY头及row0完整`mjSTATE_INTEGRATION`，
+首行SHA绑定原始admission→capture_start冻结回执；不读后续状态、真人动作、图像或旧controller历史。
+`run_closed_loop.py`使用显式`--mobile-initialization-manifest`、`--mobile-initialization-case`、
+`--expected-mobile-split-sha256`三参数，expected SHA必须来自当前模型本次95／5训练／部署收据，
+在创建环境前核对；新scene reset→一次恢复row0→先写回执→清空agent/server/RTC/controller→建立新历史。
+仍为native `.9`、1200步／24秒含warmup、不因跌倒提前停；matched诊断与旧官方固定case入口互斥，
+不将source初态对照称为原控制器正式benchmark。
+
+本地`matched_initialization.json` SHA为`20b0127bec5779b473fee82f86c464ee6d56c022fb7c5a940c356dc86a549eb1`。
+10个实际来源首行与MJB加载已通过；真实RTX零步检查001发现资源目录重定位，002发现采集canonical43与SIMPLE43观测顺序不同，
+两份技术失败原件保留，不计任务失败、不放宽物理门。
+Mobile专用模型比较保持所有非路径物理／几何／名称字段严格相等；仅在逐项112个mesh文件SHA与大小、引用顺序都一致后，
+允许4项路径存储字段变化，并限定MuJoCo3.3.6按64B对齐推导nbuffer差：源／新npaths9,721／9,163、buffer差−512。
+实际变化来自采集和评测data_root目录，非模型质量变化；共享`initial_physics_state.compare_models`不修改。
+具名关节要求43个唯一同名集合、逐名字joint id／qposadr／dofadr一致及实际值对应；
+返回names/value保持同序，沿用既有`state43_to45`具名转换，不改变训练canonical表示。
+
+真实4090／SIMPLE／Isaac观测同步零步003已通过：**仅matched case0／TRAIN来源31**，
+完整709维积分首态与来源逐值相等，时间均2.1049999999999773秒、advance0，fresh RGB为360×640×3；
+112个mesh身份和43关节映射均已持久化核准。
+回执`MATCHED_REAL_RTX_ZERO_STEP_003.json` SHA为
+`9ab0f7751c65b60165b3f75f9dbf2d1604c1add2ccd049845c2b4d029da06439`。
+这是一个环境的零步初始化验收，未运行策略，不代表10例完整闭环成功率。
+
+20k终验后，从有完整FM诊断且已保存的17份4k／5k／…／20k模型中，按heldout episode-macro FM最低、同分较早步数选择best；
+另外对照4k与20k，相同checkpoint仅测一次。保存的其它500步模型未经该FM评估，不声称33份全部已评分。
+新`prepare_mobile_pp95_eval5_eval.py`独立核验本次FINAL／BACKUP／TRAINING合同、真实终验SHA、
+33模型／21诊断／最新两份恢复状态、split和原始准备配置；不能套旧10000合同或使用已见过全部数据的旧参数。
+模型备份必须原子发布收据并核源before／after／local SHA，才可消费12GB权重；
+完整VLM／action严格CPU加载，Motion全部从选中的新联合权重导出，旧资源仅提供构造metadata。
+入口已通过15项隔离CPU测试与独立review；真实新权重部署仍须等待训练终验与备份，不能把这些测试称为已部署。
+
+后续CPU准备命令（`STEP`与`FINAL_SHA`须取实际终验）：
+
+```bash
+N=/home/zxc/CVPR_Evaluation_runtime/mobile_pp95_eval5_20k_20261028
+CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  taskset -c 24 nice -n 19 /home/zxc/miniconda3/envs/cvpr-simple-model311/bin/python \
+  scripts/4090_simple/prepare_mobile_pp95_eval5_eval.py --repo "$PWD" \
+  --source "$N/source/ckpt_$STEP" --output "$N/deployments/ckpt_$STEP" \
+  --resources /home/zxc/CVPR_Evaluation_runtime/resources \
+  --release /home/zxc/CVPR_Evaluation_runtime/pico_mobile_pp100_20261027_human01 \
+  --step "$STEP" --expected-final-acceptance-sha256 "$FINAL_SHA"
+```

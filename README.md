@@ -173,6 +173,7 @@ A100全部传输字节／文件身份、DINO路径重绑及300次实际CPU生产
 用户后续授权同一100条按完整episode固定95训练／5验证，从原joint38000 fresh训练20k，
 每1000步对比完整Mobile验证与clean训练probe，4k起每500步保存33份模型；
 新入口、隔离协议及实际记录见[95／5过拟合诊断](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#固定100条的95训练5验证与20k过拟合诊断)。
+实际A100 fresh0完整验证与2／20步八卡健康门已过；训练尚未结束，不能据此认定过拟合或报告新闭环成功率。
 按用户最新要求，Mobile以`native_only`／`mobile-native-task-success-v2`只筛实际保存的官方native成功，
 移除额外位移、抬升、持物、末段稳定／几何成功门；SHA、时钟、有限性、原始外力等技术完整性保留，异常不能冒充任务失败。
 实际任务绑定`.9`阈值与源码SHA；环境每步两次reward更新，官方eval遇terminated退出，所以`any(native)`表示曾达官方终止成功，环境并不latch。

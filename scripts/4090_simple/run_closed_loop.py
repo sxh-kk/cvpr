@@ -114,6 +114,36 @@ def mobile_time_limit(env):
     return gym.wrappers.TimeLimit(env, max_episode_steps=1200)
 
 
+def mobile_matched_protocol(initializer):
+    """Same native budget, with an explicit source-row-zero diagnostic scope."""
+    protocol = mobile_official_protocol(initializer.environment_config)
+    protocol.update(initialization="one admitted Mobile source row0 before new history; no teacher actions/images/future states",
+        boundary="matched source initial state with dual-source SONIC adaptation; not an official fixed-case benchmark",
+        initialization_case_index=initializer.receipt["case_index"],
+        source_episode_index=initializer.receipt["source_episode_index"],
+        source_human_demo_uuid=initializer.receipt["human_demo_uuid"],
+        experiment_role=initializer.receipt["role"], formal_evaluation_eligible=False)
+    return protocol
+
+
+def bind_mobile_training_split(initializer, expected_sha256):
+    """Bind evaluation roles to the actual current model's frozen train split."""
+    if initializer.receipt["split_manifest"]["sha256"] != expected_sha256:
+        raise ValueError("Mobile initialization split differs from the expected actual model training split")
+    initializer.receipt["expected_mobile_split_sha256"] = expected_sha256
+
+
+def reset_mobile_matched_episode(env, initializer, agent, episode_id, receipt_path=None):
+    """Reset static scene, restore once, then clear/start new causal history."""
+    env.reset(seed=initializer.seed, options=episode_reset_options(
+        deepcopy(initializer.environment_config), 0, recorded_mobile=True))
+    obs, info, receipt = initializer.restore(env.unwrapped)
+    if receipt_path is not None:
+        write_json(receipt_path, receipt)
+    agent.reset(episode_id=episode_id)
+    return obs, info, receipt
+
+
 def episode_termination(episode, terminated, truncated, sim_time, *, continue_after_success=False):
     if terminated:
         episode["task_success_observed"] = True
@@ -167,6 +197,12 @@ def parse_args():
                         help="Restore only row 0 of a same-task/same-seed run's complete physical state once, after exact model checks")
     parser.add_argument("--handover-initialization", type=Path,
                         help="Once before history: source-informed held-out Handover cold start; never teacher actions")
+    parser.add_argument("--mobile-initialization-manifest", type=Path,
+                        help="Mobile matched diagnostic: one admitted first integration state before new causal history")
+    parser.add_argument("--mobile-initialization-case", type=int, choices=range(10),
+                        help="Frozen manifest case0..4=train probes, case5..9=heldout; requires the manifest")
+    parser.add_argument("--expected-mobile-split-sha256",
+                        help="Required with Mobile initialization; take this SHA from the current model's actual95/5 training receipt")
     parser.add_argument("--warmup-control", choices=("measured_pose_pd", "live_pose_sonic_v1_1"),
                         default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
     parser.add_argument("--warmup-hand-policy", choices=("measured", "open"), default="measured",
@@ -204,6 +240,22 @@ def parse_args():
     if args.mobile_official_protocol and (args.tasks != [MOBILE_PP_TASK] or args.seconds < 24
             or args.stop_on_fall or args.worker_task not in (None, MOBILE_PP_TASK)):
         parser.error("--mobile-official-protocol requires only Mobile P&P, --seconds >=24 and no --stop-on-fall; TimeLimit remains1200 steps")
+    matched = args.mobile_initialization_manifest is not None
+    if matched != (args.mobile_initialization_case is not None) or matched != (args.expected_mobile_split_sha256 is not None):
+        parser.error("Mobile initialization requires manifest, case and --expected-mobile-split-sha256 from the current model training receipt")
+    if matched:
+        if (len(args.expected_mobile_split_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in args.expected_mobile_split_sha256)):
+            parser.error("Expected Mobile training split must be a lowercase SHA256")
+        if (args.tasks != [MOBILE_PP_TASK] or args.worker_task not in (None, MOBILE_PP_TASK)
+                or args.episodes_per_task != 1 or args.dr_level != 0 or args.seconds < 24 or args.stop_on_fall
+                or not args.sync_observations or not args.isaac_observation_only
+                or args.sim_mode == "mujoco" or args.mobile_official_protocol
+                or args.initial_physics_run is not None or args.handover_initialization is not None):
+            parser.error("Mobile matched initialization requires one Mobile DR0 episode, synchronized observation-only Isaac, >=24s/no fall stop, and no other initialization/official protocol")
+        if not args.mobile_initialization_manifest.is_absolute():
+            parser.error("Mobile initialization manifest must be absolute")
+        args.mobile_initialization_manifest = args.mobile_initialization_manifest.resolve(strict=True)
     if args.isaac_observation_only and (not args.sync_observations or args.sim_mode == "mujoco"):
         parser.error("--isaac-observation-only requires --sync-observations and Isaac render mode")
     if args.warmup_control == "live_pose_sonic_v1_1" and not args.sync_observations:
@@ -290,6 +342,11 @@ def run_worker(args):
                                      else "legacy_mj_step_derived_phase")
     if args.initial_physics_run is not None:
         result["initial_physics_run"] = str(args.initial_physics_run)
+    matched_manifest = getattr(args, "mobile_initialization_manifest", None)
+    if matched_manifest is not None:
+        result["mobile_initialization_manifest"] = str(matched_manifest)
+        result["mobile_initialization_case"] = args.mobile_initialization_case
+        result["expected_mobile_split_sha256"] = args.expected_mobile_split_sha256
     write_json(path, result)
     env, client = None, None
     try:
@@ -318,8 +375,16 @@ def run_worker(args):
             raise ValueError("Bounded synchronous smoke requires RTC disabled; restart the service with RTC off")
         result["initial_metadata_get_requests"] = 2
         metadata = args.data_root / "eval" / args.worker_task / f"dr-level-{args.dr_level}" / "meta/episodes.jsonl"
+        mobile_initializer = None
+        if matched_manifest is not None:
+            from mobile_pp_initial_state import load_initialization
+            mobile_initializer = load_initialization(matched_manifest, args.mobile_initialization_case)
+            bind_mobile_training_split(mobile_initializer, args.expected_mobile_split_sha256)
         carrybox = args.worker_task in (CARRYBOX_TASK, LIFTBOX_TASK)
-        if carrybox:
+        if mobile_initializer is not None:
+            first_config = deepcopy(mobile_initializer.environment_config)
+            result["mobile_protocol"] = mobile_matched_protocol(mobile_initializer)
+        elif carrybox:
             if args.dr_level != 0:
                 raise ValueError("CarryBox local v1 supports DR level 0 only")
             first_config = {"metadata": {"physics_dt": .005}}
@@ -337,7 +402,7 @@ def run_worker(args):
                        headless=True, dr_level=args.dr_level,
                        sync_mujoco_observations=args.sync_observations,
                        isaac_observation_only=args.isaac_observation_only)
-        if args.mobile_official_protocol:
+        if args.mobile_official_protocol or mobile_initializer is not None:
             env = mobile_time_limit(env)
         raw = env.unwrapped
         result["render_contract"] = simulation_render_contract(raw,args)
@@ -354,8 +419,24 @@ def run_worker(args):
                                    body_token_projection=args.body_token_projection)
         result["body_token_projection"] = deepcopy(agent.projection_receipt)
         for episode_index in range(args.episode_start, args.episode_start + args.episodes_per_task):
+            episode_id = f"{args.worker_task}:dr{args.dr_level}:episode{episode_index}:{uuid.uuid4().hex}"
+            episode_dir = task_dir / f"episode-{episode_index}"
+            episode_dir.mkdir(exist_ok=True)
+            event_start = len(client.events)
+            mobile_initial = None
             seed = args.seed + episode_index - args.episode_start if carrybox else args.seed
-            if carrybox:
+            if mobile_initializer is not None:
+                seed = mobile_initializer.seed
+                env_config = deepcopy(mobile_initializer.environment_config)
+                protocol = mobile_matched_protocol(mobile_initializer)
+                obs, info, mobile_initial = reset_mobile_matched_episode(env, mobile_initializer, agent, episode_id,
+                    episode_dir / "mobile_initialization_receipt.json")
+                source_episode = {"kind": "frozen_mobile_first_state_only",
+                    "source_episode_index": mobile_initial["source_episode_index"],
+                    "human_demo_uuid": mobile_initial["human_demo_uuid"], "experiment_role": mobile_initial["role"],
+                    "initialization_case_index": mobile_initial["case_index"],
+                    "initialization_manifest_sha256": mobile_initial["manifest_sha256"]}
+            elif carrybox:
                 obs, info = env.reset(seed=seed)
                 env_config = deepcopy(raw.task.state_dict())
                 source_episode = {"kind": "independent_local_seed", "seed": seed,
@@ -381,15 +462,13 @@ def run_worker(args):
                     task_id="simple/" + args.worker_task, seed=seed)
                 result["initial_physics_source"] = initializer.receipt
                 obs, info, initial_physics = initializer.restore(raw)
-            episode_id = f"{args.worker_task}:dr{args.dr_level}:episode{episode_index}:{uuid.uuid4().hex}"
-            episode_dir = task_dir / f"episode-{episode_index}"
-            episode_dir.mkdir(exist_ok=True)
-            event_start = len(client.events)
-            agent.reset(episode_id=episode_id)
+            if mobile_initial is None:
+                agent.reset(episode_id=episode_id)
             episode = {"episode_id": episode_id, "episode_index": episode_index, "seed": seed,
                 "dr_level": args.dr_level, "source_episode": source_episode,
                 "local_environment_config": env_config,
-                "source_metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest() if not carrybox else None,
+                "source_metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest()
+                    if not carrybox and mobile_initial is None else None,
                 "physics_dt_s": float(raw.mujoco.mjModel.opt.timestep),
                 "render_hz": float(raw.task.render_hz), "action_fps": ACTION_FPS,
                 "sonic_decoder_hz": 50, "execute_steps": args.execute_steps,
@@ -401,8 +480,13 @@ def run_worker(args):
                 "status": "running", "instruction": raw.task.instruction}
             episode["source_scene_reset_dr_level"] = (None if args.handover_initialization is not None
                 or args.worker_task == MOBILE_PP_TASK else args.dr_level)
-            if args.mobile_official_protocol:
+            if args.mobile_official_protocol or mobile_initial is not None:
                 episode["mobile_protocol"] = protocol
+            if mobile_initial is not None:
+                receipt_path = episode_dir / "mobile_initialization_receipt.json"
+                episode["mobile_initialization"] = mobile_initial
+                episode["mobile_initialization_receipt"] = str(receipt_path)
+                episode["local_environment_config_scope"] = "static saved scene; actual first physical state is the admitted row0 initialization receipt"
             if initial_physics is not None:
                 episode["initial_physics"] = initial_physics
                 episode["local_environment_config_scope"] = "same-seed reset model; actual initial coordinates/velocities are in initial_physics"

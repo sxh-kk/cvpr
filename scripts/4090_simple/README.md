@@ -462,10 +462,11 @@ joint38000仅模型初始化、fresh step0、8卡×batch8／全局64、10,000步
 4,000／4,500／…／10,000保存13份模型，完整恢复状态保留2份，validation仍1,000；
 旧Handover5条40固定窗口仅回归监控，Mobile100全部train_only，无Mobile验证成绩。
 入口已通过独立review及38项CPU回归并单独部署；首轮root盘容量门在GPU前拦截，原prepared与错误回执保留，未记数据拒收或GPU训练失败。
-同一代码／数值配置的数据盘独立`run_001`已通过prepare／CPU check，于10月28日00:46:39实际启动8卡训练，前2／20步GPU健康检查通过。
-实际每卡8×30×80、梯度每batch同步，loss／clip前梯度有限；每可训练张量4值共每rank7700探针一致，不能称全参数逐位或全程验收。
-健康回执时尚无checkpoint，符合首4000步保存；完整10,000步与13份保存尚未完成。实际CLI、参考SHA与状态见
-[Mobile实际训练](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练已启动完整训练待完成)。
+同一代码／数值配置的数据盘独立`run_001`于10月28日00:46:39启动，08:02:16完成10,000步／returncode0，13份模型全部保存，末步GPU健康检查通过。
+实际每卡8×30×80、梯度每batch同步；末batch训练loss0.4521014392375946，历史Handover回归loss10.945638656616211，不是Mobile验证。
+00:54前20步回执的‘无checkpoint／未完成’保留为历史快照；最终13份模型身份及9500／10000完整恢复状态CPU验收已通过，
+涵盖model／Adam moments有限性、稀疏step、scheduler8N与8rank RNG，不宣称GPU恢复训练或任务成功率。实际结果见
+[Mobile完整训练与验收](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练完整训练结果与验收)。
 
 Mobile 本轮针对 `planner_request_expired_no_reference` 修订 CPU 分配与故障诊断。
 旧003的四次超时与16:57:51–16:58:36后台review区间重叠，planner和review同用CPU31/nice19，

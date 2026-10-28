@@ -8,7 +8,8 @@
 **本批 A100 数据交付已完成：固定 100／100 条完成原积分状态 RTX、10 阶段独立审计、无损转换、真实 clean DINO，
 共 61,806 帧、55,906 个训练窗口；本机和 A100 分别通过 300 次实际 CPU 生产查询。**
 初次上传的全部文件身份核对、远端 DINO 路径重绑及最终就绪收据回读均已通过，详见下文实际 A100 交付记录。
-数据验收与用户随后授权的新训练分别记录，不以数据交付完成宣称训练已启动。
+用户随后授权的独立8卡训练已完成10,000步并保存全部13份模型，末步GPU健康检查通过；
+最终9500／10000完整恢复状态的CPU验收和精确离线指标解析也已实际通过。
 旧 Handover 固定 90 条的交付见[原交付记录](PICO_DATASET_ADMISSION.md)，其清单、合同和远端目录不用于本批。
 采集操作、场景与官方成功语义见[Mobile P&P 采集说明](PICO_MOBILE_PP_TELEOP.md)。
 
@@ -84,7 +85,7 @@ selection_policy = native_only
 
 这些入口只在采集器、自动后处理和其他 GPU 计算退出后进入 GPU 阶段；资源等待不算数据失败。
 不停止、重启或修改其他进程。数据交付流程本身不修改或启动 A100 训练；
-用户后续授权的独立训练另见[训练准备与实际启动](#用户后续授权的独立训练已启动完整训练待完成)。
+用户后续授权的独立训练另见[完整训练结果与验收](#用户后续授权的独立训练完整训练结果与验收)。
 
 ## 独立合同与远端就绪
 
@@ -193,7 +194,7 @@ float32 存储和 bf16 推理身份，`extraction.training=false`，没有在线
 描述**这次 CPU 数据验收事件**；不否认之前的 RTX／DINO GPU 计算，也不禁止用户随后授权的新训练。
 本次数据交付没有修改旧训练或旧数据。所有运行数据、日志、资源与权重均保存在仓库外。
 
-## 用户后续授权的独立训练：已启动，完整训练待完成
+## 用户后续授权的独立训练：完整训练结果与验收
 
 用户最新要求：**等本批上传和 A100 实际生产就绪验收全部通过后，沿用上次 Handover114 的实际配置
 训练一次，从 4,000 步开始每 500 步保存模型。** 数据交付与实际 A100 READY 现已完成；新训练入口
@@ -204,7 +205,8 @@ float32 存储和 bf16 推理身份，`extraction.training=false`，没有在线
 该次未启动 GPU；第二次准备改用数据盘独立目录
 `/gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_mobile_pp100_training_20261027/run_001`，
 已通过 prepare、CPU check，并于北京时间 **2026-10-28 00:46:39**实际启动8卡训练。
-前2／20步GPU健康检查已通过，10,000步完整训练及13次保存仍待完成，详见本节末的实际启动记录。
+该唯一run已于北京时间 **10月28日08:02:16**完成10,000步并正常退出，13份模型均已保存，10000步GPU健康检查通过；
+最终完整恢复状态CPU验收及离线指标回执均为 `passed`，详见本节末的结果与验收范围。
 不复用旧 Handover run，也不向数据交付清单中加入训练产物。
 
 本地已只读归档上次配置、实际 resolved config、启动记录及源码原字节，位于：
@@ -257,13 +259,13 @@ float32 存储和 bf16 推理身份，`extraction.training=false`，没有在线
 随后只读检查数据盘可用 `6,998,150,086,656` 字节，新 `run_001` 当时尚不存在。
 第二次 prepare／CPU check 已在上述数据盘新目录通过，仍为入口提交 `3e7aa6ce507a0103afd88caf107ce71dbc881e02`，
 仅改变独立输出及其 data 绑定路径，初始化、训练数值配置与13个保存节点不变。
-这次数据盘训练随后已启动并通过前20步健康检查；13份模型的实际保存尚未完成。
+这次数据盘训练随后已完成10,000步，全部13份模型已保存；容量门的首轮技术尝试记录继续保留。
 
 下面是本次已执行入口及绑定的**等价历史命令记录，不是待操作模板**。
-**`run_001` 已存在且运行中，不对当前 run 再次 prepare、run 或 launch。**
+**`run_001` 已完成训练，不对这个既有 run 再次 prepare、run 或 launch。**
 原字节参考位于已部署入口快照的 `reference/`，最终远端收据 SHA 已明确写入。
 `training100_001/REMOTE_CPU_SCOPE_001.json` 记录普通训练会话完整允许 CPU 为 `0-127`，
-此次只读检查自身则为 CPU127／nice19／GPU隐藏；命令中的 `--training-cpus 0-127` 声明以后实际训练的范围，
+当时只读检查自身则为 CPU127／nice19／GPU隐藏；命令中的 `--training-cpus 0-127` 声明实际训练的范围，
 不是让 CPU 准备进程占用全部 CPU。
 
 ```bash
@@ -316,18 +318,67 @@ torchrun PID为 `1581879`，launcher PID为 `1581769`；实际使用CPU0-127、n
 实际初始化回执确认 joint38000 严格模型加载、fresh optimizer／scheduler／RNG、global batch64、
 fused AdamW／`foreach=false`；8个rank的状态策略迁移回执均为 `passed`。
 
-`TRAINING_STATUS_LATEST.json` 与 `TRAINING_HEALTH_ACCEPTANCE_002.json` 记录：
+历史 `TRAINING_HEALTH_ACCEPTANCE_002.json` 及其绑定的当时状态快照记录：
 
 - 2步和20步GPU健康检查均通过，每卡实际动作形状 `8×30×80`，8个rank每个batch均同步梯度更新。
 - 各卡loss及clip前梯度有限，fused优化器及内存健康检查通过；
   每个可训练张量抽4值、每rank共7,700个探针，跨rank一致。
 - 该证据是**前20步的有界探针检查**，不表示全部参数逐位一致、全程训练通过或任务准确率。
 - 健康回执生成时为北京时间 **00:54:06**，尚无checkpoint，符合首个模型在4,000步保存的策略；
-  `all13_checkpoints_verified=false`，10,000步完整训练与13份模型保存尚未完成。
+  `all13_checkpoints_verified=false`、完整训练与13份保存尚未完成，均是**当时**的pending事实，不能继续当作当前状态。
 
 健康回执 SHA 为 `b24f3657e1ee20b01a7e67b30f5ee82a49771adf7ea76d4eb1e69a07ee63c292`。
 这些是已发生的启动与短时健康记录，不将其作为之后训练状态持续不变的保证。
 
-本线程已安排 `mobile100-a100` 每小时继续核对这个现有 run，正常状态不发送更新。
-完整10,000步、全部13份模型、最近2份完整恢复状态及最终health均验收后，停止该后续检查；
-`CONTINUATION_MONITOR.json` 记录此范围，目前不把后续验收安排当作整轮训练已完成。
+### 完整训练、13份保存与精确离线指标
+
+`FINAL_STATUS_PRECHECK_001.json` 和更新后的 `TRAINING_STATUS_LATEST.json` 已确认唯一run为
+`state=complete`、`returncode=0`。UTC启动时间为 `2026-10-27T16:46:39.202102Z`，
+结束时间为 `2026-10-28T00:02:16.369598Z`，即北京时间00:46:39至08:02:16，耗时约7小时15分37秒。
+所有4,000／4,500／…／10,000共13份模型已保存，保留记录中的完整恢复点为9,500和10,000。
+10000步GPU健康回执为 `passed`，末步各优化器组LR均为0；
+loss、clip前梯度、fused优化器及内存健康和跨rank的7,700个有界探针均通过。
+这些检查不表示全参数跨rank逐位相等，也不等同于任务成功率或GPU恢复训练测试。
+
+`offline_monitor/METRICS_ACCEPTANCE_001.json` 的 `status=passed`，只读解析
+`run-nn7ebojc.wandb` 的10,000条history、11次eval和exit0记录，原文件26,439,494字节、CRC及读取前后身份检查通过。
+W&B step采用零基：`step=9999`对应已完成10,000次更新，准确指标为：
+
+- 最后一个训练batch的 `train/loss=0.4521014392375946`，不是整轮平均loss。
+- 历史Handover固定5条／40窗最终 `eval/loss=10.945638656616211`，
+  normalized body-token L1=`0.12158753722906113`、hand-joint L1=`0.23109500110149384`。
+- 首次回归eval为 `8.88845157623291`（完成1次更新）；最低为 `8.308838844299316`（完成1,001次更新），
+  此后最终回归loss升高。eval记录在W&B step0、1000、…、9000及9999，不能把step1000写成仅完成1000次更新。
+
+以上eval始终是**历史Handover回归监控**，不是Mobile验证集、Mobile泛化成绩或物理成功率。
+指标回执SHA为 `a74f99e79e8c65a95fab708fa19625fda35766dc04c3a226f3c630f9e0011437`，
+原离线文件SHA为 `fec18eb14a6b5f136b49b220ecc86d1cb12d215070a409142b6b803b6573e062`。
+
+### 最终模型与完整恢复状态CPU验收通过
+
+`training100_001/FINAL_TRAINING_ACCEPTANCE_001.json` 已实际生成，`status=passed`，
+验收时间为北京时间 **10月28日08:09:32**（UTC `2026-10-28T00:09:32.049760Z`），
+SHA为 `d1fea82b176d5ef4eab4df28cdec2ab2b150fb7eabf4cbfe76112616f8702e50`。
+该回执绑定已结束的唯一run、配置、保留策略、末步GPU健康记录及下列文件验收：
+
+- **13份模型身份全部通过。** 前12份复用先前已核SHA且stat身份未变的收据，仅补算10,000步模型SHA；
+  验收各模型头部、大小及稳定文件身份，不把复用收据写成重新扫描了全部13份权重。
+- **9500／10000两个完整恢复点通过。** 两个model的所有张量、Adam一阶／二阶moment全部有限，
+  二阶moment非负，5组优化器recipe核对通过；各恢复点的optimizer、scheduler及8个rank RNG文件均核对完整SHA和稳定身份。
+- Adam按参数实际梯度参与保留稀疏计数，9500／10000的已初始化state均为1,784份，
+  counter范围分别为1–9500和1–10000，合法性及跨恢复点转移通过；不错误要求每个参数的Adam step都等于全局N。
+- 8卡实际scheduler采用 `last_epoch=8N`：9500步为76,000、10000步为80,000，
+  `_step_count` 分别为76,001和80,001；这不是80,000次optimizer更新，末恢复点5组LR均为0。
+- 两点均具备rank0–7共8份RNG文件，CPU／CUDA RNG保存结构检查通过。
+  验收进程隐藏GPU、nice19、仅CPU127，`CUDA_initialized=false`；没有恢复CUDA RNG或重启GPU训练来证明恢复运行。
+
+最新权重位于上述project的 `checkpoints/ckpt_10000/model.safetensors`，
+大小为 **12,066,487,572字节**，SHA为
+`9b1ea759ef3aedcc7697d62f6ff36deb12dcc2e379cce61c6ca904e80826b390`。
+最终结论为10,000步正常完成、13份模型及最近2份完整恢复状态通过已声明范围的验收；
+它不表示GPU恢复训练已实测、任务成功率已通过或全参数跨rank逐位相等。
+历史Handover回归loss后期升高的事实和“没有Mobile验证集成绩”的边界仍保留。
+
+独立最终review无阻断，记录为 `training100_001/FINAL_REVIEW_001.json`，
+SHA为 `020ec95da0dfd4adb2eb6402bf40b0c42d8119e206ba70d2079054f85e54c567`。
+本批最终验收已完成，该run后续检查即将停止；执行状态见 `CONTINUATION_MONITOR.json`。

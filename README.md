@@ -162,8 +162,10 @@ A100全部传输字节／文件身份、DINO路径重绑及300次实际CPU生产
 用户已授权在实际A100 READY后另开独立训练：沿用Handover114的joint38000模型初始化／fresh step0，
 8卡×batch8、10,000步、bf16／fused AdamW，4,000起每500步保存13份模型、保留2份完整恢复状态，验证间隔仍1,000。
 旧Handover5条40窗口只作回归监控，Mobile100全部train_only，没有Mobile验证集成绩；新入口通过38项CPU回归与独立review并单独部署，
-首轮root盘容量门在GPU前拦截，证据保留。数据盘独立`run_001`已于10月28日00:46:39实际启动8卡训练，前2／20步有限loss／梯度及有界跨rank探针检查通过；
-完整10,000步与13份保存尚未完成，详见[Mobile实际训练](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练已启动完整训练待完成)。
+首轮root盘容量门在GPU前拦截，证据保留。数据盘独立`run_001`于10月28日00:46:39至08:02:16完成10,000步／returncode0，13份模型保存及末步GPU健康检查通过；
+末batch训练loss0.4521014392375946，历史Handover回归loss10.945638656616211（不是Mobile验证，且后期升高）。
+13份模型及9500／10000完整恢复状态CPU最终验收通过，未做GPU恢复训练或任务成功率验收，
+详见[Mobile完整训练与验收](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练完整训练结果与验收)。
 按用户最新要求，Mobile以`native_only`／`mobile-native-task-success-v2`只筛实际保存的官方native成功，
 移除额外位移、抬升、持物、末段稳定／几何成功门；SHA、时钟、有限性、原始外力等技术完整性保留，异常不能冒充任务失败。
 实际任务绑定`.9`阈值与源码SHA；环境每步两次reward更新，官方eval遇terminated退出，所以`any(native)`表示曾达官方终止成功，环境并不latch。

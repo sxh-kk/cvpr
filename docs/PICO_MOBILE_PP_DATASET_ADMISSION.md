@@ -511,3 +511,39 @@ SHA为 `4fda8a18fc6a1361de712627803bb360bc2be8d3265291cf37290534189b3674`。
 48项CPU检查与真实GPU运行均已完成，未重复已经验收的数据数值审计。
 这份结果仍受上述控制器适配与同场景／重合初态边界约束，不宣称正式原控制器benchmark成绩、
 新场景泛化或Mobile验证集loss；也不改变既有训练验收和数据准入记录。
+
+## 固定100条的95训练／5验证与20k过拟合诊断
+
+用户随后授权把同一冻结100条Mobile按完整episode改作本次实验的95 TRAIN／5 EVAL，训练20,000个优化步。
+原归档的`train_only`元数据、READY、原始数据、clean DINO、继承统计及旧100条训练全部保留；
+这是新run的显式角色覆盖，不重写旧准入合同、不追加后来采集的样本。
+旧Mobile100 task-step10000已见过全部100条，不能用它初始化新的5条验证；
+本实验仅从原始joint38000模型权重开始，task step0与optimizer／scheduler／RNG均fresh。
+
+`mobile_pp_holdout_data.py`按`sha256(UTF8('42:'+UUID))`升序冻结顺序，前5条EVAL、次5条作为TRAIN内的clean probe；
+所有划分按完整来源UUID／lineage与原始窗口核对无交叉，不参考模型成绩选择episode。
+EVAL原索引为48、56、60、64、80，共2,859帧／2,564完整窗口；
+TRAIN为其余95条，共58,947帧／53,342窗口。
+TRAIN probe原索引31、66、67、74、98，共2,435窗口，属于TRAIN，不能当成独立验证。
+冻结split SHA为`0d87f6ae5634d07e312cfef51fa9e23e37ba70500b9ad69c4a577011457f8ac9`；
+本地实验记录根目录为`/home/zxc/CVPR_Evaluation_runtime/mobile_pp95_eval5_20k_20261028`。
+
+新入口`a100_mobile_pp95_eval5.py`与旧100条入口隔离，仅复用原实配的只读纯helper／固定生产源码。
+保持8卡×每卡8／全局64、bf16、fused AdamW、原LR组、warmup1000、statekeep与VLM颜色增强／Motion clean DINO策略；
+把最大优化步改为20,000，余弦scheduler随新总预算计算。
+从4,000到20,000每500步保存模型，共33份；仅此新run内旧optimizer／scheduler／RNG可裁到最新两份，末次应为19,500与20,000。
+prepare/check必须隐藏GPU；训练必须单独普通SSH、全CPU0–127／nice0，不能从CPU127／nice19检查器继承训练亲和性。
+复用已经通过的数据数值验收，只检验当前文件身份、小metadata SHA、新划分及代表性生产读取；不声称重新完整扫描大payload。
+
+过拟合诊断在真实fresh step0及完成1,000、2,000、…、20,000步后执行，关闭旧生产loop的偏移验证触发。
+EVAL5与TRAIN probe5使用同一个`val/no_aug` clean生产reader，固定与checkpoint无关的评估随机数；
+FM loss覆盖各自全部2,564／2,435窗口，按窗口数给micro、按episode给macro；
+采样生成的归一化body64／hand14 L1各取每episode固定8窗、每组40窗，明确排除末两维padding。
+不把40窗采样L1写成完整验证集L1，也不将不同长度episode的无权batch均值称为全窗口均值。
+8rank按`rows[rank::world]`无填充分片，末尾统一SUM，保存并恢复Py／NumPy／Torch CPU及本rank GPU随机状态和所有子模块train/eval标志。
+每个诊断保存独立JSON及曲线JSONL，绑定split SHA和已完成优化步。
+
+首轮0/10不足以单独证明过拟合：case2／3／4／9在首次学习策略命令前已发生目标显著偏移，case0则到时限后段才放手。
+本次应结合clean训练probe与Mobile验证曲线、早晚权重的同口径闭环表现判断；
+5条规模很小且来自同场景，若据其选择checkpoint，它们是validation，不是独立test或新场景泛化证明。
+训练启动／完成及实际过拟合结论须以新的运行回执为准，本节描述冻结协议，不宣称已经完成20k。

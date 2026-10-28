@@ -515,4 +515,10 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 用户随后明确要求恢复，已启动新目录`collection/live_human_005_native_only`，未复用旧标定或覆盖原件；
 恢复时页面已刷新，实测有效全身追踪、following、无error、相机ready；后来采够100条后已正常退出转处理。
 启动源码SHA与native v2后台一致，planner CPU29、preview CPU30、review CPU31保持；回执为`restore_collection_005/RESTORE_COMPLETE.json`。
+
+后续95／5过拟合实验使用独立`a100_mobile_pp95_eval5.py`与冻结完整episode split，
+从原joint38000 fresh step0训练20k，不能从已见过全部100条的Mobile100权重开始。
+实际fresh0及每完成1000步记录完整EVAL5／clean TRAIN probe5的FM loss；各组40窗采样body／hand L1单列。
+4k起每500步保存，共33份模型，最新2份完整恢复状态；原数据／DINO／统计与旧实验不变。
+新划分、路径、SHA、运行边界和命令见[95／5诊断协议](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#固定100条的95训练5验证与20k过拟合诊断)。
 另清理约3.2GB可重建的Omniverse编译纹理缓存，原始资源及采集数据未删；恢复时观测`/home`可用约338GB，不将全部容量变化归因于这次缓存清理。

@@ -319,6 +319,97 @@ assert.ok(element('#mobile-status').textContent.includes('上身保持'));
         self.assertEqual(self.post("discard")[0], 202)
         self.assertEqual(self.ui.commands(), ["discard"])
 
+    def test_mobile_initialization_review_complete_and_error_lock_start_intentions(self):
+        progress = {"total": 99, "accepted_count": 0, "current_position": 1,
+            "current_official_episode_index": 0, "status": "ready", "pending_uuid": None, "error": None}
+        self.ui.update({"status": "paused", "mobile_collection_progress": progress})
+        locked = ["calibrate", "follow", "record", "reset", "toggle_navigation"]
+        retained = ["pause", "discard", "save", "quit"]
+        for command in locked + retained:
+            self.assertEqual(self.post(command)[0], 202)
+        progress["status"] = "awaiting_review"
+        self.ui.update({"status": "paused", "mobile_collection_progress": progress})
+        self.assertEqual(self.ui.commands(), retained)
+        for state in ("awaiting_review", "complete", "error"):
+            self.ui.update({"status": "paused", "mobile_collection_progress": {**progress, "status": state}})
+            for command in locked:
+                self.assertEqual(self.post(command)[0], 503, (state, command))
+            for command in retained:
+                self.assertEqual(self.post(command)[0], 202, (state, command))
+            self.assertEqual(self.ui.commands(), retained)
+        self.ui.update({"status": "saving", "mobile_collection_progress": progress})
+        self.assertEqual(self.post("save")[0], 503)  # Preserve the existing save/busy gate.
+        self.assertEqual(self.post("pause")[0], 503)
+        self.assertEqual(self.post("quit")[0], 202)
+        self.assertEqual(self.ui.commands(), ["quit"])
+        self.ui.update({"status": "paused", "mobile_collection_progress": {**progress, "status": "ready"}})
+        self.assertEqual(self.post("follow")[0], 202)
+        self.assertEqual(self.ui.commands(), ["follow"])
+        self.ui.update({"status": "paused"})
+        self.assertEqual(self.post("record")[0], 202)  # Legacy sessions have no new gate.
+
+    def test_frontend_mobile_initialization_progress_locks_and_late_command_response(self):
+        node = os.environ.get("PICO_UI_TEST_NODE") or shutil.which("node")
+        if node is None:
+            self.skipTest("Node is needed to execute the actual page state handlers")
+        version = subprocess.run([node, "--version"], text=True, capture_output=True, timeout=3)
+        if version.returncode or int(version.stdout.strip().lstrip("v").split(".", 1)[0]) < 18:
+            self.skipTest("Node 18+ is needed for the page's modern browser syntax")
+        script = _PAGE.split("<script>", 1)[1].split("</script>", 1)[0]
+        runner = r"""
+const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
+const elements=new Map(),commands=JSON.parse(process.argv[1]);let finishCommand=null;
+function element(name){if(!elements.has(name))elements.set(name,{hidden:true,textContent:'',disabled:false,
+ src:name==='#camera'?'/stream.mjpg':undefined,listeners:{},dataset:{},replaceChildren(){},appendChild(){},
+ removeAttribute(key){delete this[key];},getAttribute(key){return this[key]??null;},
+ addEventListener(kind,fn){this.listeners[kind]=fn;}});return elements.get(name);}
+const buttons=commands.map(command=>{const b=element('button[data-command="'+command+'"]');b.dataset.command=command;return b;});
+const context={document:{querySelector:element,querySelectorAll:()=>buttons,createElement:()=>({})},
+ setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>{},snapshot:{status:{status:'paused'},image_available:false,image_version:0},
+ fetch:async(url)=>url==='/command'?new Promise(resolve=>{finishCommand=resolve;}):({ok:true,json:async()=>context.snapshot})};
+vm.createContext(context);vm.runInContext(fs.readFileSync(0,'utf8'),context);
+const button=command=>element('button[data-command="'+command+'"]');
+const progress={total:99,accepted_count:0,current_position:1,current_official_episode_index:0,status:'ready',pending_uuid:null,error:null};
+async function refresh(p,extra={}){context.snapshot={status:{status:'paused',collection_task_profile:'mobile_pp',
+ mobile_collection_progress:p,last_episode:{uuid:'sealed',pending:true},...extra},image_available:false,image_version:0};
+ await vm.runInContext('refresh()',context);}
+(async()=>{await new Promise(setImmediate);
+await refresh(progress);
+assert.equal(element('#mobile-collection-progress').hidden,false);
+assert.equal(element('#mobile-collection-progress').textContent,'第1/99份，官方TRAIN episode000；已完成0/99');
+for(const command of ['calibrate','follow','record','reset'])assert.equal(button(command).disabled,false);
+await refresh({...progress,status:'awaiting_review',pending_uuid:'sealed'});
+assert.ok(element('#mobile-collection-progress').textContent.includes('等待复核'));
+assert.equal(element('#phase').textContent,'等待复核');
+for(const command of ['calibrate','follow','record','reset','toggle_navigation'])assert.equal(button(command).disabled,true);
+for(const command of ['pause','discard','quit','save'])assert.equal(button(command).disabled,false);
+await refresh({...progress,status:'complete',accepted_count:99,current_position:null,current_official_episode_index:null});
+assert.equal(element('#mobile-collection-progress').textContent,'已完成99/99份官方TRAIN初始化采集');
+assert.equal(element('#phase').textContent,'初始化采集已完成');
+assert.equal(button('follow').disabled,true);assert.equal(button('record').disabled,true);
+await refresh({...progress,status:'error',error:'磁盘写入失败'});
+assert.ok(element('#mobile-collection-progress').textContent.includes('已暂停：技术错误'));
+assert.equal(element('#error').textContent,'磁盘写入失败');
+assert.equal(element('#phase').textContent,'技术错误，已暂停');assert.equal(button('reset').disabled,true);
+await refresh({...progress,status:'awaiting_review'},{status:'saving'});
+for(const b of buttons)assert.equal(b.disabled,true); // Existing save/busy behavior stays in force.
+await refresh(progress);
+const pending=button('calibrate').listeners.click();
+assert.equal(button('calibrate').disabled,true);
+await refresh(progress);assert.equal(button('calibrate').disabled,true); // A poll cannot reopen an in-flight command.
+await refresh({...progress,status:'awaiting_review'});
+finishCommand({ok:true,json:async()=>({queued:'calibrate'})});await pending;
+assert.equal(button('calibrate').disabled,true); // An older response cannot undo the review lock.
+await refresh(progress);assert.equal(button('calibrate').disabled,false);
+await refresh(null,{collection_task_profile:'handover',last_episode:null});
+assert.equal(element('#mobile-collection-progress').hidden,true);
+assert.equal(button('record').disabled,false);assert.equal(button('discard').disabled,true);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run([node, "-e", runner, json.dumps(sorted(COMMANDS))], input=script,
+            text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def open_stream(self):
         client = http.client.HTTPConnection(self.address.hostname, self.address.port, timeout=3)
         client.request("GET", "/stream.mjpg")

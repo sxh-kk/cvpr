@@ -148,6 +148,8 @@ PICO 4 双手柄与脚踝定位器通过本机 SONIC v1.1 操控 SIMPLE G1，独
 
 
 SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](docs/PICO_MOBILE_PP_TELEOP.md)：
+2026-10-28新一轮用`start_pico_mobile_pp_official99.sh`逐条采集官方TRAIN的99份不同初始化，成功原始物理复核后推进，失败同配置重试；
+页面显示官方episode和进度并可恢复。旧100条是同一TRAIN0初始化下的独立轨迹，旧固定配置入口仅保留复现；新采集与正在运行的95／5实验独立。
 本轮默认 `--mobile-control-policy continuous_vr_mode1`，左杆前进／右杆转向，双臂 Body22／23 与 neck12
 持续实时跟随，手指独立；取消 B、移动时上身锁定及 3 厘米返回门。腕 tip／颈部按当前实测机器人 FK 标定，
 三点参考通过同 tick 当前实际 root 的完整平移／旋转运输。200Hz真实物理、50Hz控制参考、30Hz新token／手指命令及技术完整性验证保持。

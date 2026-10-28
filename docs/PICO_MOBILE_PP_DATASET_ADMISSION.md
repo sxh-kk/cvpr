@@ -613,3 +613,40 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM
   --release /home/zxc/CVPR_Evaluation_runtime/pico_mobile_pp100_20261027_human01 \
   --step "$STEP" --expected-final-acceptance-sha256 "$FINAL_SHA"
 ```
+
+## 新一轮官方99初始化真人数采（2026-10-28）
+
+用户确认新一轮按官方不同TRAIN初始化采集。旧100条均绑定同一TRAIN0 reset SHA
+`d4c43a1fe1219f31e2b0bef3f9a2356a00a48b9a694d7f0a34430beff7c71f79`；它们是独立真人轨迹，但不具备99种初始化覆盖。
+已有95／5的20k实验继续独立运行，不追加新样本、不改其split／配置／统计，不能把同初始化验证称为跨初始化泛化。
+实际官方源只有99条，index0..98，metadata SHA
+`f71ebef96f817fb4068b0b6ec333638ab3af88116ccbf106f8195f38a3ce0bbd`。
+
+新根为`/home/zxc/CVPR_Evaluation_runtime/mobile_pp_official99_20261028/round_001`，
+`plan/manifest.json` SHA为`c9ee488637fb24a36893334dca6f6bff471e76aced6213d5c35eb63d812b89d5`。
+独立冻结99份源配置、从DR空间状态重建的初始actor.pose、各文件SHA及UID映射；保存源原件，不使用示范动作、未来状态或终态布局。
+实际每次reset重新核当前配置字节／路径，完整DR＋layout硬匹配；预览epoch、物理模型、几何cache、seed和每条metadata同步更新。
+后台按同UUID／native-v2完整技术证据及selected结果推进；失败重试同配置，主动中断只释放同配置重试，技术分类和原件保留。
+writer／初始化永久技术错误不能被晚到复核自动清除。后续只能按`progress.accepted`的index→UUID映射冻结交付，未登记sealed-UUID的极端崩溃可产生额外尝试但不能误推进。
+
+初始CPU检查99份都能重建并站立，但只查站立不足以核准起录：旧TRAIN0专用cold profile在43号预热0.330s时由右拇指碰盒，随后位移0.170094m。
+这是准备兼容故障，没有当作数据质量拒收；完整201点200Hz接触／外力与原profile证据保留在`target_warmup_diagnosis_001`。
+独立候选仅把原profile两肘改至1.0rad，其它27身体关节、手指、环境DR、物体、碰撞、重力、PD、控制与native .9条件保持。
+仍只在首次物理步前初始化一次。新profile实际完成全部99份50tick／1秒CPU SONIC预热，
+每份201点200Hz记录：机器人pelvis全子树与target接触总数0、外力全零、target仅与table接触；
+最大漂移0.000509392309m、最大pelvis倾角3.308670898°。这是准备检查，不能当真人遥操作、持物移动或任务成功验收。
+
+全99通过后才原子复制发布`resources/mobile_pp_cold_start_profile.json`，SHA
+`8f50ae58876cc2bac34037f8819301754fcb1d37178d162a49c7c16c91570530`；发布收据
+`resources/MOBILE_COLD_PROFILE_PUBLICATION_001.json` SHA
+`32705640e72fd995a42cb2a48f7c3033861e181380c67f06639c2e093eac453b`，绑定全部case trace及结果SHA。
+373项相关PICO CPU回归全部通过，无skip，包含真实Node页面执行、手柄命令门、进度／中断／技术故障恢复；
+日志`collection_cpu_regression_001.log`。两名独立review检查启动、元信息、按UUID推进和主动中断边界后无剩余阻断。
+
+启动入口`start_pico_mobile_pp_official99.sh`要求本轮已核准profile存在，临时文件写本轮`tmp`，只进行实时预览／原始采集和独立CPU复核。
+初次空启动未收到追踪、未标定、未产生episode，已正常退出并保留日志；修正后`LAUNCH_002.json`于UTC10:37:33启动新会话。
+`collection/live_20261028_183733`实际入口已核定：当前配置DR＋layout匹配、站立预热通过、EGL真实相机ready、启用头显H.264服务，
+加载的全部源码SHA与工作树逐项匹配。`STARTUP_ACCEPTANCE_002.json` SHA
+`7cfc53d831e256e2ad7ff428341fcb3a6a887a573af8de83905445a0c751e634`；检查时第1/99份、0条完成、暂停且未标定，
+PICO已被USB识别且IP仍172.16.20.83，但尚无XRobo追踪包／头显视频连接，不能声称真人输入或头显显示已验收。
+此轮不在数采期间启动RTX／DINO／上传；操作与恢复步骤见[新轮次操作说明](PICO_MOBILE_PP_TELEOP.md#2026-10-28-新一轮官方99份train初始化)。

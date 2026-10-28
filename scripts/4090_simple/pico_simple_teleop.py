@@ -259,10 +259,11 @@ def configure_unrelated_viewport(viewport, cameras, *, disable=False):
     return receipt
 
 
-def load_environment_config(path, data_root, *, profile='handover'):
+def load_environment_config(path, data_root, *, profile='handover', rebind_official_paths=False):
     """Validate the selected task's saved layout and explicit local resources."""
     path, data_root = Path(path).resolve(strict=True), Path(data_root).resolve(strict=True)
-    state = json.loads(path.read_text())
+    payload = path.read_bytes()
+    state = json.loads(payload)
     _, expected_uid = task_identity(profile)
     if not isinstance(state,dict) or state.get('uid') != expected_uid:
         label = 'Handover task' if profile == 'handover' else expected_uid
@@ -272,6 +273,7 @@ def load_environment_config(path, data_root, *, profile='handover'):
     if not isinstance(state.get('dr_state_dict'),dict) or not isinstance(state.get('layout'),dict):
         raise ValueError('Environment config needs saved DR state and layout')
     local_paths = {}
+    relocations = []
     def visit(value, location='environment'):
         if isinstance(value,dict):
             for key,item in value.items():
@@ -279,6 +281,10 @@ def load_environment_config(path, data_root, *, profile='handover'):
                 if key in ('usd_path','mdl_path','path','data_dir') and isinstance(item,str):
                     if '://' in item:
                         raise ValueError('Remote resource in environment config: '+label)
+                    if rebind_official_paths and item.startswith('/home/wenke/SIMPLE/data/'):
+                        relocated = str(data_root/item.removeprefix('/home/wenke/SIMPLE/data/'))
+                        relocations.append({'field':label,'original':item,'local':relocated})
+                        value[key] = item = relocated
                     candidate = Path(item)
                     candidate = candidate if candidate.is_absolute() else data_root/item.removeprefix('data/')
                     candidate = candidate.resolve(strict=True)
@@ -295,9 +301,21 @@ def load_environment_config(path, data_root, *, profile='handover'):
         raise ValueError('Saved HSSD scene uid/name/config identity is incomplete or inconsistent')
     scene_file = (data_root/scene['data_dir']/(scene['name']+'.usd')).resolve(strict=True)
     local_paths['authoritative_scene_usd'] = str(scene_file)
-    receipt = {'path':str(path),'sha256':file_sha256(path),'uid':state['uid'],
+    receipt = {'path':str(path),'sha256':hashlib.sha256(payload).hexdigest(),'uid':state['uid'],
         'scene_name':scene['name'],'local_resource_paths':local_paths,
-        'scope':'fixed saved environment for diagnostics; not randomized evaluation'}
+        'explicit_official_resource_relocations':relocations,
+        'scope':'saved official initialization; local asset paths only are rebound' if rebind_official_paths
+            else 'fixed saved environment for diagnostics; not randomized evaluation'}
+    return state,receipt
+
+
+def load_collection_environment(row, data_root):
+    """Bind the bytes actually parsed on every reset to the frozen official row."""
+    state,receipt = load_environment_config(row['reset_config_path'],data_root,
+        profile='mobile_pp',rebind_official_paths=True)
+    if (receipt['sha256'] != row['reset_config_sha256']
+            or receipt['path'] != str(Path(row['reset_config_path']).absolute())):
+        raise ValueError('当前初始化配置字节/路径不符合冻结计划，保持暂停')
     return state,receipt
 
 
@@ -910,11 +928,26 @@ def run(args):
     mobile = profile == 'mobile_pp'
     mobile_policy = getattr(args,'mobile_control_policy','continuous_vr_mode1')
     mobile_continuous = mobile and mobile_policy == 'continuous_vr_mode1'
-    if mobile and (not args.environment_config or args.render_mode != 'mujoco_deferred'):
+    collection_plan = getattr(args,'mobile_collection_plan',None)
+    collection_progress = None
+    if collection_plan:
+        if not mobile or args.environment_config or args.pico_replay:
+            raise ValueError('Official initialization collection requires live Mobile and no fixed config/replay')
+        from pico_mobile_collection_plan import load_plan
+        from pico_mobile_collection_progress import CollectionProgress
+        rows = load_plan(collection_plan)
+        progress_path = getattr(args,'mobile_collection_progress',None) or output.parent/'official99_progress.json'
+        collection_progress = CollectionProgress(rows,progress_path)
+        if collection_progress.current is None:
+            collection_progress.close()
+            raise ValueError('本轮99份初始化均已完成，请勿重复采集')
+    if mobile and (not (args.environment_config or collection_plan) or args.render_mode != 'mujoco_deferred'):
         raise ValueError('Mobile P&P requires its saved official scene and deferred capture')
     environment_state = environment_receipt = None
-    if args.environment_config:
-        environment_state,environment_receipt = load_environment_config(args.environment_config,data_root,profile=profile)
+    if args.environment_config or collection_plan:
+        config_path = collection_progress.current['reset_config_path'] if collection_progress else args.environment_config
+        environment_state,environment_receipt = (load_collection_environment(collection_progress.current,data_root)
+            if collection_progress else load_environment_config(config_path,data_root,profile=profile))
     os.environ['SIMPLE_DATA_DIR'] = str(data_root)
     rendered = args.render_mode == 'isaac'
     deferred = args.render_mode == 'mujoco_deferred'
@@ -935,6 +968,10 @@ def run(args):
     result.update(cpu_runtime=cpu_runtime.receipt,
         capture_start_protocol='cvpr-pico-frozen-capture-start-v1' if deferred else None,
         live_status_transport='localhost HTTP; periodic disk status only while paused')
+    if collection_progress:
+        result['mobile_collection_progress'] = collection_progress.receipt()
+        for name in ('pico_mobile_collection_plan.py','pico_mobile_collection_progress.py'):
+            result['source_code_sha256_at_session_start'][name] = file_sha256(Path(__file__).with_name(name))
     write_json(output/'result.json', result)
     env = ui = receiver = video_bridge = render_profiler = preview_worker = mobile_control = None
     mobile_mode = 'continuous_paused' if mobile_continuous else 'pose'
@@ -995,7 +1032,7 @@ def run(args):
     write_json(output/'new_producer_binding.json', pairing)
 
     def current_scene_receipt(initialization, readiness):
-        return episode_scene_metadata(initialization=initialization,
+        metadata = episode_scene_metadata(initialization=initialization,
             standing_warmup_readiness=readiness,warmup=warmup.receipt,
             environment_config=renderer_environment_config,physics_seed=args.seed,
             instruction=raw.task.instruction,
@@ -1004,6 +1041,12 @@ def run(args):
                 for role in ('target','container')},mujoco_obj_names=list(raw.mujoco.obj_names),
             container_geometry_cache_sha256=prepared_geometry_cache['sha256'],
             physics_model_sha256=prepared_deferred.model_sha256 if deferred else None)
+        # Config identity changes with each initialization, unlike fixed encoder identities.
+        metadata['environment_config_source'] = copy.deepcopy(environment_receipt)
+        if collection_progress:
+            metadata['official_initialization'] = copy.deepcopy(collection_progress.current)
+            metadata['mobile_collection_progress'] = collection_progress.receipt()
+        return metadata
 
     def finalize(completed=False, reason=None):
         nonlocal capture, ledger, episode, quality_stream, force_stream, following
@@ -1043,6 +1086,13 @@ def run(args):
             history_status = submit_finished_episode(review_queue,directory,capture_started=capture_started,
                 collection_enabled=not replay)
             outcome['collection'] = copy.deepcopy(history_status)
+            if collection_progress:
+                finalization_problem = episode_finalization_error(outcome,requested_complete=completed)
+                collection_progress.submit(closing_episode.human_demo_uuid,directory,
+                    operator_abort_reason=(reason if not completed and not finalization_problem and reason in
+                        ('operator_discard','operator_pause','operator_reset') else None))
+                if finalization_problem:
+                    collection_progress.fail('原始证据封存或后台登记存在技术异常')
             operator_message = '原始证据已封存并提交后台复核；正在准备下一条的新场景。'
         result['episodes'].append({'directory':str(directory),**outcome})
         write_json(output/'result.json', result)
@@ -1357,6 +1407,8 @@ def run(args):
                 outcome = finalize(False,error_text)
             except Exception as finalization_error:
                 result['episode_finalize_error'] = repr(finalization_error)
+                if collection_progress:
+                    collection_progress.fail('原始证据封存技术异常：'+str(finalization_error))
                 error_text += '；保存失败：'+repr(finalization_error)
                 return
             if had_started_capture:
@@ -1382,6 +1434,7 @@ def run(args):
             pending_mobile_quality_row = None
             nonlocal reset_generation
             nonlocal scene_metadata
+            nonlocal environment_state,environment_receipt
             if episode is not None:
                 raise ValueError('Finish the current episode before resetting the scene')
             # Invalidate old UI/handset commands even if reset fails partway.
@@ -1392,6 +1445,15 @@ def run(args):
                 ui.update({'status':'resetting','recording':None,'accepted_new_dataset':False,
                     'operator_message':operator_message,'last_episode':history_status,'error':error_text})
             invalidate_calibration(); physics_ready = False
+            if collection_progress and collection_progress.blocked:
+                operator_message = ('本条正在后台复核，当前初始化暂停等待；请勿继续操作。'
+                    if collection_progress.state['pending'] else '本轮99份初始化已完成，采集已暂停。')
+                return
+            if collection_progress:
+                environment_state,environment_receipt = load_collection_environment(
+                    collection_progress.current,data_root)
+                result['environment_config_source'] = copy.deepcopy(environment_receipt)
+                result['saved_scene_manager_binding'] = bind_saved_scene_manager(raw.task,environment_state)
             reference = PicoSonicReference(resources,args.human_info)
             raw.mujoco.step = original_step
             render_next = True
@@ -1509,6 +1571,10 @@ def run(args):
                     action = 'pause' if following or mobile_mode == 'preparing_continuous' else 'follow'
                 if action == 'toggle_record':
                     action = 'save' if episode else 'record'
+                if collection_progress and collection_progress.blocked and action in (
+                        'calibrate','follow','record','reset','toggle_navigation'):
+                    operator_message = '当前初始化复核尚未完成或本轮已结束，请查看初始化进度。'
+                    continue
                 command_notice = recording_command_guard(action,episode_active=episode is not None,
                     episode_status=episode.status if episode else None)
                 if command_notice:
@@ -1673,10 +1739,13 @@ def run(args):
                         raise ValueError('Unknown command: '+action)
                 except Exception as error:
                     error_text = str(error)
+                    if (collection_progress and episode is None
+                            and action in ('save','discard','reset') and reset_this_batch):
+                        collection_progress.fail('封存或初始化技术异常：'+str(error))
                     if action in ('save','discard','reset'):
                         operator_message='操作未正常完成，仿真保持暂停；原始证据不会删除。'+error_text
                     if action in ('calibrate','follow','reset') or episode or following:
-                        reject_and_pause(error_text)
+                        reject_and_pause('operator_reset' if action == 'reset' and episode is not None else error_text)
                     if replay:
                         raise
             loop_timer.enter('control')
@@ -1959,6 +2028,24 @@ def run(args):
                     review_status={'status':'error','error':repr(review_poll_error),
                         'latest_finished_uuid':latest_finished_uuid}
                 result['background_review']=copy.deepcopy(review_status)
+                if collection_progress and not following and episode is None:
+                    try:
+                        if collection_progress.observe(review_status):
+                            reset_scene(reason='official_initialization_review_completed')
+                            error_text = None
+                        progress = collection_progress.receipt()
+                        result['mobile_collection_progress'] = progress
+                        if progress['status'] == 'awaiting_review':
+                            operator_message = '本条已封存，等待官方成功条件复核；完成前保持暂停。'
+                        elif progress['status'] == 'complete':
+                            operator_message = '本轮99份不同官方初始化均已有成功原始演示；已暂停，图像和训练数据验收待后续处理。'
+                        elif progress['status'] == 'error':
+                            operator_message = '技术复核异常，当前初始化暂停；原始证据保留。'
+                            error_text = progress['error']
+                    except Exception as progress_error:
+                        invalidate_calibration(); physics_ready = False
+                        collection_progress.fail(repr(progress_error))
+                        error_text = '初始化轮换失败：'+str(progress_error)
             loop_timer.enter('preview_status')
             feedback = None
             feedback_error = None
@@ -1998,6 +2085,7 @@ def run(args):
                 'mobile_stopped_for_mode_transition':mobile_stopped.ready if mobile else None,
                 'operator_message':operator_message,'last_episode':history_status,
                 'background_review':review_status,
+                'mobile_collection_progress':collection_progress.receipt() if collection_progress else None,
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
                 'hand_control':feedback,'hand_feedback_error':feedback_error,
                 'recording':episode.status if episode else None,'episode_count':len(result['episodes']),
@@ -2046,6 +2134,8 @@ def run(args):
                 review_queue.close(wait=False)
             except Exception as review_close_error:
                 result.setdefault('cleanup_errors',{})['background_review'] = repr(review_close_error)
+        if collection_progress:
+            collection_progress.close()
         for name, component in (('receiver',receiver),('mobile_planner',mobile_control),('headset_video',video_bridge),
                                 ('preview_worker',preview_worker),('ui',ui),('control_trace',control_trace),('render_profiler',render_profiler)):
             if component:
@@ -2090,6 +2180,8 @@ def main():
     parser.add_argument('--profile-render',action='store_true',help='Diagnostic API wall-time profiling without extra render calls')
     parser.add_argument('--disable-unrelated-viewport',action='store_true',help='Opt-in diagnostic: disable only a proven separate viewport render product')
     parser.add_argument('--environment-config',type=Path,help='Reuse a local saved environment matching --task')
+    parser.add_argument('--mobile-collection-plan',type=Path,help='Frozen official TRAIN99 initialization manifest')
+    parser.add_argument('--mobile-collection-progress',type=Path,help='Durable progress for this collection round')
     parser.add_argument('--pico-ip',default='172.16.20.83',help='Expected headset peer for video bridge')
     parser.add_argument('--seed',type=int,default=20261025)
     parser.add_argument('--port',type=int,default=43100)

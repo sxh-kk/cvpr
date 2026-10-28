@@ -6,6 +6,42 @@
 `g1_wholebody_locomotion_pick_between_tables_teleop`。
 [官方论文表 1 的 Mobile P&P 与任务名对应关系](https://arxiv.org/html/2606.08278v1#S4.T1)。
 
+## 2026-10-28 新一轮：官方99份TRAIN初始化
+
+用户已授权新一轮采集。旧100条真人轨迹全部使用同一份TRAIN0重置配置；改变物理seed没有改变被配置覆盖的初始化。
+本地官方源恰为99条 `episode_index=0..98`，没有第100条或保存的seed列表。
+新入口逐条恢复这99份完整DR、布局、干扰物和材质，每份收集一条独立成功真人演示：
+
+```bash
+bash scripts/4090_simple/start_pico_mobile_pp_official99.sh \
+  --round-root /home/zxc/CVPR_Evaluation_runtime/mobile_pp_official99_20261028/round_001 \
+  --headset-video
+```
+
+`plan/manifest.json`冻结官方metadata原件、每条原config、从初始DR空间状态还原的reset config与SHA。
+容器按`container_<asset UID>`、target与distractor按各自asset UID取初态，不能使用layout里记录的终态或distractor序号。
+装载时只把官方`/home/wenke/SIMPLE/data/`资源前缀明确重绑至现有本地资源根，并逐字段记录；不改变资源字节和物理参数。
+本轮使用独立的`round_001/resources/mobile_pp_cold_start_profile.json`，缺少它时启动脚本拒绝运行。
+它从旧profile保留其它27个身体关节，只把左右肘预先收至1.0rad，避免站立预热提前碰到官方随机摆放的盒子。
+这仍是明确的非原生起始关节姿态，只在每次reset的首次物理步前设置一次；不是逐条回放官方示范身体状态，未读取其未来动作。
+
+页面显示“第1/99份，官方TRAIN episode000；已完成0/99”。按X标定、Y跟随、A起录，保持姿势1秒后操作。
+双臂持续跟随、左杆前进、右杆转向、扳机抓握，不需要B。
+把盒子放入第二张桌子的容器并松手，保持片刻，**直接按A保存，不要先按Y**；录制中Y暂停会将本条作为中断结束。
+保存后暂停等待独立CPU复核：只按同UUID完整原始官方native成功结果推进；官方未成功或人工丢弃仍重试同初始化。
+技术异常保留原件并暂停，不把它算成任务失败。后台临时读取错误可按原worker协议重试，但必须同UUID完整复核实际通过才能解除。
+封存、初始化或原始证据不完整的永久技术错误需先诊断修复，不因晚到成功消息自动清除。
+主动丢弃／Y暂停／录制中重置的partial原件仍保留原技术分类，后台归档后仅允许同配置重试，不计任务失败或成功。
+每次新场景就绪后重新X、Y、A。
+“丢弃上一条”若撤销已计数的演示，会撤销该初始化完成标记并回到首个未完成初始化。
+
+`progress.json`保存计划身份、每次尝试UUID和完成映射；同一轮禁止两个采集器并发使用。
+中断后重启上述命令会创建fresh session并恢复进度；若有持久技术错误须先诊断修复，不能删进度或跳配置来恢复。
+新原始数据写入本轮`collection/live_时间/episodes`，独立复核归档到`collection/kept`与`discarded`；旧100条及A100正在跑的95／5实验保持独立。
+99份完成后暂停，不循环回0；后续只按`progress.accepted`的官方index→UUID映射冻结候选，额外尝试不能混入。
+这里的完成只指成功原始演示覆盖，不代表RTX／DINO／训练数据已经验收。
+采集期间不自动启动补图、特征或上传；下文旧`start_pico_mobile_pp.sh`保留为固定TRAIN0复现入口。
+
 截至 2026-10-27，资源、真实 CPU 冷启动／站立及移动控制已有独立验证，并已完成本轮真人采集。
 本次按用户要求把 Mobile 默认控制改为 **`continuous_vr_mode1`：左杆前进、右杆转向，双臂与颈部参考持续跟随人体**，
 取消 B 切换、移动时上身锁定和 3 厘米返回姿态门。旧策略以 `locked_upper_mode0` 显式保留。

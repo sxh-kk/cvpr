@@ -74,7 +74,7 @@ def episode_metadata_fixture():
 
 
 class EntryGuardTests(unittest.TestCase):
-    def operator_loop(self, commands, episode):
+    def operator_loop(self, commands, episode, collection_progress=None):
         """Execute the actual production command loop with CPU-only callbacks."""
         tree=ast.parse(inspect.getsource(entry.run))
         loop=next(node for node in ast.walk(tree) if isinstance(node,ast.For)
@@ -84,7 +84,7 @@ class EntryGuardTests(unittest.TestCase):
         namespace=dict(vars(entry),commands=commands,episode=episode,following=True,
             reset_generation=0,reset_generation_at_loop_start=0,reset_this_batch=False,
             operator_message='',error_text=None,replay=None,history_status={},
-            review_queue=None,latest_finished_uuid=None,result={'episodes':[]},
+            review_queue=None,latest_finished_uuid=None,result={'episodes':[]},collection_progress=collection_progress,
             reference=SimpleNamespace(calibration={'same_calibration':True}))
         def finalize(*args,**kwargs):
             events.append(('finalize',args,kwargs))
@@ -103,6 +103,24 @@ class EntryGuardTests(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[copy.deepcopy(loop)],type_ignores=[])),
             entry.__file__,'exec'),namespace)
         return namespace,events
+
+    def test_actual_operator_loop_blocks_start_and_reset_while_official_review_pending(self):
+        progress=SimpleNamespace(blocked=True)
+        state,events=self.operator_loop(['calibrate','follow','record','reset','toggle_navigation'],None,progress)
+        self.assertEqual(events,[])
+        self.assertIn('复核尚未完成',state['operator_message'])
+
+    def test_each_collection_reset_binds_parsed_config_bytes_to_frozen_sha(self):
+        row={'reset_config_path':'/some/official.json','reset_config_sha256':'a'*64}
+        with patch.object(entry,'load_environment_config',return_value=({},
+                {'path':'/some/official.json','sha256':'a'*64})) as load:
+            self.assertEqual(entry.load_collection_environment(row,Path('/data'))[0],{})
+            self.assertTrue(load.call_args.kwargs['rebind_official_paths'])
+        for changed in ({'path':'/other.json','sha256':'a'*64},
+                        {'path':'/some/official.json','sha256':'b'*64}):
+            with patch.object(entry,'load_environment_config',return_value=({},changed)):
+                with self.assertRaisesRegex(ValueError,'冻结计划'):
+                    entry.load_collection_environment(row,Path('/data'))
 
     def active_episode(self):
         episode=entry.RecordingState()

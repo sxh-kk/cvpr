@@ -24,6 +24,13 @@ import numpy as np
 
 COMMANDS = frozenset({"calibrate", "follow", "pause", "record", "save", "discard", "reset", "quit", "toggle_navigation"})
 BUSY_STATES = frozenset({"saving", "auditing", "resetting"})
+MOBILE_COLLECTION_LOCKED_STATES = frozenset({"awaiting_review", "complete", "error"})
+MOBILE_COLLECTION_LOCKED_COMMANDS = frozenset({"calibrate", "follow", "record", "reset", "toggle_navigation"})
+
+
+def _mobile_collection_locked(status):
+    progress = status.get("mobile_collection_progress")
+    return isinstance(progress, dict) and progress.get("status") in MOBILE_COLLECTION_LOCKED_STATES
 
 
 _PAGE = """<!doctype html>
@@ -43,6 +50,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <div class="notice">原始示例 · 待独立验收。退出采集后补图并独立验收，合格后才能用于训练。</div>
 <p id="instructions" class="muted">X 标定 · Y 跟随／暂停 · A 录制／保存 · 左右前扳机或侧握键抓握。开始录制后先保持姿势 1 秒。B 未绑定相机开关。</p>
 <p id="mobile-status" role="status" hidden></p>
+<p id="mobile-collection-progress" role="status" hidden></p>
 <p id="tracking-status" role="status">等待PICO追踪状态</p>
 <p id="grasp" role="status">等待抓握反馈</p>
 <p id="preview-feedback" role="status">等待相机</p>
@@ -57,12 +65,15 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 </div><div id="message" role="status"></div><div id="error" role="alert"></div>
 <details><summary>查看运行详情</summary><pre id="details"></pre></details>
 <script>
-const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true,lastOperatorMessage=null,imageAvailable=false,cameraReady=false,lastImageEpoch=null;
+const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true,lastOperatorMessage=null,imageAvailable=false,cameraReady=false,lastImageEpoch=null,lastStatus=null;const pendingButtons=new Set();
 function showCamera(){camera.hidden=!(imageAvailable&&cameraReady);document.querySelector('#placeholder').hidden=!camera.hidden;}
 function reconnectStream(){if(streamRetry!==null||!imageAvailable)return;cameraReady=false;showCamera();streamRetry=setTimeout(()=>{streamRetry=null;if(imageAvailable)camera.src='/stream.mjpg?retry='+Date.now();},500);}
 function updateCameraAvailability(available,version,epoch){if(Number.isInteger(epoch)){if(lastImageEpoch!==null&&epoch<lastImageEpoch)return;if(lastImageEpoch!==null&&epoch!==lastImageEpoch){cameraReady=false;camera.removeAttribute('src');if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}}lastImageEpoch=epoch;}const next=available===true;if(!next){imageAvailable=false;cameraReady=false;if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}camera.removeAttribute('src');}else{const restart=!imageAvailable||!camera.getAttribute('src');imageAvailable=true;if(restart){cameraReady=false;camera.src='/stream.mjpg?version='+version;}}showCamera();}
 function previewFeedbackText(feedback,available){if(feedback?.error||feedback?.status==='error')return '相机异常';if(!feedback)return available?'相机预览':'等待相机';const limit=Number.isFinite(feedback.max_age_s)&&feedback.max_age_s>0?Math.min(.1,feedback.max_age_s):.1;return available&&['ready','fresh','ok'].includes(feedback.status)&&Number.isFinite(feedback.age_s)&&feedback.age_s>=0&&feedback.age_s<=limit?'相机预览':'等待相机';}
 function trackingFeedbackText(t){if(t?.valid)return '全身追踪有效 · 手柄输入已连接';const labels={no_tracking_packet:'未收到数据，请保持XRoboToolkit前台并开启Send',controller_input_required:'请在头显切换到手柄输入模式',app_not_focused:'请保持XRoboToolkit在前台',head_tracking_invalid:'头部追踪无效，请戴好头显',body_missing_shape_or_nonfinite:'缺少完整24点全身追踪，请检查全身标定',stale:'数据已过期，请检查追踪发送连接',input_mode_changed:'输入模式刚切换，请等稳定后重新标定',device_timestamp_gap:'追踪数据中断，请检查发送连接'};return '追踪不可用：'+((t?.reasons??[]).map(reason=>labels[reason]??reason).join('；')||'等待数据');}
+function mobileCollectionLocked(p){return ['awaiting_review','complete','error'].includes(p?.status);}
+function mobileCollectionProgressText(p){const total=Number.isInteger(p.total)&&p.total>0?p.total:'待确认';const accepted=Number.isInteger(p.accepted_count)&&p.accepted_count>=0?p.accepted_count:'待确认';if(p.status==='complete')return '已完成'+accepted+'/'+total+'份官方TRAIN初始化采集';const position=Number.isInteger(p.current_position)&&p.current_position>0&&Number.isInteger(p.current_official_episode_index)&&p.current_official_episode_index>=0?'第'+p.current_position+'/'+total+'份，官方TRAIN episode'+String(p.current_official_episode_index).padStart(3,'0')+'；':'';const progress=position+'已完成'+accepted+'/'+total;if(p.status==='awaiting_review')return progress+' · 等待复核，复核完成后继续下一份';if(p.status==='error')return progress+' · 已暂停：技术错误'+(p.error?' · '+(typeof p.error==='string'?p.error:JSON.stringify(p.error)):'');return progress;}
+function updateCommandButtons(s){s=s??{};const busy=['saving','auditing','resetting'].includes(s.status);for(const b of document.querySelectorAll('button[data-command]'))b.disabled=busy||pendingButtons.has(b);const discard=document.querySelector('button[data-command="discard"]');if(!busy&&!s.recording)discard.disabled=pendingButtons.has(discard)||!(s.last_episode?.available||(s.last_episode?.pending&&s.last_episode?.status!=='pending_discard'));if(mobileCollectionLocked(s.mobile_collection_progress))for(const b of document.querySelectorAll('button[data-command]'))if(['calibrate','follow','record','reset','toggle_navigation'].includes(b.dataset.command))b.disabled=true;}
 
 function episodeText(v){if(!v?.uuid)return '暂无';const id=v.number!=null?String(v.number).padStart(3,'0'):'待编号（'+v.uuid.slice(0,8)+'）';const state=v.status==='pending_discard'?'已申请丢弃，后台处理中':v.status==='technical_blocked'||v.selection_status==='technical_evidence_incomplete'?'技术异常，原件保留':v.discarded||v.disposition==='discarded'?(v.selection_status==='official_task_not_successful'?'未达到官方任务成功条件':'已丢弃'):v.disposition==='kept'?(v.selection_policy==='native_only'?'官方任务成功，已保留':'物理验收通过，已保留'):v.status==='running'?'复核中':v.status==='error'?'复核异常':v.pending?'待复核':v.collection_enabled===false?'诊断已完成（不计真人数据）':'待审核';return id+' · '+state+((v.reasons??[]).length?' · 原因：'+v.reasons.join('；'):'')+(v.error?' · '+v.error:'');}
 function renderReview(q){const labels={starting:'正在准备',idle:'空闲',working:'正在复核',recovering:'正在恢复任务',error:'复核异常'};document.querySelector('#review-status').textContent='后台复核：'+(q?(labels[q.status]??q.status)+' · 未完成 '+(q.pending_count??0)+' 条'+(q.error?' · '+q.error:''):'准备中');document.querySelector('#review-result').textContent='最近完成：'+episodeText(q?.latest_completed);const list=document.querySelector('#review-results');if(list){list.replaceChildren();for(const v of (q?.latest_results??[])){const row=document.createElement('li');row.textContent=episodeText(v);list.appendChild(row);}}}
@@ -71,6 +82,7 @@ camera.onerror=reconnectStream;
 camera.onload=()=>{cameraReady=imageAvailable;showCamera();};
 async function refresh(){try{
  const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
+ lastStatus=s;const collection=s.mobile_collection_progress;const progress=document.querySelector('#mobile-collection-progress');progress.hidden=!collection;progress.textContent=collection?mobileCollectionProgressText(collection):'';
  document.querySelector('#tracking-status').textContent=trackingFeedbackText(s.tracking);
  const mobile=s.collection_task_profile==='mobile_pp';const continuous=mobile&&s.mobile_control_policy==='continuous_vr_mode1';document.querySelector('button[data-command="toggle_navigation"]').hidden=!mobile||continuous;
  const mobileStatus=document.querySelector('#mobile-status');mobileStatus.hidden=!mobile;
@@ -81,24 +93,24 @@ async function refresh(){try{
  const labels={paused:'已暂停',following:'正在跟随',saving:'正在封存本条',auditing:'正在物理验收',resetting:'正在重置场景',stopped:'采集已结束'};
  if(s.recording==='warmup')phase='请保持姿势，正在记录起始状态';
  else if(s.recording==='recording')phase='正在录制';
+ if(collection?.status==='awaiting_review')phase='等待复核';else if(collection?.status==='complete')phase='初始化采集已完成';else if(collection?.status==='error')phase='技术错误，已暂停';
  document.querySelector('#phase').textContent=labels[phase]??phase;
  const h=s.hand_control;const pct=x=>Number.isFinite(x)?Math.round(x*100)+'%':'未下发';
  document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
  const last=s.last_episode;document.querySelector('#last-episode').textContent=last?.uuid?'上一条：'+episodeText(last):'上一条：暂无已完成录制';renderReview(s.background_review);
  const discard=document.querySelector('button[data-command="discard"]');discard.textContent=s.recording?'丢弃当前录制':'丢弃上一条';
- const busy=['saving','auditing','resetting'].includes(s.status);for(const b of document.querySelectorAll('button[data-command]'))b.disabled=busy;
- if(!busy&&!s.recording)discard.disabled=!(last?.available||(last?.pending&&last?.status!=='pending_discard'));
+ updateCommandButtons(s);
  if(s.operator_message&&(s.operator_message!==lastOperatorMessage||document.querySelector('#message').textContent!==s.operator_message)){document.querySelector('#message').textContent=s.operator_message;lastOperatorMessage=s.operator_message;}
  document.querySelector('#details').textContent=JSON.stringify(s,null,2);
- const err=s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
+ const err=(collection?.status==='error'?collection.error:null)??s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
  updateCameraAvailability(v.image_available,v.image_version,v.image_epoch);
  document.querySelector('#preview-feedback').textContent=previewFeedbackText(s.preview_feedback,v.image_available);
  }catch(e){statusConnected=false;document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#error').textContent=e.message;}
 }
-for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{b.disabled=true;try{
+for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{pendingButtons.add(b);b.disabled=true;try{
  const r=await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:b.dataset.command})});
  const v=await r.json();if(!r.ok)throw Error(v.error??'提交失败');document.querySelector('#message').textContent='已提交，等待电脑执行：'+b.textContent;
- }catch(e){document.querySelector('#error').textContent=e.message;}finally{b.disabled=false;}});
+ }catch(e){document.querySelector('#error').textContent=e.message;}finally{pendingButtons.delete(b);updateCommandButtons(lastStatus);}});
 refresh();setInterval(refresh,500);
 </script></html>"""
 
@@ -376,6 +388,8 @@ class LocalTeleopUI:
                 raise RuntimeError("The UI is closing")
             if self._status.get("status") in BUSY_STATES and command != "quit":
                 raise RuntimeError("正在保存、验收或重置，请等待操作完成后再点击")
+            if _mobile_collection_locked(self._status) and command in MOBILE_COLLECTION_LOCKED_COMMANDS:
+                raise RuntimeError("初始化采集正在等待复核、已完成或因技术错误暂停，请查看采集进度")
             self._commands.put_nowait(command)
 
     def commands(self):
@@ -411,6 +425,12 @@ class LocalTeleopUI:
                 pending = self.commands()
                 if "quit" in pending:
                     self._commands.put_nowait("quit")
+            elif _mobile_collection_locked(copied_status) and not _mobile_collection_locked(self._status):
+                # Do not replay a pre-review start/reset intention against the
+                # next official initialization. Keep stop/discard/save intents.
+                for command in self.commands():
+                    if command not in MOBILE_COLLECTION_LOCKED_COMMANDS:
+                        self._commands.put_nowait(command)
             self._status = copied_status
             if clear_image:
                 # Never wait for JPEG encoding or a streaming socket to retire

@@ -528,3 +528,10 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 新`prepare_mobile_pp95_eval5_eval.py`须等本次真实20k终验和备份收据后才准备4k／best／20k，
 从新联合权重严格导出Motion，保持原统计／DINO；当前只通过隔离CPU测试，未消费尚未产生的权重。
 另清理约3.2GB可重建的Omniverse编译纹理缓存，原始资源及采集数据未删；恢复时观测`/home`可用约338GB，不将全部容量变化归因于这次缓存清理。
+
+2026-10-28用户授权新一轮官方99份不同初始化采集：
+`bash scripts/4090_simple/start_pico_mobile_pp_official99.sh --headset-video`。
+完整操作和恢复说明见[官方99份TRAIN初始化](../../docs/PICO_MOBILE_PP_TELEOP.md#2026-10-28-新一轮官方99份train初始化)。
+新入口从冻结metadata初始DR重建每份reset布局，只在同UUID后台native成功且技术证据完整后推进；失败重试同份，技术故障保留原件暂停。
+每份配置在实际装载时再次核SHA，进度持久化并防止重复collector；旧`start_pico_mobile_pp.sh`仍是固定TRAIN0复现。
+这轮输出独立于旧100条和正在运行的95／5训练，不在数采时启动RTX、DINO或上传。

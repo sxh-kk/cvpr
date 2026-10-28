@@ -6,6 +6,44 @@
 `g1_wholebody_locomotion_pick_between_tables_teleop`。
 [官方论文表 1 的 Mobile P&P 与任务名对应关系](https://arxiv.org/html/2606.08278v1#S4.T1)。
 
+## 实时记录链路与实验一致性
+
+Mobile 的 `mujoco_deferred` 入口使用预启动的独立 CPU 证据进程。每个实际场景模型准备后，
+该进程按原 MJB 字节 SHA／文件身份加载独立模型和 FK scratch；不接收活跃 MjData、SDK 或推理控制器。
+默认仅把该子进程绑定到允许 CPU 的倒数第四个（本机 CPU28），nice19、GPU 隐藏、库线程数1；
+主控制器、planner CPU29、预览 CPU30、复核 CPU31及其它任务的优先级和亲和性不因此改变。
+这不代表物理核心独占。Handover 的原同步 deferred 归档路径保持不变。
+
+控制线程仍在原来的阶段读取真实 PICO 包、积分状态、200Hz 外力检查、50Hz solved contact／support
+和官方 native 标志，先用 pickle 冻结当刻值，再通过有界 FIFO 提交；JSON 转换、写文件和独立状态回读校验
+在子进程进行。ledger 的 `recorded_monotonic_ns` 在父进程采样，不能换成后台写盘时刻。
+现有 commands/events/quality/force 文件格式和状态矩阵不变，同份证据暂不去重。
+完整原件封存前必须收齐前序请求、关闭本条所有文件并 flush session trace；
+队列满、超过2MiB的单请求、写入错误、状态校验失败、进程死亡或等待超时均为持久技术失败，
+不能丢帧后称成功，不能用于推进99份官方初始化计数。起录的打开文件握手仍属于首帧前冻结准备。
+
+200Hz `.005s ×4` 物理步、50Hz decoder、30Hz动作／状态网格、原有物理／输入保护、
+官方成功判据及100ms累计迟延门槛都不改变；不删除官方 reward／success 调用或模型 forward。
+`control_trace.jsonl` 新增 `operation_wall_cpu_s`，分别记录 MuJoCo `engine.step` 调用（含引擎布局同步）、外力检查与发布、
+整个环境调用、质量发布、ledger/capture提交的墙钟和线程CPU耗时；`environment_total` 包含其子项，不能相加重复计算。
+原 `environment_step` 计时仍含 native 标志返回后的质量发布，不能解释为纯物理耗时。
+
+一致性验证应固定原始输入、原始时间戳、真实动作和积分状态，逐字段对照全部旧格式输出，
+并检查慢写、队满、写错和进程死亡不会形成成功回执。CPU证据链路测速仅代表写入／校验工作，
+不能替代真实行走、抓取、转身和放置的完整连续控制验收。真人闭环的反馈延迟和所选实时包可能随提速变化，
+因此不承诺两次真人轨迹逐点相同。已运行的旧采集器不会热更新，切换必须在明确授权后正常退出再启动。
+
+2026-10-28 实际 CPU 对照使用 round_002 失败001的封存原件，在 producer CPU26／worker CPU27、
+nice19、隐藏GPU下按原50Hz突发重放记录调用，没有物理步进、forward或SDK。
+287条ledger、286条event、476条quality、1904条force、476条录制段trace的全部字段及文件SHA相同，
+状态矩阵／模型SHA和零步FK回读一致；原partial状态及拒收归因保留，未形成新真人数据。
+每轮证据调用的主线程 p50／p99／最大值从2.180／2.622／3.791ms降至0.394／0.623／0.680ms，
+平均从1.463ms降至0.353ms；未确认请求高水位8（容量64），封存后3431／3431确认、pending0且worker正常退出。
+生产仿真环境的121项相关CPU回归通过（无skip），包含真实spawn、输入冻结、队满、写错、子进程死亡与封存错误。
+这份约9.52秒的写入对照不能证明完整控制环已满足20ms，也不代表真人连续60秒已通过。
+原始测试与SHA总回执在仓库外的
+`/home/zxc/CVPR_Evaluation_runtime/mobile_pp_official99_20261028/round_002/optimization_001/WRITER_PARITY_ACCEPTANCE_001.json`。
+
 ## 2026-10-28 新一轮：官方99份TRAIN初始化
 
 用户已授权新一轮采集。旧100条真人轨迹全部使用同一份TRAIN0重置配置；改变物理seed没有改变被配置覆盖的初始化。

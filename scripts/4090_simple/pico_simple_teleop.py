@@ -138,7 +138,7 @@ def source_code_identities():
              'start_pico_teleop.sh','handover_contact_quality.py','handover_geometry_quality.py',
              'pico_hand_control.py','pico_episode_history.py','pico_episode_review.py',
              'pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py',
-             'pico_mobile_task.py')
+             'pico_mobile_task.py','pico_evidence_writer.py','pico_async_evidence.py')
     directory = Path(__file__).resolve().parent
     return {name:file_sha256(directory/name) for name in names}
 
@@ -154,7 +154,7 @@ EPISODE_SESSION_FIELDS = (
     'capture_start_protocol','live_status_transport','collection_task_profile',
     'mobile_control_protocol','mobile_control_policy','mobile_encoder_mode','mobile_vr_source',
     'mobile_planner_model_sha256','actual_task_source_sha256',
-    'actual_native_success_criteria','mobile_cold_start_profile')
+    'actual_native_success_criteria','mobile_cold_start_profile','evidence_writer_protocol')
 
 
 def episode_session_identity(session_result):
@@ -498,6 +498,36 @@ class LoopWallTimer:
             self._finished = self.snapshot()
             self._finished['complete'] = True
         return copy.deepcopy(self._finished)
+
+
+def write_json_line(stream, value):
+    """Freeze one original record in a worker, or keep the legacy sync path."""
+    asynchronous = getattr(stream, 'write_json', None)
+    if asynchronous is not None:
+        return asynchronous(value)
+    return stream.write(json_text(value)+'\n')
+
+
+class OperationCosts:
+    """Separate local elapsed and CPU work without touching simulation clocks."""
+    def __init__(self, *, wall_ns=None, cpu_ns=None):
+        self.wall = wall_ns or time.perf_counter_ns
+        self.cpu = cpu_ns or time.thread_time_ns
+        self.values = {}
+
+    def start(self):
+        return self.wall(), self.cpu()
+
+    def add(self, name, started):
+        ended = self.start()
+        value = self.values.setdefault(name, [0,0,0])
+        value[0] += max(0,ended[0]-started[0])
+        value[1] += max(0,ended[1]-started[1])
+        value[2] += 1
+
+    def snapshot(self):
+        return {name:{'wall_s':value[0]/1e9, 'thread_cpu_s':value[1]/1e9, 'calls':value[2]}
+            for name,value in self.values.items()}
 
 
 def scene_bound_commands(commands, transition_started):
@@ -974,6 +1004,7 @@ def run(args):
             result['source_code_sha256_at_session_start'][name] = file_sha256(Path(__file__).with_name(name))
     write_json(output/'result.json', result)
     env = ui = receiver = video_bridge = render_profiler = preview_worker = mobile_control = None
+    evidence_session = None
     mobile_mode = 'continuous_paused' if mobile_continuous else 'pose'
     mobile_tick = 0
     mobile_preparation = None
@@ -1215,16 +1246,26 @@ def run(args):
         result['prepared_quality_geometry_caches'] = [prepared_geometry_cache]
         original_step = raw.mujoco.step
         substeps = 0
+        substep_costs = None
         active_local = None
         def measured_step(*a, **kw):
             nonlocal substeps,pending_mobile_quality_row
+            measured = substep_costs.start() if substep_costs else None
             value = original_step(*a, **kw)
+            if measured is not None:
+                substep_costs.add('mujoco_engine_step',measured)
+            measured = substep_costs.start() if substep_costs else None
             substeps += 1
             force = applied_force_state(data)
             if not force['all_zero']:
                 raise RuntimeError('Nonzero externally applied force')
+            if measured is not None:
+                substep_costs.add('external_force_check',measured)
             if force_stream:
-                force_stream.write(json_text({'sim_time_s':float(data.time),**force})+'\n')
+                measured = substep_costs.start() if substep_costs else None
+                write_json_line(force_stream,{'sim_time_s':float(data.time),**force})
+                if measured is not None:
+                    substep_costs.add('force_evidence_publish',measured)
             if active_local is not None and substeps % 4 == 0:
                 sample_started = time.perf_counter()
                 row = sample_original_solved_quality(model,data,completed_steps=active_local+1,
@@ -1241,7 +1282,7 @@ def run(args):
                     # returns; bind it then, rather than shifting it by a tick.
                     pending_mobile_quality_row = row
                 else:
-                    quality_stream.write(json_text(row)+'\n')
+                    write_json_line(quality_stream,row)
             return value
         raw.mujoco.step = measured_step
         control_trace = (output/'control_trace.jsonl').open('x', buffering=1)
@@ -1251,12 +1292,32 @@ def run(args):
             if render_profiler:
                 render_profiler.set_context('startup_warmup',tick,data.time)
             obs, *_ = env.step(warmup.command(raw.task.robot,controller,obs))
-            control_trace.write(json_text({'phase':'startup_warmup','tick50':tick,
-                'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES)})+'\n')
+            write_json_line(control_trace,{'phase':'startup_warmup','tick50':tick,
+                'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES)})
         result['post_warmup_physical_state'] = physical_snapshot(model,data,BODY_JOINT_NAMES)
         write_json(output/'result.json',result)
         result['standing_warmup_readiness'] = require_standing_warmup(
             result['initial_physical_state'], result['post_warmup_physical_state'])
+        def configure_evidence():
+            nonlocal evidence_session,control_trace
+            if not (deferred and mobile):
+                return
+            from pico_async_evidence import DeferredEvidenceSession
+            if control_trace is not None:
+                control_trace.close()
+            if evidence_session is not None:
+                closed = evidence_session.close()
+                if not closed.get('completed'):
+                    raise RuntimeError('Evidence writer did not drain before scene reset: '+str(closed.get('error')))
+            # The model/hash/scratch verifier is prepared while paused. Neither
+            # the live MjData nor an ONNX/SDK object crosses this process boundary.
+            cpus = sorted(os.sched_getaffinity(0))
+            evidence_session = DeferredEvidenceSession(prepared_deferred,
+                cpus=cpus[-4:-3] if len(cpus)>=4 else cpus[:1],
+                trace_path=output/'control_trace.jsonl')
+            control_trace = evidence_session.trace
+            result['evidence_writer_protocol'] = evidence_session.receipt()
+        configure_evidence()
         if mobile_control:
             # Load and verify the separate planner while physics is paused,
             # before any receiver/recording or real-time deadline exists.
@@ -1399,8 +1460,8 @@ def run(args):
                 'previous_loop_wall_timing':last_loop_wall_timing})
             result['rejections'] = result['rejections'][-128:]
             try:
-                control_trace.write(json_text({'phase':'rejected_and_paused',
-                    **result['rejections'][-1]})+'\n')
+                write_json_line(control_trace,{'phase':'rejected_and_paused',
+                    **result['rejections'][-1]})
             except Exception as trace_error:
                 result['trace_write_error'] = repr(trace_error)
             try:
@@ -1435,6 +1496,9 @@ def run(args):
             nonlocal reset_generation
             nonlocal scene_metadata
             nonlocal environment_state,environment_receipt
+            nonlocal session_identity
+            nonlocal substep_costs
+            substep_costs = None
             if episode is not None:
                 raise ValueError('Finish the current episode before resetting the scene')
             # Invalidate old UI/handset commands even if reset fails partway.
@@ -1484,6 +1548,8 @@ def run(args):
                     output,deferred_prepare_index,model=model,objects=raw.mujoco.mj_objects,
                     joint_names=TRAINING_STATE_JOINT_NAMES)
                 result['prepared_deferred_models'].append(preparation)
+                configure_evidence()
+                session_identity = episode_session_identity(result)
             reset_before = physical_snapshot(model,data,BODY_JOINT_NAMES)
             warmup_baseline = reset_before
             obs = raw_get_obs()
@@ -1493,8 +1559,8 @@ def run(args):
                 if render_profiler:
                     render_profiler.set_context('reset_warmup',tick,data.time)
                 obs, *_ = env.step(warmup.command(raw.task.robot,controller,obs))
-                control_trace.write(json_text({'phase':'reset_warmup','tick50':tick,
-                    'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES)})+'\n')
+                write_json_line(control_trace,{'phase':'reset_warmup','tick50':tick,
+                    'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES)})
             reset_after = physical_snapshot(model,data,BODY_JOINT_NAMES)
             result.setdefault('resets',[]).append({'reason':reason,'initialization':reset_initialization,
                 'before':reset_before,'after':reset_after})
@@ -1680,13 +1746,13 @@ def run(args):
                         else:
                             operator_message='移动模式正在准备，请等候；也可以按Y暂停。'
                             continue
-                        control_trace.write(json_text({'phase':'mobile_mode_transition',
+                        write_json_line(control_trace,{'phase':'mobile_mode_transition',
                             'tick50':global_tick,'mode':mobile_mode,
                             'actual_state':snapshot,'source_sequence':frame.sequence,
                             'source_device_timestamp_ns':frame.device_timestamp_ns,
                             'source_raw_packet_sha256':hashlib.sha256(json_text(frame.raw_payload).encode()).hexdigest(),
                             'return_pose_check':return_pose_receipt,
-                            'calibration':reference.calibration})+'\n')
+                            'calibration':reference.calibration})
                     elif action == 'record':
                         if episode or not following or not (rendered or deferred):
                             raise ValueError('Recording needs active calibrated control and an explicit rendering/capture mode')
@@ -1769,6 +1835,8 @@ def run(args):
                 reject_and_pause('Tracking rejected: '+','.join(quality['reasons']))
             if following:
                 try:
+                    if evidence_session is not None:
+                        evidence_session.check()
                     if wall_deadline is None:
                         wall_deadline = time.monotonic()
                     lateness = time.monotonic()-wall_deadline
@@ -1794,16 +1862,19 @@ def run(args):
                             initial_target_z_m=initial_z)
                         os.link(prepared_geometry_cache['path'],directory/'container_geometry_cache.json',follow_symlinks=False)
                         write_json(directory/'metadata.json',metadata)
-                        if deferred:
-                            capture = DeferredStateCapture(directory/'deferred_capture',metadata=metadata,
-                                joint_names=list(TRAINING_STATE_JOINT_NAMES),warmup_ticks=50,
-                                start_time=float(data.time),model=model,prepared_model=prepared_deferred)
+                        if deferred and evidence_session is not None:
+                            capture,ledger,quality_stream,force_stream = evidence_session.begin(directory,
+                                metadata=metadata,joint_names=list(TRAINING_STATE_JOINT_NAMES),warmup_ticks=50,
+                                start_time=float(data.time),human_demo_uuid=episode.human_demo_uuid)
                         else:
-                            capture = AsyncTrainingCapture(directory/'capture',metadata=metadata,
-                                joint_names=list(TRAINING_STATE_JOINT_NAMES),warmup_ticks=50,start_time=float(data.time))
-                        ledger = CommandLedger(directory/'commands.jsonl',human_demo_uuid=episode.human_demo_uuid,metadata=metadata)
-                        quality_stream=(directory/'raw_quality_samples.jsonl').open('x',buffering=1)
-                        force_stream=(directory/'applied_force_samples.jsonl').open('w',buffering=1)
+                            capture = (DeferredStateCapture(directory/'deferred_capture',metadata=metadata,
+                                joint_names=list(TRAINING_STATE_JOINT_NAMES),warmup_ticks=50,
+                                start_time=float(data.time),model=model,prepared_model=prepared_deferred) if deferred
+                                else AsyncTrainingCapture(directory/'capture',metadata=metadata,
+                                    joint_names=list(TRAINING_STATE_JOINT_NAMES),warmup_ticks=50,start_time=float(data.time)))
+                            ledger = CommandLedger(directory/'commands.jsonl',human_demo_uuid=episode.human_demo_uuid,metadata=metadata)
+                            quality_stream=(directory/'raw_quality_samples.jsonl').open('x',buffering=1)
+                            force_stream=(directory/'applied_force_samples.jsonl').open('w',buffering=1)
                         if start_gate is not None:
                             # Preparatory file I/O owns no physical samples.
                             # Revalidate the same receiver without resetting the
@@ -1845,6 +1916,7 @@ def run(args):
                             lateness = time.monotonic()-wall_deadline
                     due = capture_tick_index(global_tick) is not None
                     control_tick_started = time.perf_counter()
+                    tick_costs = OperationCosts()
                     encode_seconds = 0.
                     input_wait_seconds = 0.
                     actual_before = physical_snapshot(model,data,BODY_JOINT_NAMES)
@@ -1918,13 +1990,16 @@ def run(args):
                                 raise ValueError('Hand target exceeds actual joint range: '+name)
                         command = controller.step(token,hands,obs)
                         if ledger:
+                            publish_started = tick_costs.start()
                             ledger.append('command',physical_tick50=state['local_tick50'],sim_time_s=float(data.time),
                                 source_sequence=frame.sequence,device_timestamp_ns=frame.device_timestamp_ns,
                                 source_host_received_s=frame.host_received_s,source_raw_packet=frame.raw_payload,
                                 body_token64=token,named_hand_targets=hands,reference_evidence=evidence,
                                 operator_preview_feedback=current_preview_feedback(preview_frame_receipt,following=True) if deferred else None,
                                 **({'capture_start_receipt':capture_start_receipt} if state['local_tick50']==0 and capture_start_receipt else {}))
+                            tick_costs.add('ledger_publish',publish_started)
                     if capture and state['capture_due']:
+                        publish_started = tick_costs.start()
                         pelvis=model.body('pelvis').id; root_joint=int(model.body_jntadr[pelvis]); dof=int(model.jnt_dofadr[root_joint])
                         capture_values = dict(tick50=state['local_tick50'],sim_time_s=float(data.time),
                             observed_joint_names=obs['joint_names'],observed_qpos=obs['joint_qpos'],
@@ -1948,6 +2023,7 @@ def run(args):
                             capture.enqueue(**capture_values,rgb=obs['head_stereo_left'],
                                 renderer_pose_diagnostics=getattr(raw.isaac,'last_observation_pose_diagnostics',None),
                                 renderer_authoritative_poses=actual_renderer_poses(model,data),observation_sim_time_s=obs['sim_time_s'])
+                        tick_costs.add('capture_publish',publish_started)
                     if preview_worker and due:
                         preview_state = integration_state_snapshot(mujoco,model,data,obs['sim_time_s'])
                         preview_worker.submit(preview_state,float(data.time),preview_epoch,global_tick)
@@ -1956,16 +2032,24 @@ def run(args):
                     if render_profiler:
                         render_profiler.set_context('pico_follow',global_tick,data.time)
                     step_started = time.perf_counter()
-                    obs,reward,terminated,truncated,info = env.step(command)
+                    environment_started = tick_costs.start()
+                    substep_costs = tick_costs
+                    try:
+                        obs,reward,terminated,truncated,info = env.step(command)
+                    finally:
+                        substep_costs = None
+                        tick_costs.add('environment_total',environment_started)
                     if pending_mobile_quality_row is not None:
+                        publish_started = tick_costs.start()
                         pending_mobile_quality_row['official_task_success'] = bool(terminated)
-                        quality_stream.write(json_text(pending_mobile_quality_row)+'\n')
+                        write_json_line(quality_stream,pending_mobile_quality_row)
                         pending_mobile_quality_row = None
+                        tick_costs.add('quality_evidence_publish',publish_started)
                     if mobile_mode in ('navigation','continuous'):
                         mobile_tick += 1
                     step_seconds = time.perf_counter()-step_started
                     active_local = None
-                    control_trace.write(json_text({'phase':'pico_follow','tick50':global_tick,
+                    write_json_line(control_trace,{'phase':'pico_follow','tick50':global_tick,
                         'source_sequence':frame.sequence,'source_device_timestamp_ns':frame.device_timestamp_ns,
                         'source_inputs':dict(frame.inputs),'named_hand_targets':dict(hands),
                         'latest_delivered_preview':current_preview_feedback(preview_frame_receipt,following=True) if deferred else None,
@@ -1973,13 +2057,14 @@ def run(args):
                         'timing_s':{'reference_encode':encode_seconds,'environment_step':step_seconds,
                             'fresh_input_wait':input_wait_seconds,
                             'control_tick_before_trace':time.perf_counter()-control_tick_started},
+                        'operation_wall_cpu_s':tick_costs.snapshot(),
                         'loop_wall_timing':{'loop_start_monotonic_ns':loop_timer.start_ns,
                             'loop_start_pc_wall_time_ns':loop_timer.start_wall_time_ns,
                             'pc_wall_time_ns':time.time_ns(),'lag_s':lateness,
                             'previous_complete_loop':last_loop_wall_timing},
                         'actual_before_step':actual_before,
                         'actual_after_step':physical_snapshot(model,data,BODY_JOINT_NAMES),
-                        'terminated':bool(terminated),'truncated':bool(truncated)})+'\n')
+                        'terminated':bool(terminated),'truncated':bool(truncated)})
                     finite = all(np.isfinite(x).all() for x in (data.qpos,data.qvel,data.qacc,data.ctrl))
                     pelvis=model.body('pelvis').id
                     tilt=float(np.degrees(np.arccos(np.clip(data.xmat[pelvis].reshape(3,3)[2,2],-1,1))))
@@ -2137,10 +2222,15 @@ def run(args):
         if collection_progress:
             collection_progress.close()
         for name, component in (('receiver',receiver),('mobile_planner',mobile_control),('headset_video',video_bridge),
-                                ('preview_worker',preview_worker),('ui',ui),('control_trace',control_trace),('render_profiler',render_profiler)):
+                                ('preview_worker',preview_worker),('ui',ui),('control_trace',control_trace),
+                                ('evidence_writer',evidence_session),('render_profiler',render_profiler)):
             if component:
                 try:
-                    component.close()
+                    closed = component.close()
+                    if name == 'evidence_writer':
+                        result['evidence_writer_close'] = closed
+                        if not closed.get('completed'):
+                            raise RuntimeError('Incomplete evidence writer shutdown: '+str(closed.get('error')))
                 except Exception as cleanup_error:
                     result.setdefault('cleanup_errors',{})[name] = repr(cleanup_error)
         periods=list(wall_periods)

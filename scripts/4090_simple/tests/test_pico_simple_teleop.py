@@ -455,7 +455,7 @@ class EntryGuardTests(unittest.TestCase):
             'audit_pico_teleop_episode.py','start_pico_teleop.sh',
             'handover_contact_quality.py','handover_geometry_quality.py','pico_episode_history.py',
             'pico_episode_review.py','pico_cpu_runtime.py','pico_capture_start.py','pico_async_preview.py',
-            'pico_mobile_task.py'})
+            'pico_mobile_task.py','pico_evidence_writer.py','pico_async_evidence.py'})
         self.assertTrue(all(len(digest)==64 for digest in identities.values()))
 
     def test_instance_rate_limits_record_before_after_without_clock_changes(self):
@@ -903,6 +903,29 @@ class EntryGuardTests(unittest.TestCase):
         pending=entry.completed_episode_message('save',{'status':'pending','pending':True})
         self.assertIn('后台正在物理复核',pending)
         self.assertNotIn('已通过',pending)
+
+
+class EvidencePublishingTests(unittest.TestCase):
+    def test_json_line_keeps_legacy_schema_and_uses_worker_when_available(self):
+        import io
+        record = {'actual_state':np.array([1.,2.]), 'native_success':False}
+        sync = io.StringIO()
+        entry.write_json_line(sync,record)
+        self.assertEqual(json.loads(sync.getvalue()),{'actual_state':[1.,2.], 'native_success':False})
+        received = []
+        entry.write_json_line(SimpleNamespace(write_json=received.append),record)
+        self.assertIs(received[0],record)
+
+    def test_operation_costs_separate_cpu_from_elapsed_without_a_simulator(self):
+        wall = iter([100,200,300,450])
+        cpu = iter([10,35,50,75])
+        timer = entry.OperationCosts(wall_ns=lambda:next(wall),cpu_ns=lambda:next(cpu))
+        timer.add('write',timer.start())
+        timer.add('write',timer.start())
+        self.assertEqual(timer.snapshot(),{'write':{'wall_s':250e-9,'thread_cpu_s':50e-9,'calls':2}})
+        snapshot = timer.snapshot()
+        snapshot['write']['wall_s'] = 9
+        self.assertEqual(timer.snapshot()['write']['wall_s'],250e-9)
 
 
 if __name__=='__main__':

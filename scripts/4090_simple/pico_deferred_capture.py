@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import stat as stat_module
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +154,47 @@ class PreparedDeferredModel:
             "object_body_names": {role: model.body(body).name for role, body in self.verifier.objects.items()},
             "mujoco_version": mujoco.__version__, "accepted_new_dataset": False}
         (self.directory / "prepared_model.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+
+    @classmethod
+    def from_archive(cls, model_path, *, model_sha256, joint_names, metadata,
+                     file_identity=None):
+        """Load authenticated prepared bytes into a separate CPU model/scratch.
+
+        This never saves, chmods or changes the source model.  Loading through
+        MuJoCo's in-memory VFS binds compilation to the bytes actually hashed,
+        rather than reopening a path after the identity check.
+        """
+        import mujoco
+        path = Path(model_path).absolute()
+        names = list(joint_names)
+        _validate_header(names, 50, 0.)
+        if (not isinstance(model_sha256, str) or len(model_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in model_sha256)):
+            raise ValueError("Need the prepared model's exact SHA256")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            if not stat_module.S_ISREG(before.st_mode):
+                raise ValueError("Prepared archive must be a regular file")
+            if file_identity is not None and tuple(file_identity) != identity:
+                raise ValueError("Prepared compiled model identity changed")
+            payload = stream.read()
+            after = os.fstat(stream.fileno())
+            if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != identity:
+                raise ValueError("Prepared compiled model changed while reading")
+        if hashlib.sha256(payload).hexdigest() != model_sha256:
+            raise ValueError("Prepared compiled model SHA256 mismatch")
+        model = mujoco.MjModel.from_binary_path("prepared-model.mjb", assets={"prepared-model.mjb": payload})
+        result = cls.__new__(cls)
+        result.names, result.model = names, model
+        result.spec = int(mujoco.mjtState.mjSTATE_INTEGRATION)
+        result.verifier = _PhysicalVerifier(model, names, _json_value(_snapshot(metadata)), result.spec)
+        result.directory, result.model_path = path.parent, path
+        result.model_sha256, result._stat, result.in_use = model_sha256, identity, False
+        if path.is_symlink() or result._file_identity() != identity:
+            raise ValueError("Prepared compiled model path changed during loading")
+        return result
 
     def _file_identity(self):
         stat = self.model_path.stat()

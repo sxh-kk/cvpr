@@ -468,6 +468,28 @@ joint38000仅模型初始化、fresh step0、8卡×batch8／全局64、10,000步
 涵盖model／Adam moments有限性、稀疏step、scheduler8N与8rank RNG，不宣称GPU恢复训练或任务成功率。实际结果见
 [Mobile完整训练与验收](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练完整训练结果与验收)。
 
+Mobile100 的本机评测使用独立 `prepare_mobile_pp_eval.py`，严格绑定实际 task-step10000、
+最终训练验收和100条Mobile来源；Motion参数从该联合权重导出，旧Motion文件只提供已核定的构造metadata。
+准备器只在隐藏GPU的CPU进程中运行，不重拟合统计或重做数据数值审计：
+
+```bash
+E=/home/zxc/CVPR_Evaluation_runtime/mobile_pp100_eval_20261028
+CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  /home/zxc/miniconda3/envs/cvpr-simple-model311/bin/python scripts/4090_simple/prepare_mobile_pp_eval.py \
+  --source "$E/source" --resources /home/zxc/CVPR_Evaluation_runtime/resources \
+  --output "$E/deployment" --repo "$PWD" \
+  --release /home/zxc/CVPR_Evaluation_runtime/pico_mobile_pp100_20261027_human01
+```
+
+`E=/home/zxc/CVPR_Evaluation_runtime/mobile_pp100_eval_20261028`；output必须为新的仓库外目录，
+不能对已完成的deployment重复执行。`serve_evaluation.py`在模型构造后固定采样seed，
+并记录实际在线DINO metadata。`run_closed_loop.py --mobile-official-protocol`只支持Mobile任务，
+恢复固定case全部DR状态，使用当前任务实际`.9`原生成功、1200步／24秒（含真实观测warmup），不因跌倒提前退出。
+归档metadata的`.4`原样保留；两者差异及原生reward的累计语义必须同时说明。
+本轮为官方level0十例、双来源SONIC控制器适配诊断，不能称原控制器认证benchmark或新场景泛化；
+十例实际完成，原生成功0/10、机器人跌倒0/10；48项CPU检查与十例真实GPU闭环及视频读帧验收通过。
+初始化、运行证据及逐例结果见[Mobile本机闭环诊断](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#最新task-step10000的本机闭环诊断)。
+
 Mobile 本轮针对 `planner_request_expired_no_reference` 修订 CPU 分配与故障诊断。
 旧003的四次超时与16:57:51–16:58:36后台review区间重叠，planner和review同用CPU31/nice19，
 已接受计划的ORT墙钟中位数71.56→133.11ms；旧失败请求缺完整耗时拆分，不能声称精确原因或必然复现。

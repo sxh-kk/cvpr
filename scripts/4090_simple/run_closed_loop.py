@@ -29,7 +29,8 @@ TASKS = ("G1WholebodyXMovePickTeleop-v0", "G1WholebodyXMoveBendPickTeleop-v0",
          "G1WholebodyHandoverTeleop-v0")
 CARRYBOX_TASK = "G1WholebodyXMoveBendCarryBoxSonic-v0"
 LIFTBOX_TASK = "G1WholebodyLiftBoxHoldSonic-v0"
-SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK)
+MOBILE_PP_TASK = "G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
+SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK, MOBILE_PP_TASK)
 
 
 def simulation_render_contract(raw, args):
@@ -82,10 +83,35 @@ def write_report_and_close(path: Path, result, close):
         close()
 
 
-def episode_reset_options(environment_config, dr_level, *, recorded_handover=False):
+def episode_reset_options(environment_config, dr_level, *, recorded_handover=False, recorded_mobile=False):
     # SIMPLE DR0 deliberately resamples materials and distractors. A recorded
     # heldout source used dr_level=None to restore every recorded randomizer.
-    return {"state_dict": environment_config, "dr_level": None if recorded_handover else dr_level}
+    return {"state_dict": environment_config,
+            "dr_level": None if recorded_handover or recorded_mobile else dr_level}
+
+
+def mobile_official_protocol(environment_config):
+    """Keep original reset metadata; use the actual upstream CLI time budget.
+
+    The archive's success_criteria is descriptive metadata. SIMPLE reset only
+    restores randomizers; the live task keeps its constructor's .9 threshold.
+    """
+    metadata = environment_config["metadata"]
+    if (environment_config.get("uid") != "g1_wholebody_locomotion_pick_between_tables_teleop"
+            or metadata.get("max_episode_steps") != 1200
+            or metadata.get("render_hz") != 50 or metadata.get("physics_dt") != .005):
+        raise ValueError("Mobile official-case protocol requires the unchanged1200-step/50Hz task metadata")
+    return {"max_episode_steps": 1200, "observation_hz": 50, "maximum_simulated_seconds": 24.,
+            "reset_dr_level": None, "source_metadata_success_criteria": metadata.get("success_criteria"),
+            "source_metadata_split": metadata.get("split"), "effective_success_criteria": .9,
+            "success_semantics": "upstream task.check_success; stop on native terminated",
+            "initialization": "official task reset; no teacher row or PICO cold-profile injection",
+            "boundary": "official fixed cases with dual-source SONIC controller adaptation; not certified original-controller benchmark"}
+
+
+def mobile_time_limit(env):
+    import gymnasium as gym
+    return gym.wrappers.TimeLimit(env, max_episode_steps=1200)
 
 
 def episode_termination(episode, terminated, truncated, sim_time, *, continue_after_success=False):
@@ -161,6 +187,8 @@ def parse_args():
     parser.add_argument("--stop-on-fall", action="store_true")
     parser.add_argument("--continue-after-task-success", action="store_true",
                         help="Handover only: retain official success flag but continue to the observation time limit")
+    parser.add_argument("--mobile-official-protocol", action="store_true",
+                        help="Mobile only: original case DR state, native .9 success and exact1200-step TimeLimit")
     parser.add_argument("--sim-mode", choices=("mujoco", "mujoco_isaac", "isaacsim"), default="mujoco")
     parser.add_argument("--compatibility-evidence", type=Path)
     parser.add_argument("--diagnostic-unverified-sonic", action="store_true",
@@ -173,6 +201,9 @@ def parse_args():
     args = parser.parse_args()
     if args.continue_after_task_success and args.tasks != ["G1WholebodyHandoverTeleop-v0"]:
         parser.error("Continuing after official success is only supported for Handover observation")
+    if args.mobile_official_protocol and (args.tasks != [MOBILE_PP_TASK] or args.seconds < 24
+            or args.stop_on_fall or args.worker_task not in (None, MOBILE_PP_TASK)):
+        parser.error("--mobile-official-protocol requires only Mobile P&P, --seconds >=24 and no --stop-on-fall; TimeLimit remains1200 steps")
     if args.isaac_observation_only and (not args.sync_observations or args.sim_mode == "mujoco"):
         parser.error("--isaac-observation-only requires --sync-observations and Isaac render mode")
     if args.warmup_control == "live_pose_sonic_v1_1" and not args.sync_observations:
@@ -294,14 +325,20 @@ def run_worker(args):
             first_config = {"metadata": {"physics_dt": .005}}
         else:
             first_config, _ = load_fixed_episode(metadata, args.episode_start, args.data_root)
+        if args.mobile_official_protocol:
+            result["mobile_protocol"] = mobile_official_protocol(first_config)
         config = SimLoopConfig().load_wbc_yaml()
         config["ENV_NAME"] = "simple"
         config["SIMULATE_DT"] = float(first_config["metadata"]["physics_dt"])
+        if args.worker_task == MOBILE_PP_TASK:
+            config["ENABLE_ELASTIC_BAND"] = False
         mode = "mujoco_isaac" if args.sim_mode == "isaacsim" else args.sim_mode
         env = gym.make("simple/" + args.worker_task, sonic_config=config, sim_mode=mode,
                        headless=True, dr_level=args.dr_level,
                        sync_mujoco_observations=args.sync_observations,
                        isaac_observation_only=args.isaac_observation_only)
+        if args.mobile_official_protocol:
+            env = mobile_time_limit(env)
         raw = env.unwrapped
         result["render_contract"] = simulation_render_contract(raw,args)
         if args.sync_observations and raw.isaac is not None:
@@ -325,8 +362,13 @@ def run_worker(args):
                                   "task_adapter": raw.task.metadata["task_adapter"]}
             else:
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
+                if args.mobile_official_protocol:
+                    protocol = mobile_official_protocol(env_config)
                 obs, info = env.reset(seed=seed, options=episode_reset_options(
-                    env_config, args.dr_level, recorded_handover=args.handover_initialization is not None))
+                    env_config, args.dr_level, recorded_handover=args.handover_initialization is not None,
+                    recorded_mobile=args.worker_task == MOBILE_PP_TASK))
+                if args.mobile_official_protocol and not math.isclose(float(raw.task.success_criteria), .9):
+                    raise ValueError("Actual Mobile native success threshold differs from upstream CLI default .9")
             initial_physics = None
             handover_initial = None
             if args.handover_initialization is not None:
@@ -357,7 +399,10 @@ def run_worker(args):
                 "warmup_frames": 0, "policy_frames": 0, "frames": 0,
                 "fell_before_first_policy_command": False,
                 "status": "running", "instruction": raw.task.instruction}
-            episode["source_scene_reset_dr_level"] = None if args.handover_initialization is not None else args.dr_level
+            episode["source_scene_reset_dr_level"] = (None if args.handover_initialization is not None
+                or args.worker_task == MOBILE_PP_TASK else args.dr_level)
+            if args.mobile_official_protocol:
+                episode["mobile_protocol"] = protocol
             if initial_physics is not None:
                 episode["initial_physics"] = initial_physics
                 episode["local_environment_config_scope"] = "same-seed reset model; actual initial coordinates/velocities are in initial_physics"
@@ -439,6 +484,9 @@ def run_worker(args):
                         if args.worker_task == "G1WholebodyHandoverTeleop-v0":
                             from handover_eval_runtime import measured_task_state
                             record["handover_measured_state"] = measured_task_state(raw)
+                        if args.worker_task == MOBILE_PP_TASK:
+                            from handover_eval_runtime import measured_task_state
+                            record["mobile_measured_state"] = measured_task_state(raw)
                         if "carry_box_progress" in info or "lift_box_hold_progress" in info:
                             record["task_progress"] = info.get("lift_box_hold_progress", info.get("carry_box_progress"))
                         trace.write(json.dumps(record, allow_nan=False) + "\n")

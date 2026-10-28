@@ -31,6 +31,11 @@ def audited_server(factory, seed, seed_function, output, source_sha):
     output.mkdir(parents=True, exist_ok=True)
     receipt = {"weight_sha256": source_sha, "sampling_seed": seed, "pid": os.getpid(),
                "rng_sha256": rng_sha(), "host": "127.0.0.1", "Ta": 30, "rtc": False, "inference_steps": 10}
+    online_dino = getattr(server, "online_dino", None)
+    if online_dino is not None:
+        # Record the encoder actually constructed in this GPU process, rather
+        # than treating a cached training contract as runtime-version evidence.
+        receipt["online_dino_runtime"] = dict(online_dino.encoder.metadata)
     (output / "startup.json").write_text(json.dumps(receipt, indent=2) + "\n")
     lock, owner_lock, owner, ordinal = threading.Lock(), threading.Lock(), None, 0
 

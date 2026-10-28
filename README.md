@@ -166,6 +166,10 @@ A100全部传输字节／文件身份、DINO路径重绑及300次实际CPU生产
 末batch训练loss0.4521014392375946，历史Handover回归loss10.945638656616211（不是Mobile验证，且后期升高）。
 13份模型及9500／10000完整恢复状态CPU最终验收通过，未做GPU恢复训练或任务成功率验收，
 详见[Mobile完整训练与验收](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练完整训练结果与验收)。
+最新Mobile task-step10000已完成本机4090的level0固定十例：每例1200步／24秒（含warmup），
+实际`.9`原生成功0/10、机器人跌倒0/10，十例HTTP／在线DINO身份／视频读帧验收均通过。
+这是同scene6的双来源SONIC控制器适配诊断；部分case在首次策略前目标已翻倒，逐例阶段及限制见
+[Mobile本机闭环评测记录](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#最新task-step10000的本机闭环诊断)。
 按用户最新要求，Mobile以`native_only`／`mobile-native-task-success-v2`只筛实际保存的官方native成功，
 移除额外位移、抬升、持物、末段稳定／几何成功门；SHA、时钟、有限性、原始外力等技术完整性保留，异常不能冒充任务失败。
 实际任务绑定`.9`阈值与源码SHA；环境每步两次reward更新，官方eval遇terminated退出，所以`any(native)`表示曾达官方终止成功，环境并不latch。

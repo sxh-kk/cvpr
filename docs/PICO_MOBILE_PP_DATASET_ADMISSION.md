@@ -382,3 +382,132 @@ SHA为 `d1fea82b176d5ef4eab4df28cdec2ab2b150fb7eabf4cbfe76112616f8702e50`。
 独立最终review无阻断，记录为 `training100_001/FINAL_REVIEW_001.json`，
 SHA为 `020ec95da0dfd4adb2eb6402bf40b0c42d8119e206ba70d2079054f85e54c567`。
 本批最终验收已完成，该run后续检查即将停止；执行状态见 `CONTINUATION_MONITOR.json`。
+
+## 最新task-step10000的本机闭环诊断
+
+本轮使用已经完成Mobile100训练的 **task-step10000**，在本机运行官方level0固定case 0–9。
+有效campaign `official_level0_003` 的10个case均已完成，运行返回码为0，最终CPU验收通过。
+技术有效10/10、原生成功0/10、机器人跌倒0/10、首次策略命令前机器人跌倒0/10。
+评测证据保存在仓库外：
+
+```text
+/home/zxc/CVPR_Evaluation_runtime/mobile_pp100_eval_20261028
+```
+
+下文将该目录记作 `E`。本轮模型SHA为
+`9b1ea759ef3aedcc7697d62f6ff36deb12dcc2e379cce61c6ca904e80826b390`，
+大小12,066,487,572字节；task-step10000指本次Mobile任务完成10,000次更新，
+源模型初始化为UnifoLM joint38000，不能将其写成Mobile训练48,000步。
+
+### 备份、CPU准备与实际在线DINO身份
+
+最终评测绑定的当前备份记录为 `E/source/backup_receipt.json`，
+SHA为 `9367ec0a07c84f0873b8e22c80818bf3a50d549f861b392c4c0999a6c7ccefe7`。
+原 `E/BACKUP_TRANSFER_RECEIPT_001.json`（SHA
+`0a90df75858457e9f64a653f39e71afb223e5628f7c7342c8801f10a942178cc`）仍保留作为早期传输收据。
+备份未复制optimizer，未修改训练；源模型复用既有最终SHA并核对前后stat身份，
+不将此记录描述为重新扫描全部训练恢复状态。
+
+`E/deployment/LOCAL_RUN_READY.json` 的状态为 `local_mobile_pp100_run_prepared`，
+SHA为 `49590746afab48626e40db55f08e1cd1a3c5d92ed6a10a54a84619b7c5bf75e5`。
+保存的VLM、ActionExpert及MotionExpert组件均通过严格CPU加载；Motion参数实际取自同一份
+Mobile task-step10000联合权重，没有替换为先前Motion参数。准备过程只重绑本机路径，
+沿用统计SHA `931f2b536b2fd47e8d0964ad966202ccbda852d05ea88074be321987200a6ac4`，
+未重拟合归一化，未恢复optimizer／RNG，未执行策略forward或初始化CUDA。
+这份CPU准备回执本身不证明物理任务成功。
+本轮CPU检查共48项通过：准备检查28项由 `test_prepare_mobile_pp_eval.py` 的13项新测试、
+`test_prepare_task_snapshot.py` 的9项共享回归和 `test_export_bundle.py` 的6项共享回归组成；
+另有Mobile协议6项、serve4项、smoke5项、Handover兼容5项。
+该总数包含共享／兼容回归，不代表48项全部新增；之后另完成下述真实10例GPU闭环。
+
+十例各自的 `ONLINE_DINO_RUNTIME_ACCEPTANCE.json` 均实际 `passed`，
+相同内容SHA为 `0a5bad271d199a80af3e4a87e734a6d397691ae0fda4b52f309eb79efac3fbdb`；
+例如 `E/official_level0_003/case_00/ONLINE_DINO_RUNTIME_ACCEPTANCE.json`。
+这些回执将每个服务实际启动的DINO身份与Mobile训练manifest
+`8369929e3e6c89c97192a107a2ab18b86d206d4e79084be2d16bca154ba46c27` 对齐：
+`dinov2-with-registers-large`、CLS＋4个register（5×1024）、clean `psi0_256x320_v1`、
+bf16计算及float32输出，运行时为Torch `2.7.0+cu126`／Transformers `4.57.1`。
+实际DINO权重文件SHA为 `edccedab2c4e164e80833096de89a32a6e8d7365870499a066a61dbc8894b42b`，
+在线派生运行身份SHA为 `38ec7e9a6bff2cc86bf363a1d87c4ada1160e72b2e27de6e09d468fa412dc3b9`。
+旧接受参考的Torch `2.6.0+cu118`／Transformers `4.49.0` 与本次实际训练运行时的差异已显式记录；
+编码器文件字节及其余协议字段相同，不宣称不同运行时或设备的数值逐位相等。
+
+### 官方固定case、成功语义与诊断边界
+
+`E/official_eval/METADATA_PROTOCOL_AUDIT_001.json` 已完成元数据与实际任务调用路径核对，
+SHA为 `4507056eb5242bb9d44a4e1fcd06d9a15a61e7c6145728512e0c5698a7028833`。
+官方case归档来自 `USC-PSI-Lab/psi-data` 的固定revision
+`e78fb93cc28912a3031a10b8656d32d7f0a2b867`，归档SHA为
+`8a4b0ff7d068967dac8baec2c4a4deca4f644215a1ee15e921739f3dfe90e7e0`。
+本轮仅选择level0的case 0–9，每个case在独立进程中恢复官方原始 `state_dict`，
+reset使用 `dr_level=None`，不重新按level0抽样，也不注入示范行或PICO冷启动profile。
+
+实际任务为 `simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0`。
+当前官方任务构造器与CLI的有效 `success_criteria=0.9`；归档metadata中的 `0.4` 原样保留。
+reset恢复DR状态不会将metadata中的0.4赋给实际任务阈值，运行结果明确记录实际0.9。
+成功按上游原生 `task.check_success`／环境 `terminated` 判定，并在原生成功时结束；
+不增加Handover式继续运行或额外几何成功门，也不将0.9误写成0.9秒。
+时限为 **1200步／50Hz＝24秒，包含warmup**，本次1秒warmup之后约有23秒策略执行时间；
+不能按24秒策略执行后再追加warmup。
+
+MuJoCo负责实际物理，Isaac RTX只同步呈现同一物理状态的观测，等待HTTP策略响应期间仿真时间暂停。
+本轮双来源SONIC控制器适配明确为诊断模式，
+`formal_evaluation_eligible=false`，尚未认证为原控制器的正式benchmark结果。
+所有case仍使用HSSD `scene6=102344022`，与Mobile100训练为同一场景，不能称为新场景泛化。
+尤其case 0的机器人、目标盒与篮子初始位置／朝向与固定human TRAIN0重合，
+桌面与场景几何也相同；材质和干扰物不同。这一外观变化不构成未见布局或未见场景验证。
+
+### 十例最终结果与技术验收
+
+`official_level0_001` 在Isaac环境启动时发生EOF，尚未执行策略；
+`official_level0_002` 在TIME_WAIT相关端口预检时被拦截，没有launch。
+两次技术尝试的原始目录和日志完整保留，不计为任务失败，也不替代有效case。
+有效campaign的十例均达到时限 `env_truncated`：每例1,200个50Hz tick／24秒，
+其中50帧warmup、1,150帧策略执行，首次策略命令在约1.005秒。
+每例 `/act` 实际返回23次200及50次warmup阶段的425，`/observe` 为1,200次；
+425记录中的RNG前后未变，未将等待历史的响应当作策略动作或技术错误。
+最终验收核对了客户端／服务端请求顺序、因果观测时间、有限状态、等待HTTP时仿真时间不推进、
+原生terminated与结果一致性，以及每例实际模型和DINO身份。
+十段视频均由ffprobe实读确认640×360、50fps、1,201帧，ffmpeg均正常结束。
+
+下面结合原始测量字段与独立逐例视频复核，按case编号记录已观测阶段；
+十例的 `native_success` 均为false。
+高度、接触和距离只作行为描述，不增加成功门，也不把单次接触当作稳定抓持：
+
+- **case 0：** 抓起盒子并搬运到篮子处，目标最大抬高约27.8厘米、XY位移约2.215米，
+  首次篮接触约21.485秒；直到约23.965秒才出现最后3帧无手接触，最大返回reward为0.1，
+  未达到原生0.9终止。末端目标与篮中心XY距离约5.0厘米不能替代原生判定。
+- **case 1：** 视频确认持续抓持，但未送到第二桌；目标最大抬高约8.5厘米、XY位移约49.8厘米，
+  未记录篮接触，末端目标距篮约2.007米，未完成原生成功。
+- **case 2：** 首次策略前目标已移动约14.1厘米、倾斜约75.4°，之后未记录手或篮接触，
+  未完成原生成功。
+- **case 3：** 首次策略前目标已移动约13.3厘米、倾斜约81.0°，之后未记录手或篮接触，
+  未完成原生成功。
+- **case 4：** warmup阶段约0.065秒已有右手接触记录，首次策略前目标已移动约14.6厘米、
+  倾斜约91.0°；视频显示后续空手走向第二桌，未记录篮接触，未完成原生成功。
+- **case 5：** 视频确认持续抓持，但未送到第二桌；目标最大抬高约11.1厘米、XY位移约67.2厘米，
+  未记录篮接触，末端目标距篮约1.490米，未完成原生成功。
+- **case 6：** 抓取尝试将目标碰倒；约12.905秒首次记录右手接触，
+  目标高度相对首帧最大增加不足1毫米、XY位移约14.8厘米，未记录篮接触，未完成原生成功。
+- **case 7：** 抓取未建立；约3.665秒首次记录右手接触，目标未抬高，首末XY位移不足0.1毫米，
+  未记录篮接触，未完成原生成功。
+- **case 8：** 抓取未建立；未记录手或篮接触，目标未抬高，首末XY位移约0.4毫米，未完成原生成功。
+- **case 9：** 首次策略前目标已平移约9.44厘米、倾斜约95.87°并靠在toy_gun旁；
+  只有warmup约0.305秒的一帧右手接触，学习策略阶段未抓回、未提起搬运，未完成原生成功。
+
+case 2／3／4／9共四例目标在首次策略命令前已翻倒或移动，不能将其初始变化全部归因于模型输出。
+这些case仍按同一原生规则计为false，未因初始目标变化过滤、重置或追加排除门。
+这与十例均无机器人跌倒是不同观测，不能把目标翻倒写成机器人跌倒。
+
+最终收据为 `E/FINAL_EVALUATION_ACCEPTANCE_001.json`，`status=complete`，
+完成时间为UTC `2026-10-28T06:45:43.236422+00:00`（北京时间14:45:43），
+SHA为 `4fda8a18fc6a1361de712627803bb360bc2be8d3265291cf37290534189b3674`。
+该收据绑定10份 `CASE_SUMMARY.json`、命令、DINO运行回执、服务启动和请求日志、
+原始 `result.json`、`trace.jsonl`、HTTP账本及视频的SHA／大小。
+每例完整原件保留在 `E/official_level0_003/case_00` 至 `case_09`，
+视频位于各自 `simulation/G1WholebodyLocomotionPickBetweenTablesTeleop-v0/episode-<编号>/rollout.mp4`。
+
+最终结论是本轮10例技术有效的闭环诊断中原生成功0/10、机器人跌倒0/10；
+48项CPU检查与真实GPU运行均已完成，未重复已经验收的数据数值审计。
+这份结果仍受上述控制器适配与同场景／重合初态边界约束，不宣称正式原控制器benchmark成绩、
+新场景泛化或Mobile验证集loss；也不改变既有训练验收和数据准入记录。

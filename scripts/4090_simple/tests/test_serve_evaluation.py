@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import random
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -42,6 +43,18 @@ class Stub:
 
 
 class AuditContracts(unittest.TestCase):
+    def test_actual_constructed_dino_runtime_metadata_is_saved(self):
+        metadata = {'torch_version': 'test-runtime', 'transformers_version': 'test-transformers',
+                    'weights_sha256': 'actual-loaded-weight-identity'}
+        def factory():
+            server = Stub(1)
+            server.online_dino = SimpleNamespace(encoder=SimpleNamespace(metadata=metadata))
+            return server
+        with tempfile.TemporaryDirectory() as root:
+            module.audited_server(factory, 7, seed, Path(root), 'source')
+            receipt = json.loads((Path(root) / 'startup.json').read_text())
+            self.assertEqual(receipt['online_dino_runtime'], metadata)
+
     def test_wrapper_registers_production_http_signature(self):
         with tempfile.TemporaryDirectory() as root:
             server = module.audited_server(lambda: Stub(1), 7, seed, Path(root), "source")

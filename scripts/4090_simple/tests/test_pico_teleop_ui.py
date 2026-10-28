@@ -86,6 +86,8 @@ class LocalUITests(unittest.TestCase):
         self.assertEqual(value["status"]["position"], [1., 2.])
         self.assertEqual(value["status"]["error"], ["raw"])
         self.assertFalse(value["accepted_new_dataset"])
+        self.assertEqual(len(value["ui_session_id"]), 32)
+        self.assertEqual(value["ui_session_id"], self.ui._status_snapshot()["ui_session_id"])
         self.assertTrue(value["image_available"])
         code, headers, body = self.request("GET", "/latest.jpg")
         self.assertEqual(code, 200); self.assertEqual(headers["Content-Type"], "image/jpeg")
@@ -200,7 +202,7 @@ const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('nod
 const pageScript=fs.readFileSync(0,'utf8');
 const elements=new Map();
 function element(name){if(!elements.has(name))elements.set(name,{hidden:true,src:name==='#camera'?'/stream.mjpg':undefined,replaceChildren(){},appendChild(){},removeAttribute(key){delete this[key];},getAttribute(key){return this[key]??null;}});return elements.get(name);}
-const context={document:{querySelector:element,querySelectorAll:()=>[],createElement:()=>({})},
+const context={AbortController,document:{querySelector:element,querySelectorAll:()=>[],createElement:()=>({})},
 setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>{},
 fetch:async()=>({ok:true,json:async()=>({status:{status:'paused'},image_available:false,image_version:0})})};
 vm.createContext(context);vm.runInContext(pageScript,context);
@@ -358,14 +360,14 @@ assert.ok(element('#mobile-status').textContent.includes('上身保持'));
         script = _PAGE.split("<script>", 1)[1].split("</script>", 1)[0]
         runner = r"""
 const vm=require('node:vm'),assert=require('node:assert/strict'),fs=require('node:fs');
-const elements=new Map(),commands=JSON.parse(process.argv[1]);let finishCommand=null;
+const elements=new Map(),commands=JSON.parse(process.argv[1]),timers=new Map();let finishCommand=null,nextTimer=0;
 function element(name){if(!elements.has(name))elements.set(name,{hidden:true,textContent:'',disabled:false,
- src:name==='#camera'?'/stream.mjpg':undefined,listeners:{},dataset:{},replaceChildren(){},appendChild(){},
+ src:name==='#camera'?'/stream.mjpg':undefined,listeners:{},dataset:{},children:[],replaceChildren(){this.children=[];},appendChild(row){this.children.push(row);},
  removeAttribute(key){delete this[key];},getAttribute(key){return this[key]??null;},
  addEventListener(kind,fn){this.listeners[kind]=fn;}});return elements.get(name);}
 const buttons=commands.map(command=>{const b=element('button[data-command="'+command+'"]');b.dataset.command=command;return b;});
-const context={document:{querySelector:element,querySelectorAll:()=>buttons,createElement:()=>({})},
- setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>{},snapshot:{status:{status:'paused'},image_available:false,image_version:0},
+const context={AbortController,document:{querySelector:element,querySelectorAll:()=>buttons,createElement:()=>({})},
+ setTimeout:(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id),setInterval:()=>{},snapshot:{status:{status:'paused'},image_available:false,image_version:0},
  fetch:async(url)=>url==='/command'?new Promise(resolve=>{finishCommand=resolve;}):({ok:true,json:async()=>context.snapshot})};
 vm.createContext(context);vm.runInContext(fs.readFileSync(0,'utf8'),context);
 const button=command=>element('button[data-command="'+command+'"]');
@@ -404,6 +406,66 @@ await refresh(progress);assert.equal(button('calibrate').disabled,false);
 await refresh(null,{collection_task_profile:'handover',last_episode:null});
 assert.equal(element('#mobile-collection-progress').hidden,true);
 assert.equal(button('record').disabled,false);assert.equal(button('discard').disabled,true);
+// Global immutable review state stays intact; the main display only shows
+// strict source_path descendants of this session, including at path boundaries.
+const old={uuid:'old',number:1,source_path:'/round/live_000/episodes/old',pending:false,disposition:'kept',available:true};
+const current={uuid:'current',number:2,source_path:'/round/live_001/episodes/current',pending:false,disposition:'kept',available:true};
+const sibling={...old,uuid:'sibling',source_path:'/round/live_001_other/episodes/sibling'};
+const escape={...old,uuid:'escape',source_path:'/round/live_001/../other/episodes/escape'};
+const review={status:'idle',pending_count:0,latest_completed:old,latest_results:[old,current,sibling,escape]};
+await refresh(progress,{output:'/round/live_001',last_episode:old,background_review:review});
+assert.equal(element('#last-episode').textContent,'本会话上一条：暂无已完成录制');
+assert.equal(button('discard').disabled,true);
+assert.ok(element('#review-result').textContent.includes('002'));
+assert.equal(element('#review-results').children.length,1);
+assert.equal(element('#review-history-results').children.length,3);
+assert.equal(element('#review-history').hidden,false);
+assert.equal(review.latest_completed.uuid,'old');assert.equal(review.latest_results.length,4);
+await refresh(progress,{status:'saving',last_episode:old,background_review:review});
+assert.equal(element('#last-episode').textContent,'本会话上一条：暂无已完成录制');
+assert.equal(element('#review-results').children.length,1); // Missing output keeps this UI instance's binding.
+await refresh(progress,{output:'/round/live_001',last_episode:current,background_review:review});
+assert.equal(button('discard').disabled,false);
+// A new UI/server starts its image epoch at zero. Retire the previous bitmap
+// before accepting the new stream, rather than comparing to its old epoch7.
+vm.runInContext('updateCameraAvailability(true,12,7);camera.onload()',context);
+assert.equal(element('#camera').hidden,false);
+context.snapshot={status:{status:'paused',output:'/round/live_002',last_episode:current},
+ ui_session_id:'new-ui-instance',image_available:true,image_version:1,image_epoch:0};
+await vm.runInContext('refresh()',context);
+assert.equal(vm.runInContext('lastImageEpoch',context),0);
+assert.equal(element('#camera').hidden,true);assert.ok(element('#camera').src.includes('version=1'));
+element('#camera').onload();assert.equal(element('#camera').hidden,false);
+context.snapshot={status:{status:'resetting',last_episode:current,background_review:review},
+ ui_session_id:'third-ui-instance',image_available:false,image_version:0,image_epoch:0};
+await vm.runInContext('refresh()',context);
+assert.equal(vm.runInContext('lastOutput',context),null); // A new server cannot inherit the old output binding.
+assert.equal(element('#review-results').children.length,0);
+// A never-completing HTTP request has one finite deadline and cannot multiply
+// concurrent polls. Late success from that expired request cannot revive it.
+const goodFetch=context.fetch;let resolveOld=null,statusRequests=0;
+context.fetch=async()=>{statusRequests++;return new Promise(resolve=>{resolveOld=resolve;});};
+const stalled=vm.runInContext('refresh()',context);
+await vm.runInContext('refresh()',context);assert.equal(statusRequests,1);
+[...timers.values()].find(timer=>timer.delay===1500).fn();await stalled;
+assert.equal(element('#phase').textContent,'电脑界面连接中断');
+assert.equal(element('#camera').hidden,true);assert.equal(element('#camera').getAttribute('src'),null);
+assert.ok(element('#preview-feedback').textContent.includes('非实时'));
+for(const b of buttons)assert.equal(b.disabled,true);
+context.fetch=goodFetch;
+await refresh(progress,{output:'/round/live_002',last_episode:null});
+assert.equal(button('record').disabled,false);assert.equal(element('#phase').textContent,'已暂停');
+resolveOld({ok:true,json:async()=>({status:{status:'following',output:'/old'},image_available:true,image_version:99,image_epoch:99})});
+await new Promise(setImmediate);assert.equal(element('#phase').textContent,'已暂停');
+// An old-session command response cannot replace new status or remove a newer
+// in-flight intention on the same physical button.
+const oldCommand=button('calibrate').listeners.click(),finishOld=finishCommand;
+await refresh(progress,{output:'/round/live_003',operator_message:'新会话已暂停'});
+const newCommand=button('calibrate').listeners.click(),finishNew=finishCommand;
+finishOld({ok:true,json:async()=>({queued:'calibrate'})});await oldCommand;
+assert.equal(element('#message').textContent,'新会话已暂停');assert.equal(button('calibrate').disabled,true);
+finishNew({ok:true,json:async()=>({queued:'calibrate'})});await newCommand;
+assert.equal(button('calibrate').disabled,false);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
         result = subprocess.run([node, "-e", runner, json.dumps(sorted(COMMANDS))], input=script,

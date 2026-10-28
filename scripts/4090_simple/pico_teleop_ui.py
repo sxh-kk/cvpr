@@ -17,6 +17,7 @@ import socket
 import struct
 import threading
 import time
+import uuid
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -55,7 +56,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 <p id="grasp" role="status">等待抓握反馈</p>
 <p id="preview-feedback" role="status">等待相机</p>
 <p id="last-episode" role="status">上一条：暂无已完成录制</p>
-<div id="review-panel"><p id="review-status" role="status">后台复核：准备中</p><p id="review-result" role="status">最近完成：暂无</p><details><summary>最近复核结果</summary><ul id="review-results"></ul></details></div>
+<div id="review-panel"><p id="review-status" role="status">后台复核：准备中</p><p id="review-result" role="status">最近完成：暂无</p><details><summary>本会话复核记录</summary><ul id="review-results"></ul></details><details id="review-history" hidden><summary>历史记录（其它会话，原件保留）</summary><ul id="review-history-results"></ul></details></div>
 <div class="view"><span id="placeholder" class="muted">等待仿真画面</span><img id="camera" src="/stream.mjpg" alt="当前仿真相机画面" hidden></div>
 <div class="bar">
 <button data-command="calibrate">标定</button><button data-command="follow">开始跟随</button><button data-command="pause">暂停跟随</button>
@@ -65,7 +66,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;color:#b9c9dc}det
 </div><div id="message" role="status"></div><div id="error" role="alert"></div>
 <details><summary>查看运行详情</summary><pre id="details"></pre></details>
 <script>
-const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=true,lastOperatorMessage=null,imageAvailable=false,cameraReady=false,lastImageEpoch=null,lastStatus=null;const pendingButtons=new Set();
+const camera=document.querySelector('#camera');let streamRetry=null,statusConnected=false,lastOperatorMessage=null,imageAvailable=false,cameraReady=false,lastImageEpoch=null,lastStatus=null,lastOutput=null,lastUIInstance=null,sessionGeneration=0,refreshSequence=0,refreshInFlight=false;const pendingButtons=new Map();
+function clearCamera(){imageAvailable=false;cameraReady=false;lastImageEpoch=null;if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}camera.removeAttribute('src');showCamera();}
+function resetSessionView(){sessionGeneration++;clearCamera();lastStatus=null;lastOperatorMessage=null;pendingButtons.clear();document.querySelector('#message').textContent='';}
+function absolutePath(value){if(typeof value!=='string'||!value.startsWith('/')||value.includes(String.fromCharCode(0)))return null;const parts=value.split('/').filter(Boolean);return parts.some(part=>part==='.'||part==='..')?null:'/'+parts.join('/');}
+function belongsToSession(record,output){if(!output)return true;const root=absolutePath(output),source=absolutePath(record?.source_path);return !!(root&&source&&source!==root&&source.startsWith(root==='/'?'/':root+'/'));}
+function sessionOutput(s){return typeof s.output==='string'?s.output:(lastOutput??(lastUIInstance!==null?'awaiting-session-output':null));}
+function sessionLastEpisode(s){return belongsToSession(s.last_episode,sessionOutput(s))?s.last_episode:null;}
 function showCamera(){camera.hidden=!(imageAvailable&&cameraReady);document.querySelector('#placeholder').hidden=!camera.hidden;}
 function reconnectStream(){if(streamRetry!==null||!imageAvailable)return;cameraReady=false;showCamera();streamRetry=setTimeout(()=>{streamRetry=null;if(imageAvailable)camera.src='/stream.mjpg?retry='+Date.now();},500);}
 function updateCameraAvailability(available,version,epoch){if(Number.isInteger(epoch)){if(lastImageEpoch!==null&&epoch<lastImageEpoch)return;if(lastImageEpoch!==null&&epoch!==lastImageEpoch){cameraReady=false;camera.removeAttribute('src');if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}}lastImageEpoch=epoch;}const next=available===true;if(!next){imageAvailable=false;cameraReady=false;if(streamRetry!==null){clearTimeout(streamRetry);streamRetry=null;}camera.removeAttribute('src');}else{const restart=!imageAvailable||!camera.getAttribute('src');imageAvailable=true;if(restart){cameraReady=false;camera.src='/stream.mjpg?version='+version;}}showCamera();}
@@ -73,15 +80,17 @@ function previewFeedbackText(feedback,available){if(feedback?.error||feedback?.s
 function trackingFeedbackText(t){if(t?.valid)return '全身追踪有效 · 手柄输入已连接';const labels={no_tracking_packet:'未收到数据，请保持XRoboToolkit前台并开启Send',controller_input_required:'请在头显切换到手柄输入模式',app_not_focused:'请保持XRoboToolkit在前台',head_tracking_invalid:'头部追踪无效，请戴好头显',body_missing_shape_or_nonfinite:'缺少完整24点全身追踪，请检查全身标定',stale:'数据已过期，请检查追踪发送连接',input_mode_changed:'输入模式刚切换，请等稳定后重新标定',device_timestamp_gap:'追踪数据中断，请检查发送连接'};return '追踪不可用：'+((t?.reasons??[]).map(reason=>labels[reason]??reason).join('；')||'等待数据');}
 function mobileCollectionLocked(p){return ['awaiting_review','complete','error'].includes(p?.status);}
 function mobileCollectionProgressText(p){const total=Number.isInteger(p.total)&&p.total>0?p.total:'待确认';const accepted=Number.isInteger(p.accepted_count)&&p.accepted_count>=0?p.accepted_count:'待确认';if(p.status==='complete')return '已完成'+accepted+'/'+total+'份官方TRAIN初始化采集';const position=Number.isInteger(p.current_position)&&p.current_position>0&&Number.isInteger(p.current_official_episode_index)&&p.current_official_episode_index>=0?'第'+p.current_position+'/'+total+'份，官方TRAIN episode'+String(p.current_official_episode_index).padStart(3,'0')+'；':'';const progress=position+'已完成'+accepted+'/'+total;if(p.status==='awaiting_review')return progress+' · 等待复核，复核完成后继续下一份';if(p.status==='error')return progress+' · 已暂停：技术错误'+(p.error?' · '+(typeof p.error==='string'?p.error:JSON.stringify(p.error)):'');return progress;}
-function updateCommandButtons(s){s=s??{};const busy=['saving','auditing','resetting'].includes(s.status);for(const b of document.querySelectorAll('button[data-command]'))b.disabled=busy||pendingButtons.has(b);const discard=document.querySelector('button[data-command="discard"]');if(!busy&&!s.recording)discard.disabled=pendingButtons.has(discard)||!(s.last_episode?.available||(s.last_episode?.pending&&s.last_episode?.status!=='pending_discard'));if(mobileCollectionLocked(s.mobile_collection_progress))for(const b of document.querySelectorAll('button[data-command]'))if(['calibrate','follow','record','reset','toggle_navigation'].includes(b.dataset.command))b.disabled=true;}
+function updateCommandButtons(s){s=s??{};const busy=!statusConnected||['saving','auditing','resetting'].includes(s.status);for(const b of document.querySelectorAll('button[data-command]'))b.disabled=busy||pendingButtons.has(b);const discard=document.querySelector('button[data-command="discard"]'),last=sessionLastEpisode(s);if(!busy&&!s.recording)discard.disabled=pendingButtons.has(discard)||!(last?.available||(last?.pending&&last?.status!=='pending_discard'));if(mobileCollectionLocked(s.mobile_collection_progress))for(const b of document.querySelectorAll('button[data-command]'))if(['calibrate','follow','record','reset','toggle_navigation'].includes(b.dataset.command))b.disabled=true;}
 
 function episodeText(v){if(!v?.uuid)return '暂无';const id=v.number!=null?String(v.number).padStart(3,'0'):'待编号（'+v.uuid.slice(0,8)+'）';const state=v.status==='pending_discard'?'已申请丢弃，后台处理中':v.status==='technical_blocked'||v.selection_status==='technical_evidence_incomplete'?'技术异常，原件保留':v.discarded||v.disposition==='discarded'?(v.selection_status==='official_task_not_successful'?'未达到官方任务成功条件':'已丢弃'):v.disposition==='kept'?(v.selection_policy==='native_only'?'官方任务成功，已保留':'物理验收通过，已保留'):v.status==='running'?'复核中':v.status==='error'?'复核异常':v.pending?'待复核':v.collection_enabled===false?'诊断已完成（不计真人数据）':'待审核';return id+' · '+state+((v.reasons??[]).length?' · 原因：'+v.reasons.join('；'):'')+(v.error?' · '+v.error:'');}
-function renderReview(q){const labels={starting:'正在准备',idle:'空闲',working:'正在复核',recovering:'正在恢复任务',error:'复核异常'};document.querySelector('#review-status').textContent='后台复核：'+(q?(labels[q.status]??q.status)+' · 未完成 '+(q.pending_count??0)+' 条'+(q.error?' · '+q.error:''):'准备中');document.querySelector('#review-result').textContent='最近完成：'+episodeText(q?.latest_completed);const list=document.querySelector('#review-results');if(list){list.replaceChildren();for(const v of (q?.latest_results??[])){const row=document.createElement('li');row.textContent=episodeText(v);list.appendChild(row);}}}
+function renderReview(q,output,last){const labels={starting:'正在准备',idle:'空闲',working:'正在复核',recovering:'正在恢复任务',error:'复核异常'};document.querySelector('#review-status').textContent=(output?'后台复核（全部会话）：':'后台复核：')+(q?(labels[q.status]??q.status)+' · 未完成 '+(q.pending_count??0)+' 条'+(q.error?' · '+q.error:''):'准备中');const recent=(q?.latest_results??[]).filter(v=>belongsToSession(v,output));const completed=belongsToSession(q?.latest_completed,output)?q?.latest_completed:[...recent].reverse().find(v=>v.pending===false);document.querySelector('#review-result').textContent=(output?'本会话最近完成：':'最近完成：')+episodeText(completed);const list=document.querySelector('#review-results');if(list){list.replaceChildren();for(const v of recent){const row=document.createElement('li');row.textContent=episodeText(v);list.appendChild(row);}}const history=document.querySelector('#review-history-results');if(history){history.replaceChildren();const seen=new Set();for(const v of [q?.latest_episode,q?.latest_completed,...(q?.latest_results??[]),last])if(v?.uuid&&!belongsToSession(v,output)&&!seen.has(v.uuid)){seen.add(v.uuid);const row=document.createElement('li');row.textContent='历史 · '+episodeText(v);history.appendChild(row);}document.querySelector('#review-history').hidden=seen.size===0;}}
+function disconnected(error){statusConnected=false;clearCamera();updateCommandButtons(lastStatus);document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#tracking-status').textContent='服务未连接，追踪状态非实时';document.querySelector('#preview-feedback').textContent='服务未连接，画面非实时';document.querySelector('#grasp').textContent='服务未连接，抓握反馈非实时';document.querySelector('#error').textContent=error.message;}
 
 camera.onerror=reconnectStream;
 camera.onload=()=>{cameraReady=imageAvailable;showCamera();};
-async function refresh(){try{
- const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error('读取状态失败');const v=await r.json();const s=v.status;
+async function refresh(){if(refreshInFlight)return;refreshInFlight=true;const sequence=++refreshSequence,controller=new AbortController();let timeout=null;try{
+ const v=await Promise.race([(async()=>{const r=await fetch('/status.json',{cache:'no-store',signal:controller.signal});if(!r.ok)throw Error('读取状态失败');return r.json();})(),new Promise((resolve,reject)=>{timeout=setTimeout(()=>{controller.abort();reject(Error('读取电脑状态超时，当前画面非实时'));},1500);})]);if(sequence!==refreshSequence)return;const s=v.status;
+ const instance=v.ui_session_id??null,output=typeof s.output==='string'?s.output:null,newInstance=instance!==null&&instance!==lastUIInstance;if(newInstance)lastOutput=null;if(newInstance||(output!==null&&output!==lastOutput))resetSessionView();if(instance!==null)lastUIInstance=instance;if(output!==null)lastOutput=output;
  lastStatus=s;const collection=s.mobile_collection_progress;const progress=document.querySelector('#mobile-collection-progress');progress.hidden=!collection;progress.textContent=collection?mobileCollectionProgressText(collection):'';
  document.querySelector('#tracking-status').textContent=trackingFeedbackText(s.tracking);
  const mobile=s.collection_task_profile==='mobile_pp';const continuous=mobile&&s.mobile_control_policy==='continuous_vr_mode1';document.querySelector('button[data-command="toggle_navigation"]').hidden=!mobile||continuous;
@@ -97,7 +106,7 @@ async function refresh(){try{
  document.querySelector('#phase').textContent=labels[phase]??phase;
  const h=s.hand_control;const pct=x=>Number.isFinite(x)?Math.round(x*100)+'%':'未下发';
  document.querySelector('#grasp').textContent=h?['left','right'].map((side,i)=>{const v=h[side];return (i?'右':'左')+'：扳机 '+pct(v.trigger)+' · 侧握 '+pct(v.grip)+' · 下发 '+pct(v.applied_closed_fraction)+' · 实际闭合 '+pct(v.actual_closed_fraction);}).join('　／　')+'（闭合不代表抓住）':'当前接收端暂无抓握反馈';
- const last=s.last_episode;document.querySelector('#last-episode').textContent=last?.uuid?'上一条：'+episodeText(last):'上一条：暂无已完成录制';renderReview(s.background_review);
+ const last=sessionLastEpisode(s),outputScope=sessionOutput(s);document.querySelector('#last-episode').textContent=(outputScope?'本会话上一条：':'上一条：')+(last?.uuid?episodeText(last):'暂无已完成录制');renderReview(s.background_review,outputScope,s.last_episode);
  const discard=document.querySelector('button[data-command="discard"]');discard.textContent=s.recording?'丢弃当前录制':'丢弃上一条';
  updateCommandButtons(s);
  if(s.operator_message&&(s.operator_message!==lastOperatorMessage||document.querySelector('#message').textContent!==s.operator_message)){document.querySelector('#message').textContent=s.operator_message;lastOperatorMessage=s.operator_message;}
@@ -105,13 +114,13 @@ async function refresh(){try{
  const err=(collection?.status==='error'?collection.error:null)??s.error??s.last_error??s.reason??'';document.querySelector('#error').textContent=typeof err==='string'?err:JSON.stringify(err);
  updateCameraAvailability(v.image_available,v.image_version,v.image_epoch);
  document.querySelector('#preview-feedback').textContent=previewFeedbackText(s.preview_feedback,v.image_available);
- }catch(e){statusConnected=false;document.querySelector('#phase').textContent='电脑界面连接中断';document.querySelector('#error').textContent=e.message;}
+ }catch(e){if(sequence===refreshSequence)disconnected(e);}finally{if(timeout!==null)clearTimeout(timeout);if(sequence===refreshSequence)refreshInFlight=false;}
 }
-for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{pendingButtons.add(b);b.disabled=true;try{
+for(const b of document.querySelectorAll('button[data-command]'))b.addEventListener('click',async()=>{const intention={generation:sessionGeneration,sequence:refreshSequence};pendingButtons.set(b,intention);b.disabled=true;try{
  const r=await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:b.dataset.command})});
- const v=await r.json();if(!r.ok)throw Error(v.error??'提交失败');document.querySelector('#message').textContent='已提交，等待电脑执行：'+b.textContent;
- }catch(e){document.querySelector('#error').textContent=e.message;}finally{pendingButtons.delete(b);updateCommandButtons(lastStatus);}});
-refresh();setInterval(refresh,500);
+ const v=await r.json();if(!r.ok)throw Error(v.error??'提交失败');if(intention.generation===sessionGeneration&&intention.sequence===refreshSequence)document.querySelector('#message').textContent='已提交，等待电脑执行：'+b.textContent;
+ }catch(e){if(intention.generation===sessionGeneration&&intention.sequence===refreshSequence)document.querySelector('#error').textContent=e.message;}finally{if(pendingButtons.get(b)===intention)pendingButtons.delete(b);updateCommandButtons(lastStatus);}});
+updateCommandButtons(null);refresh();setInterval(refresh,500);
 </script></html>"""
 
 
@@ -178,6 +187,7 @@ class LocalTeleopUI:
         self._encode_lock = threading.Lock()
         self._stream_connections = set()
         self._commands = queue.Queue(maxsize=64)
+        self._ui_session_id = uuid.uuid4().hex
         self._status = {"status": "等待仿真", "accepted_new_dataset": False}
         self._rgb = None
         self._image_version = 0
@@ -447,7 +457,8 @@ class LocalTeleopUI:
     def _status_snapshot(self):
         with self._lock:
             status, version, epoch, available = self._status, self._image_version, self._image_epoch, self._rgb is not None
-        return {"status": _json_status(status), "image_version": version, "image_epoch": epoch,
+        return {"status": _json_status(status), "ui_session_id": self._ui_session_id,
+                "image_version": version, "image_epoch": epoch,
                 "image_available": available, "accepted_new_dataset": False,
                 "data_label": "原始数据：待独立验收", "queued_commands": self._commands.qsize()}
 

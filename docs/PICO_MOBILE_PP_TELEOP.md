@@ -37,6 +37,8 @@ bash scripts/4090_simple/start_pico_mobile_pp_official99.sh \
 
 `progress.json`保存计划身份、每次尝试UUID和完成映射；同一轮禁止两个采集器并发使用。
 中断后重启上述命令会创建fresh session并恢复进度；若有持久技术错误须先诊断修复，不能删进度或跳配置来恢复。
+界面“上一条”和“最近完成”只展示当前会话的片段；先前会话的结果保留在折叠历史区，重启不删除原始证据或重置完成数。
+采集服务断连时清除旧相机画面并禁用操作；重新连接到新会话后重建预览，避免旧画面被当成实时反馈。
 新原始数据写入本轮`collection/live_时间/episodes`，独立复核归档到`collection/kept`与`discarded`；旧100条及A100正在跑的95／5实验保持独立。
 99份完成后暂停，不循环回0；后续只按`progress.accepted`的官方index→UUID映射冻结候选，额外尝试不能混入。
 这里的完成只指成功原始演示覆盖，不代表RTX／DINO／训练数据已经验收。

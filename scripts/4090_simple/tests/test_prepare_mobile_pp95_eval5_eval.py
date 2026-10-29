@@ -74,7 +74,8 @@ class DeploymentTests(unittest.TestCase):
             "preserve_checkpoint_every": 500, "validation_steps": 0, "resume_from_checkpoint": None,
             "skip_resumed_steps": False, "early_checkpoint_steps": deploy.SAVE_STEPS[:-1], "hf_token": ".hf_token",
             "output_dir": "/old/output", "deepspeed_config": "/old/zero3.json"},
-            "wandb": {key: None for key in deploy.TRACKER_KEYS},
+            "wandb": {"project": "cvpr-handover-merged114", "resume": "never",
+                **{key: None for key in deploy.TRACKER_KEYS}},
             "data": {"root_dir": "/old/data", "dino_cache_root": "/old/dino", "transform": {
                 "repack": {"action_keys": ["action.body_token_v1_1", "action[:14]"], "state_keys": ["observation.state"],
                     "action_mask_key": "action_mask", "pad_action_dim": 80, "pad_state_dim": 45},
@@ -121,7 +122,8 @@ class DeploymentTests(unittest.TestCase):
         self.model_sha = deploy.sha256(self.source / "model.safetensors")
         self.final = {"contract": deploy.FINAL_CONTRACT, "status": "passed", "task_id": deploy.TASK_ID,
             "root": deploy.EXPECTED_ROOT, "project": deploy.EXPECTED_PROJECT, "completed_step": 20000,
-            "runtime_wandb": self.config["wandb"], "full_recovery_steps": [19500, 20000],
+            "runtime_wandb": {key: self.config["wandb"][key] for key in deploy.TRACKER_KEYS},
+            "full_recovery_steps": [19500, 20000],
             "models": [{"step": step, "path": f"{deploy.EXPECTED_PROJECT}/checkpoints/ckpt_{step}/model.safetensors",
                         "sha256": self.model_sha, "size_bytes": deploy.EXPECTED_MODEL_BYTES} for step in deploy.SAVE_STEPS],
             "selection_metric": deploy.SELECTION_METRIC, "selection_candidate_steps": deploy.SELECTION_CANDIDATES,
@@ -318,10 +320,22 @@ class DeploymentTests(unittest.TestCase):
         changed = deepcopy(self.config); changed["wandb"]["id"] = "foreign"
         self.write("run_config.json", changed); self.seal()
         with self.assertRaisesRegex(ValueError, "tracker"): self.validate()
-        self.final["runtime_wandb"] = changed["wandb"]
+        self.final["runtime_wandb"] = {key: changed["wandb"][key] for key in deploy.TRACKER_KEYS}
         self.receipt["run_identity"]["run_config_sha256"] = deploy.sha256(self.source / "run_config.json")
         self.seal()
         self.validate()
+
+    def test_prepared_wandb_project_resume_and_other_static_fields_cannot_drift(self):
+        self.assertTrue(self.validate()[4]["runtime_metadata"]["all_other_values_exact"])
+        for key, value in (("project", "foreign-project"), ("resume", "allow"), ("extra", True)):
+            with self.subTest(key=key):
+                changed = deepcopy(self.config)
+                changed["wandb"][key] = value
+                self.write("run_config.json", changed)
+                self.receipt["run_identity"]["run_config_sha256"] = deploy.sha256(self.source / "run_config.json")
+                self.seal()
+                with self.assertRaisesRegex(ValueError, "Runtime configuration"):
+                    self.validate()
 
     def test_original_split_uuid_windows_and_stats_cannot_drift(self):
         for key, value in (("validation_windows", 2563), ("train_probe_windows", 2434),

@@ -614,6 +614,46 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM
   --step "$STEP" --expected-final-acceptance-sha256 "$FINAL_SHA"
 ```
 
+### 20k实际完成与闭环等待（2026-10-29）
+
+本次独立run于UTC2026-10-29 03:12:40（北京时间11:12:40）正常结束，
+`training_state.json`为`complete`且`returncode=0`，实际完成20,000优化步。
+末次八卡生产健康门通过，每卡actions为8×30×80，最后训练batch loss为0.5012839436531067；
+该batch值不能作为Mobile验证loss。
+
+实际执行已冻结的`final_cpu_acceptance_program.py`，检查进程隐藏GPU、nice19且仅自身CPU127，
+未改训练或采集。33份4k..20k／每500步模型均完成真实SHA、读取前后stat身份与1944张量header检查，
+文件大小均为12,066,487,572字节、SHA彼此不同。
+19,500与20,000两份恢复状态分别核验optimizer全部矩的有限性、二阶矩非负性、稀疏参数step合法范围、
+调度器步数／LR、8rank CPU／CUDA RNG保存结构及全部模型张量有限性；没有恢复CUDA随机数或运行模型。
+远端实际`FINAL_TRAINING_ACCEPTANCE_001.json`的SHA为
+`188140fd6e21df5f0c738b96a3944d90cc8e9f0ccebab9497aff45f5abc63daa`。
+这份训练终验只执行一次，后续按稳定文件身份复用。
+
+38份原字节metadata已复制到本地实验根的`source_metadata_001`。
+21份诊断0／1k／…／20k的完整EVAL5／TRAIN probe5窗数、原始行SHA、每episode固定8个采样行及macro重新计算均通过新部署器核验；
+不重复原始帧、DINO或已通过的数据数值审计。
+`METADATA_ACCEPTANCE_001.json` SHA为
+`99395a2ad7981f30436dc7a25740c62c4f93318b08b21a68ab4bda94f7b6c2cc`。
+首次本地metadata验收因部署器错误地要求W&B只能有4个运行期字段而拦截；
+实际固定配置还保留`project`与`resume`，原字节与失败证据均保留。
+修复只允许本次final绑定的`entity/group/id/name`变化，其余W&B字段仍与固定prepared配置逐值相等；
+16项CPU回归通过，包括静态字段漂移拒绝，修复后使用同一份已复制metadata通过验收。
+
+在17份已保存且具完整FM评分的候选中，最低heldout episode-macro为4,000步的1.1517715271896758，
+因此early与best合并一次，后续仅评测4,000及20,000两份不同模型。
+两份模型SHA分别为`0be905e739ae6b75c8bd1427308244512f1c4a3600e09bdf0bd1ece06c8ccf42`与
+`6280909689225a7b86cadc0e03c4d0a0e2f337348b4dd4eb865a8d73a71cfe09`。
+4k／20k完整EVAL5 FM micro分别为1.150268201092941／1.4320999190440857，
+clean TRAIN probe5分别为0.8672590875313512／0.7308843961922601；
+20k EVAL episode-macro为1.4284265553208957。
+训练probe继续下降而heldout FM回升是本划分的离线过拟合信号，仍需同初态闭环比较其实际影响；
+5条来自相同场景且参与选模，只作为validation。
+
+检查时官方99初始化采集器仍在运行，保持原进程和PICO接收服务；
+当前尚未执行所选模型的本地model-only备份、完整CPU部署及matched闭环评测。
+按既定资源约束等待采集空闲后继续，不能把训练终验通过写成整个过拟合评测完成。
+
 ## 新一轮官方99初始化真人数采（2026-10-28）
 
 用户确认新一轮按官方不同TRAIN初始化采集。旧100条均绑定同一TRAIN0 reset SHA

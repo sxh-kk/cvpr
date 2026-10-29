@@ -122,11 +122,14 @@ def validate_runtime_metadata(source, config, preparation, final):
         and sha256(source / "prepared_argv.txt") == preparation.get("argv_sha256"), "Prepared95/5 config/argv SHA differs")
     expected = read(source / "prepared_run_config.json")
     require(expected["train"].get("hf_token") == ".hf_token"
-        and set(expected["wandb"]) == set(TRACKER_KEYS)
+        and set(TRACKER_KEYS) <= set(expected["wandb"])
         and all(expected["wandb"][key] is None for key in TRACKER_KEYS), "Unexpected prepared tracker/HF metadata")
     tracker = final.get("runtime_wandb", {})
-    require(set(tracker) == set(TRACKER_KEYS) and same(config["wandb"], tracker), "Actual runtime tracker is not final-bound")
+    require(set(tracker) == set(TRACKER_KEYS) and set(TRACKER_KEYS) <= set(config["wandb"])
+        and same({key: config["wandb"][key] for key in TRACKER_KEYS}, tracker), "Actual runtime tracker is not final-bound")
     expected["train"]["hf_token"] = "PosixPath('.hf_token')"
+    # Project/resume and any other prepared tracker settings remain exact below;
+    # the final receipt authorizes only these four runtime-generated fields.
     expected["wandb"].update(tracker)
     require(same(expected, config), "Runtime configuration differs beyond recorded tracker/HF serialization")
     tokens = shlex.split((source / "prepared_argv.txt").read_text())

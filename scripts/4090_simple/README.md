@@ -528,12 +528,16 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 实际fresh0及每完成1000步记录完整EVAL5／clean TRAIN probe5的FM loss；各组40窗采样body／hand L1单列。
 4k起每500步保存，共33份模型，最新2份完整恢复状态；原数据／DINO／统计与旧实验不变。
 新划分、路径、SHA、运行边界和命令见[95／5诊断协议](../../docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#固定100条的95训练5验证与20k过拟合诊断)。
-本次实际A100 fresh0完整诊断及2／20优化步八卡健康门已通过，仍在20k训练中；
-完整验证FM基线5.494083、clean训练probe5.484605，尚不能判断过拟合。
+本次实际A100已于北京时间2026-10-29 11:12:40完成20k，正常退出且末次八卡健康门通过；
+33份模型SHA／身份与19,500／20,000完整恢复状态CPU终验通过，21份完整诊断及原行／macro核验通过。
+4k／20k完整EVAL FM micro为1.150268／1.432100，clean训练probe为0.867259／0.730884；
+这是本划分的离线过拟合信号，闭环影响尚待匹配初态对照，5条为validation。
 匹配初态入口用manifest／case／expected-training-split-SHA三参数；只取原capture row0，之后全新历史。
 已通过case0真实RTX零步首态／112mesh／43具名映射，未做完整策略闭环；001／002技术失败保留。
-新`prepare_mobile_pp95_eval5_eval.py`须等本次真实20k终验和备份收据后才准备4k／best／20k，
-从新联合权重严格导出Motion，保持原统计／DINO；当前只通过隔离CPU测试，未消费尚未产生的权重。
+新`prepare_mobile_pp95_eval5_eval.py`须绑定本次真实20k终验SHA及model-only备份收据，
+从新联合权重严格导出Motion，保持原统计／DINO；实际best=4k，early／best去重后只测4k和20k。
+实际metadata验收修复了W&B静态`project/resume`误拒：仅4个final绑定运行期tracker值可变化，其余配置严格不变；16项CPU回归通过。
+采集器活跃，所选模型备份／CPU部署／matched完整闭环等待空闲，尚未完成。
 另清理约3.2GB可重建的Omniverse编译纹理缓存，原始资源及采集数据未删；恢复时观测`/home`可用约338GB，不将全部容量变化归因于这次缓存清理。
 
 2026-10-28用户授权新一轮官方99份不同初始化采集：
@@ -541,4 +545,4 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 完整操作和恢复说明见[官方99份TRAIN初始化](../../docs/PICO_MOBILE_PP_TELEOP.md#2026-10-28-新一轮官方99份train初始化)。
 新入口从冻结metadata初始DR重建每份reset布局，只在同UUID后台native成功且技术证据完整后推进；失败重试同份，技术故障保留原件暂停。
 每份配置在实际装载时再次核SHA，进度持久化并防止重复collector；旧`start_pico_mobile_pp.sh`仍是固定TRAIN0复现。
-这轮输出独立于旧100条和正在运行的95／5训练，不在数采时启动RTX、DINO或上传。
+这轮输出独立于旧100条和95／5实验，不在数采时启动RTX、DINO或上传。

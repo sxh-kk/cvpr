@@ -1,5 +1,9 @@
 # PICO Mobile P&P：固定 100 条核定与 A100 交付
 
+本文下述主体为2026-10-27固定TRAIN0旧批次及其后续实验。2026-11-01用户新授权的
+“官方99份初始化＋历史TRAIN0一条”使用全新100条冻结清单与独立发布目录，
+进度和实际交付回执见[本轮独立记录](PICO_MOBILE_PP_OFFICIAL100_20261101.md)；不得套用本文旧批次的完成计数或READY。
+
 2026-10-27，用户在采够后要求处理当前 **100 条 Mobile P&P 真人保留记录并上传 A100**。
 本批从当时 121 条已编号记录中冻结 100 个 `selected` UUID；不追加后续录制，不用新记录替换失败候选。
 采集器已按这次要求正常退出，`COLLECTION_FINISHED.json` 确认 collector、planner 和 preview 均已退出、无 active capture。

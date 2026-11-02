@@ -7,6 +7,10 @@
 [本地任务适配](../../docs/4090_SIMPLE_CARRYBOX_FINETUNE.md)。
 实际安装／验证记录在本机仓库外 `~/CVPR_Evaluation_runtime/reports/`。
 
+桌面Grasp的官方100个TRAIN初始化与独立PICO＋SONIC采集入口见
+[Grasp采集协议](../../docs/PICO_GRASP_COLLECTION.md)。该入口保留原Grasp成功函数，
+显式记录AMO→SONIC的控制与空间适配，不能与Mobile P&P入口混用。
+
 A100已提供CPU导出与保存完成等待工具`export_bundle.py`，4090可通过SSH／rsync拉取资源。
 具体源路径、READY判定、SHA校验及当前缺项见[资源交接](../../docs/4090_SIMPLE_TRANSFER.md)。
 

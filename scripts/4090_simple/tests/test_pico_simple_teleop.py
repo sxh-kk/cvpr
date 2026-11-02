@@ -281,7 +281,16 @@ class EntryGuardTests(unittest.TestCase):
                         and node.func.attr=='get' and node.args and isinstance(node.args[0],ast.Constant)
                         and isinstance(node.args[0].value,str)):
                     consumed.add(node.args[0].value)
-        self.assertTrue(consumed <= set(metadata),consumed-set(metadata))
+        # This fixture is legacy Handover; Grasp alone supplies a per-scene
+        # rigid-frame receipt, which must not become a fixed session identity.
+        grasp_scene_only={'grasp_frame_adaptation'}
+        self.assertTrue(consumed-grasp_scene_only <= set(metadata),consumed-set(metadata))
+        grasp_scene=copy.deepcopy(scene)
+        grasp_scene['grasp_frame_adaptation']={'initialization':'current-grasp-scene'}
+        grasp_metadata=entry.bounded_episode_metadata(entry.episode_session_identity(session),grasp_scene,
+            human_demo_uuid='grasp-current',pico_calibration={'heading':.1},initial_target_z_m=.5)
+        self.assertTrue(consumed <= set(grasp_metadata),consumed-set(grasp_metadata))
+        self.assertEqual(grasp_metadata['grasp_frame_adaptation'],grasp_scene['grasp_frame_adaptation'])
         self.assertEqual(metadata['environment_config'],{'scene':'first'})
         self.assertEqual(metadata['physics_model_sha256'],'m'*64)
         changed=copy.deepcopy(scene)

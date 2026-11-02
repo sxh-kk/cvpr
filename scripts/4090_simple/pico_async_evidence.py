@@ -351,7 +351,7 @@ class DeferredEvidenceSession:
         self.writer = EvidenceWriter(evidence_handler_factory,
             init_kwargs={"model_path": str(prepared_model.model_path.absolute()),
                 "model_sha256": prepared_model.model_sha256, "joint_names": prepared_model.names,
-                "metadata": {"object_body_names": bindings}, "file_identity": prepared_model._stat,
+                "metadata": {**prepared_model.profile_metadata, "object_body_names": bindings}, "file_identity": prepared_model._stat,
                 "trace_path": None if trace_path is None else str(Path(trace_path).absolute())},
             cpus=cpus, max_pending=max_pending, startup_timeout_s=startup_timeout_s)
         try:

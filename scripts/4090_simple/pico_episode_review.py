@@ -843,7 +843,6 @@ class ReviewQueue:
 
 def complete_geometry(directory, job):
     """Preserve raw solved forces; derive only geometry from recorded poses."""
-    from pico_simple_teleop import complete_quality_geometry
     directory = Path(directory)
     episode_path, metadata_path = directory / "episode.json", directory / "metadata.json"
     if _sha(episode_path) != job["episode_json_sha256"]:
@@ -856,8 +855,17 @@ def complete_geometry(directory, job):
     if metadata.get("task_id") == "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0":
         return {"status":"not_required","selection_policy":"native_only",
             "reason":"Official native success is already recorded in original solved samples; extra geometry gate disabled"}
+    from pico_grasp_quality import GRASP_TASK_ID, validate_grasp_task_identity
+    if metadata.get("task_id") == GRASP_TASK_ID:
+        identity = validate_grasp_task_identity(metadata)
+        if not identity["passed"]:
+            raise ValueError("Grasp native identity invalid: " + "; ".join(identity["errors"]))
+        return {"status":"not_required","selection_policy":"native_only",
+            "task_identity_validation":identity,
+            "reason":"Original Grasp native success is captured on the explicit SONIC adaptation; no container or extra geometry success gate"}
     if outcome.get("geometry_pending") is not True:
         return  # Compatible older completed geometry is rechecked by History.
+    from pico_simple_teleop import complete_quality_geometry
     receipt_path = directory / "quality_geometry_completion.json"
     receipt = {"contract": COMPLETION_CONTRACT, "status": "error", "human_demo_uuid": job["uuid"],
         "source_kind": job["source_kind"], "episode_json_sha256": job["episode_json_sha256"],

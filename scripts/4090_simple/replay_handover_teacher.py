@@ -468,6 +468,8 @@ class TrainingCapture:
                 or type(warmup_ticks) is not int or warmup_ticks < 50 or warmup_ticks % 5):
             raise ValueError("Need named model43 order and >=1s warmup aligned to both clocks")
         self.metadata = deepcopy(metadata)
+        from pico_deferred_capture import evidence_object_roles
+        self.object_roles = evidence_object_roles(metadata)
         self.names = list(joint_names)
         self.warmup_ticks, self.start_time = warmup_ticks, start_time
         self.events_path = self.directory / "events.jsonl"
@@ -526,7 +528,7 @@ class TrainingCapture:
             "physical_joint_q43_float64": physical.tolist(), "physical_joint_qvel43": velocity.tolist(),
             "root_pose7": pose(root_pose7, "actual root").tolist(),
             "root_qvel6": vector(root_qvel6, 6, "actual root velocity").tolist(),
-            "objects": {role: {"pose7": pose(objects[role]["pose7"], role).tolist()} for role in ("target", "container")},
+            "objects": {role: {"pose7": pose(objects[role]["pose7"], role).tolist()} for role in self.object_roles},
             "renderer_camera":"head_stereo_left","renderer_pose_diagnostics":renderer_diagnostics,
             "renderer_pose_validation":renderer_validation,
             "rgb": {"path": str(image_path), "file_sha256": file_sha256(self.directory / image_path),

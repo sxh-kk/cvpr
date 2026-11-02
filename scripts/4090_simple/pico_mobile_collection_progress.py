@@ -23,6 +23,9 @@ def _validate_abort_reason(value):
 
 
 class CollectionProgress:
+    contract = CONTRACT
+    acceptance_gate_version = 'mobile-native-task-success-v2'
+
     def __init__(self, rows, path):
         self.rows = rows
         self.path = Path(path).absolute()
@@ -34,13 +37,13 @@ class CollectionProgress:
             self.lock.close()
             raise ValueError('本轮初始化计划已由另一个采集器使用') from None
         identity = rows[0]['plan_sha256']
-        self.state = {'contract': CONTRACT, 'plan_sha256': identity,
+        self.state = {'contract': self.contract, 'plan_sha256': identity,
             'accepted': {}, 'pending': None, 'attempts': [], 'error': None, 'error_phase':None,'revision': 0}
         if self.path.exists():
             if self.path.is_symlink():
                 raise ValueError('进度不能为符号链接')
             value = json.loads(self.path.read_text())
-            if (value.get('contract') != CONTRACT or value.get('plan_sha256') != identity
+            if (value.get('contract') != self.contract or value.get('plan_sha256') != identity
                     or not isinstance(value.get('accepted'), dict)
                     or not isinstance(value.get('attempts'), list)):
                 raise ValueError('进度不属于当前冻结初始化计划')
@@ -111,7 +114,7 @@ class CollectionProgress:
         pending = self.state['pending']
         row = (next(item for item in self.rows if item['official_episode_index'] == pending['official_episode_index'])
             if pending else self.current)
-        return {'contract': CONTRACT, 'plan_sha256': self.state['plan_sha256'],
+        return {'contract': self.contract, 'plan_sha256': self.state['plan_sha256'],
             'progress_path': str(self.path), 'total': len(self.rows),
             'accepted_count': len(self.state['accepted']),
             'current_official_episode_index': row['official_episode_index'] if row else None,
@@ -172,7 +175,7 @@ class CollectionProgress:
                     and match.get('status') in ('discarded', 'technical_blocked')
                     and not match.get('error') and match.get('collection_enabled') is True
                     and match.get('selection_policy') == 'native_only'
-                    and match.get('acceptance_gate_version') == 'mobile-native-task-success-v2'
+                    and match.get('acceptance_gate_version') == self.acceptance_gate_version
                     and selection in ('technical_evidence_incomplete', 'operator_discarded', 'official_task_not_successful'))
                 if intentional_discard:
                     # Partial raw capture remains technical/incomplete in History.
@@ -191,7 +194,7 @@ class CollectionProgress:
                         and pending.get('operator_abort_reason') is None
                         and match.get('status') == 'ready' and match.get('available') is True
                         and match.get('collection_enabled') is True
-                        and match.get('acceptance_gate_version') == 'mobile-native-task-success-v2'
+                        and match.get('acceptance_gate_version') == self.acceptance_gate_version
                         and selection == 'selected' and match.get('disposition') == 'kept'
                         and match.get('official_task_success_observed') is True
                         and not match.get('discarded')):

@@ -24,10 +24,11 @@ from replay_handover_teacher import (TrainingCapture, bound_calibration_assets,
 
 
 def recorded_task(metadata):
-    """Dispatch by recorded task identity; never render Mobile in a Handover room."""
+    """Dispatch by recorded identity, including the separate Grasp adapter."""
     from pico_mobile_task import HANDOVER_TASK, MOBILE_TASK
+    from pico_deferred_capture import GRASP_TASK_ID, evidence_object_roles
     task = metadata.get('task_id', HANDOVER_TASK)
-    if task not in (HANDOVER_TASK, MOBILE_TASK):
+    if task not in (HANDOVER_TASK, MOBILE_TASK, GRASP_TASK_ID):
         raise ValueError('Unsupported recorded task identity: ' + str(task))
     if task == MOBILE_TASK:
         from pico_episode_history import MOBILE_OFFICIAL_SOURCE_SHA256, MOBILE_NATIVE_SUCCESS_CRITERIA
@@ -35,13 +36,91 @@ def recorded_task(metadata):
         if (metadata.get('actual_task_source_sha256') != MOBILE_OFFICIAL_SOURCE_SHA256
                 or type(criteria) not in (int,float) or criteria != MOBILE_NATIVE_SUCCESS_CRITERIA):
             raise ValueError('Recorded Mobile official source or success threshold identity differs')
+    if task == GRASP_TASK_ID:
+        recorded_grasp_identity(metadata)
+        evidence_object_roles(metadata)
     return task
+
+
+def recorded_grasp_identity(metadata):
+    """Bind the original official predicate and exact captured adapter bytes."""
+    from pico_grasp_task import adapter_identity
+    current = adapter_identity()
+    recorded = metadata.get('grasp_adapter_identity')
+    criteria = metadata.get('actual_native_success_criteria')
+    source_files = metadata.get('source_code_sha256_at_session_start')
+    if (not isinstance(recorded, dict) or recorded != current
+            or metadata.get('task_id') != current['task_id']
+            or metadata.get('source_official_task_id') != current['source_official_task_id']
+            or metadata.get('actual_task_source_sha256') != current['official_task_source_sha256']
+            or not isinstance(source_files, dict)
+            or source_files.get('pico_grasp_task.py') != current['adapter_sha256']
+            or type(criteria) not in (int, float) or criteria != .9):
+        raise ValueError('Recorded Grasp official source or adapter identity differs')
+    return current
 
 
 def recorded_environment(path, data_root, task_id):
     from pico_mobile_task import MOBILE_TASK
+    from pico_deferred_capture import GRASP_TASK_ID
+    if task_id == GRASP_TASK_ID:
+        # The archived scene already has its declared world-frame adaptation.
+        # Running the source-config adapter again would translate it twice.
+        return load_environment_config(path, data_root,
+            profile='grasp', grasp_config_is_adapted=True)
     return load_environment_config(path, data_root,
         profile='mobile_pp' if task_id == MOBILE_TASK else 'handover')
+
+
+def recorded_grasp_frame(metadata, environment):
+    """Check the adapted reset payload and its original per-episode receipt."""
+    from pico_grasp_task import validate_adapted_config
+    receipt = validate_adapted_config(environment)
+    if (not isinstance(metadata.get('grasp_frame_adaptation'), dict)
+            or metadata['grasp_frame_adaptation'] != receipt):
+        raise ValueError('Recorded Grasp frame adaptation differs from its scene payload')
+    return receipt
+
+
+def make_recorded_renderer(task_id, sonic_config, environment):
+    """Construct the recorded scene, with Grasp's instance-local frame hooks."""
+    from pico_deferred_capture import GRASP_TASK_ID
+    kwargs = dict(sonic_config=sonic_config, sim_mode='mujoco_isaac', headless=True,
+        dr_level=0, sync_mujoco_observations=True, isaac_observation_only=True)
+    if task_id == GRASP_TASK_ID:
+        from pico_grasp_task import make_grasp_task, install_frame_adapter
+        from simple.envs.sonic_loco_manip import SonicLocoManipEnv
+        task = make_grasp_task(sonic_config, adapted_config=environment)
+        env = SonicLocoManipEnv(task=task, **kwargs)
+        # This must precede reset, which creates both the MuJoCo and RTX scene.
+        try:
+            frame_binding = install_frame_adapter(env)
+        except BaseException:
+            env.close()
+            raise
+        return env, frame_binding
+    import gymnasium as gym
+    return gym.make(task_id, disable_env_checker=True, **kwargs), None
+
+
+def recorded_environment_binding(task_id, expected, actual):
+    """Preserve Grasp asset identities across UID-based actor reconstruction."""
+    from pico_deferred_capture import GRASP_TASK_ID
+    if task_id == GRASP_TASK_ID:
+        from pico_grasp_task import grasp_environment_binding_receipt
+        return grasp_environment_binding_receipt(expected, actual)
+    return environment_binding_receipt(expected, actual)
+
+
+def recorded_objects(view, event, roles):
+    """Read only the declared evidence roles; all other actors still render."""
+    if set(event['objects']) != set(roles):
+        raise ValueError('Archived object evidence roles differ from the recorded task')
+    objects = {role: {'pose7': np.r_[view.mj_objects[role].xpos,
+                                   view.mj_objects[role].xquat]} for role in roles}
+    for role, value in objects.items():
+        require_equal(value['pose7'], event['objects'][role]['pose7'], role)
+    return objects
 
 
 class RecordedStateView:
@@ -125,7 +204,7 @@ def write_frame_bindings(path, source_events, capture_events_path):
 
 
 def render(args):
-    from pico_deferred_capture import load_deferred
+    from pico_deferred_capture import GRASP_TASK_ID, load_deferred, evidence_object_roles
     episode=args.episode.resolve(strict=True)
     destination=episode/'capture'
     receipt_path=episode/'rtx_completion.json'
@@ -135,6 +214,7 @@ def render(args):
     manifest,events,states=source['manifest'],source['events'],source['states']
     metadata=manifest['metadata']
     task_id = recorded_task(metadata)
+    object_roles = evidence_object_roles(metadata)
     if manifest['status'] != 'raw_physics_capture_completed_pending_rtx':
         raise ValueError('Only explicitly completed physical captures may be rendered for audit')
     original_outcome=json.loads((episode/'episode.json').read_text())
@@ -147,6 +227,7 @@ def render(args):
     expected_env_path=episode/'deferred_render_environment.json'
     write_json(expected_env_path,metadata['environment_config'])
     environment,_=recorded_environment(expected_env_path,data_root,task_id)
+    frame_receipt = recorded_grasp_frame(metadata, environment) if task_id == GRASP_TASK_ID else None
     result={'contract':'cvpr-pico-deferred-rtx-completion-v1','status':'initializing',
         'accepted_new_dataset':False,'eligible_for_packing':False,
         'source_kind':metadata['source_kind'],'observation_domain_feedback':'MuJoCo EGL preview',
@@ -158,9 +239,11 @@ def render(args):
         'source_states_sha256':file_sha256(episode/'deferred_capture/states.npy'),
         'task_id':task_id,
         'render_code_sha256':file_sha256(__file__)}
+    if frame_receipt is not None:
+        result['grasp_frame_adaptation'] = frame_receipt
+        result['evidence_object_roles'] = list(object_roles)
     env=capture=None
     try:
-        import gymnasium as gym
         import mujoco
         import simple.envs
         from gear_sonic.utils.mujoco_sim.configs import SimLoopConfig
@@ -169,17 +252,20 @@ def render(args):
         view=RecordedStateView(model,data,source['joint_names'],metadata['mujoco_object_body_names'],metadata['mujoco_obj_names'])
         sonic=SimLoopConfig().load_wbc_yaml()
         sonic.update(ENV_NAME='simple',SIMULATE_DT=.005,ENABLE_ELASTIC_BAND=False)
-        env=gym.make(task_id,sonic_config=sonic,
-            sim_mode='mujoco_isaac',headless=True,dr_level=0,sync_mujoco_observations=True,
-            isaac_observation_only=True,disable_env_checker=True)
+        env,frame_binding=make_recorded_renderer(task_id,sonic,environment)
         raw=env.unwrapped
-        result['actual_task_source_sha256'] = file_sha256(inspect.getfile(type(raw.task)))
+        if task_id == GRASP_TASK_ID:
+            result['grasp_adapter_identity'] = recorded_grasp_identity(metadata)
+            result['grasp_frame_adapter_binding'] = frame_binding
+            result['actual_task_source_sha256'] = result['grasp_adapter_identity']['official_task_source_sha256']
+        else:
+            result['actual_task_source_sha256'] = file_sha256(inspect.getfile(type(raw.task)))
         if metadata.get('actual_task_source_sha256') is not None and result['actual_task_source_sha256'] != metadata['actual_task_source_sha256']:
             raise ValueError('Loaded RTX task module differs from the original capture')
         bind_saved_scene_manager(raw.task,environment)
         raw._render_frame=lambda:raw.isaac.render()
         env.reset(seed=metadata['physics_seed'],options={'state_dict':copy.deepcopy(environment),'dr_level':None})
-        result['environment_binding']=environment_binding_receipt(environment,raw.task.state_dict())
+        result['environment_binding']=recorded_environment_binding(task_id,environment,raw.task.state_dict())
         if not result['environment_binding']['matched']:
             raise ValueError('Deferred renderer did not reconstruct the same room/assets/layout')
         import carb
@@ -203,10 +289,7 @@ def render(args):
             require_equal(q,event['physical_joint_q43_float64'],'q43')
             require_equal(dq,event['physical_joint_qvel43'],'qvel43')
             require_equal(root_pose(model,data),event['root_pose7'],'root pose')
-            objects={role:{'pose7':np.r_[view.mj_objects[role].xpos,view.mj_objects[role].xquat]}
-                for role in ('target','container')}
-            for role,value in objects.items():
-                require_equal(value['pose7'],event['objects'][role]['pose7'],role)
+            objects=recorded_objects(view,event,object_roles)
             raw.isaac.refresh_from_mujoco(view,update_kinematics=True)
             rgb=raw.isaac.render()['head_stereo_left']
             assert_recorded_state_unchanged(model,data,state_before,state_spec)

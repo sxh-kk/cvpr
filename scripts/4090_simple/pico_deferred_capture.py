@@ -21,7 +21,35 @@ from replay_handover_teacher import MODEL_HAND_NAMES, capture_tick_index
 
 
 CONTRACT = "cvpr-live-pico-deferred-physical-capture-v1"
+GRASP_CONTRACT = "cvpr-live-pico-grasp-deferred-physical-capture-v1"
+GRASP_TASK_ID = "cvpr/G1SonicTabletopGraspPico-v0"
+GRASP_SOURCE_TASK_ID = "simple/G1WholebodyTabletopGraspMP-v0"
 PENDING = "raw_physics_capture_completed_pending_rtx"
+
+
+def evidence_profile(metadata):
+    """Choose explicit object roles without changing the legacy v1 schema.
+
+    Only the independent SONIC Grasp adapter has target-only evidence. Unknown
+    tasks cannot opt into that contract merely by omitting a container binding.
+    All actors remain in the complete integration state, including distractors.
+    """
+    if metadata.get("task_id") == GRASP_TASK_ID:
+        if (metadata.get("source_official_task_id") != GRASP_SOURCE_TASK_ID
+                or metadata.get("evidence_object_roles") != ["target"]):
+            raise ValueError("Grasp requires its explicit official source and target-only role identity")
+        bindings = metadata.get("object_body_names", metadata.get("mujoco_object_body_names", {}))
+        if not isinstance(bindings, dict) or set(bindings) != {"target"}:
+            raise ValueError("Grasp object bindings must contain only the actual target")
+        return GRASP_CONTRACT, ("target",)
+    if metadata.get("evidence_object_roles") not in (None, ["target", "container"]):
+        raise ValueError("Target-only evidence is reserved for the explicit SONIC Grasp adapter")
+    return CONTRACT, ("target", "container")
+
+
+def evidence_object_roles(metadata):
+    """Public role dispatch for deferred and later image-acquisition writers."""
+    return evidence_profile(metadata)[1]
 
 
 def _sha(path):
@@ -97,9 +125,10 @@ class _PhysicalVerifier:
         bindings = metadata.get("object_body_names", metadata.get("mujoco_object_body_names", {}))
         if not isinstance(bindings, dict):
             raise ValueError("Object body bindings must be a dictionary")
-        self.objects = {role: model.body(bindings.get(role, role)).id for role in ("target", "container")}
-        if len(set(self.objects.values())) != 2:
-            raise ValueError("Target and container must be distinct physical bodies")
+        self.contract, self.roles = evidence_profile(metadata)
+        self.objects = {role: model.body(bindings.get(role, role)).id for role in self.roles}
+        if len(set(self.objects.values())) != len(self.roles):
+            raise ValueError("Evidence roles must be distinct physical bodies")
 
     def check(self, event, state):
         state = _vector(state, self.width, "mjSTATE_INTEGRATION")
@@ -137,6 +166,7 @@ class PreparedDeferredModel:
         _validate_header(self.names, 50, 0.)
         self.spec = int(mujoco.mjtState.mjSTATE_INTEGRATION)
         copied_metadata = _json_value(_snapshot(metadata))
+        self.profile_metadata = copied_metadata
         self.verifier = _PhysicalVerifier(model, self.names, copied_metadata, self.spec)
         self.model = model
         self.directory = Path(directory)
@@ -190,6 +220,7 @@ class PreparedDeferredModel:
         result.names, result.model = names, model
         result.spec = int(mujoco.mjtState.mjSTATE_INTEGRATION)
         result.verifier = _PhysicalVerifier(model, names, _json_value(_snapshot(metadata)), result.spec)
+        result.profile_metadata = _json_value(_snapshot(metadata))
         result.directory, result.model_path = path.parent, path
         result.model_sha256, result._stat, result.in_use = model_sha256, identity, False
         if path.is_symlink() or result._file_identity() != identity:
@@ -206,7 +237,9 @@ class PreparedDeferredModel:
         if model is not self.model or list(names) != self.names:
             raise ValueError("Prepared model must match the exact initialized physical model and joint order")
         bindings = metadata.get("object_body_names", metadata.get("mujoco_object_body_names", {}))
-        if {role: model.body(bindings.get(role, role)).id for role in ("target", "container")} != self.verifier.objects:
+        contract, roles = evidence_profile(metadata)
+        if (contract != self.verifier.contract or roles != self.verifier.roles
+                or {role: model.body(bindings.get(role, role)).id for role in roles} != self.verifier.objects):
             raise ValueError("Prepared model object bindings changed; prepare again after scene reset")
         if self.model_path.is_symlink() or self._file_identity() != self._stat:
             raise ValueError("Prepared compiled model archive changed")
@@ -228,7 +261,7 @@ def _validate_header(names, warmup_ticks, start_time):
         raise ValueError("A finite actual simulation start time is required")
 
 
-def _validate_event(event, index, names, warmup_ticks, start_time):
+def _validate_event(event, index, names, warmup_ticks, start_time, roles=("target", "container")):
     tick = event["physical_tick50"]
     if capture_tick_index(tick) != index or event["event_index"] != index or event["capture_index30"] != index:
         raise ValueError("Capture requires every dense real ceil30Hz frame, without skips")
@@ -244,7 +277,9 @@ def _validate_event(event, index, names, warmup_ticks, start_time):
     _vector(event["root_qvel6"], 6, "Actual root velocity")
     if not np.array_equal(observed, physical.astype(np.float32)):
         raise ValueError("Observed state and actual integration q43 are not the same frame")
-    for role in ("target", "container"):
+    if set(event["objects"]) != set(roles):
+        raise ValueError("Event object roles disagree with the explicit capture contract")
+    for role in roles:
         _pose(event["objects"][role]["pose7"], role)
     warmup = tick < warmup_ticks
     if (event["phase"] != ("warmup" if warmup else "teacher_command")
@@ -291,6 +326,7 @@ class DeferredStateCapture:
         self.metadata = _json_value(_snapshot(metadata))
         if not isinstance(self.metadata, dict):
             raise TypeError("metadata must be a copied JSON dictionary")
+        self.contract, self.roles = evidence_profile(self.metadata)
         self.spec = int(mujoco.mjtState.mjSTATE_INTEGRATION)
         self._prepared = prepared_model
         if prepared_model is not None and not isinstance(prepared_model, PreparedDeferredModel):
@@ -359,7 +395,7 @@ class DeferredStateCapture:
                 "physical_joint_qvel43": _vector(physical_qvel, 43, "Physical qvel43").tolist(),
                 "root_pose7": _pose(root_pose7, "Actual root").tolist(),
                 "root_qvel6": _vector(root_qvel6, 6, "Actual root velocity").tolist(),
-                "objects": {role: {"pose7": _pose(objects[role]["pose7"], role).tolist()} for role in ("target", "container")},
+                "objects": {role: {"pose7": _pose(objects[role]["pose7"], role).tolist()} for role in self.roles},
                 "action": None if warmup else actual_action,
                 "integration_state_index": k,
                 "integration_state_sha256": hashlib.sha256(state.tobytes(order="C")).hexdigest(),
@@ -376,7 +412,9 @@ class DeferredStateCapture:
                     "saved_as_training_rgb": False, "pixels_saved": False,
                     "pixel_sha256": hashlib.sha256(pixels.tobytes()).hexdigest(),
                     "width": pixels.shape[1], "height": pixels.shape[0], "channels": 3, "dtype": "uint8"}
-            _validate_event(event, k, self.names, self.warmup_ticks, self.start_time)
+            if self.contract == GRASP_CONTRACT and set(objects) != set(self.roles):
+                raise ValueError("Measured objects must match the explicit evidence roles exactly")
+            _validate_event(event, k, self.names, self.warmup_ticks, self.start_time, self.roles)
             self._verifier.check(event, state)
             encoded = json.dumps(_json_value(event), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             self.stream.write(encoded + "\n")
@@ -398,7 +436,7 @@ class DeferredStateCapture:
         self.closed = True
         if completed and not self.command_count and not self.failed:
             self._error = "A completed archive requires a real warmup and actual command observations"
-        manifest = {"contract": CONTRACT, "version": 1, "metadata": self.metadata,
+        manifest = {"contract": self.contract, "version": 1, "metadata": self.metadata,
             "status": PENDING if completed and not self.failed else "partial_capture_rejected",
             "failure": self.error, "requested_completed": completed,
             "accepted_new_dataset": False, "eligible_for_packing": False, "rtx_ready": False,
@@ -466,7 +504,8 @@ def load_deferred(directory, *, verify=True):
     directory = Path(directory).resolve(strict=True)
     manifest = json.loads(_owned_file(directory, "capture.json").read_text())
     _json_value(manifest)
-    if manifest.get("contract") != CONTRACT or manifest.get("version") != 1:
+    contract, roles = evidence_profile(manifest.get("metadata", {}))
+    if manifest.get("contract") != contract or manifest.get("version") != 1:
         raise ValueError("Unsupported deferred physical archive contract")
     if (manifest.get("accepted_new_dataset") is not False or manifest.get("rtx_ready") is not False
             or manifest.get("eligible_for_packing") is not False
@@ -502,7 +541,7 @@ def load_deferred(directory, *, verify=True):
     warmup_count = 0
     for index, event in enumerate(events):
         _json_value(event)
-        _validate_event(event, index, names, manifest["warmup_ticks"], manifest["start_time"])
+        _validate_event(event, index, names, manifest["warmup_ticks"], manifest["start_time"], roles)
         warmup_count += int(event["phase"] == "warmup")
         if verify:
             state = np.ascontiguousarray(states[index])

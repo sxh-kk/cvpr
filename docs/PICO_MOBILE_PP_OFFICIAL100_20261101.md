@@ -1,6 +1,6 @@
 # PICO Mobile P&P：官方99初始化＋历史TRAIN0一条的100条交付
 
-> 本轮处理已于北京时间2026-11-01 19:17:26实际启动，100条均已通过RTX／独立审计、无损打包、clean DINO及本机生产读取，当前正在上传A100。最终远端就绪仍须以本轮真实回执确认；旧2026-10-27批次的完成记录不能替代本批回执。训练未启动。
+> 本轮数据交付已完成：固定100条、56,423帧、50,523窗通过RTX／独立审计、无损打包、clean DINO、本机及A100实际生产读取，主driver正常退出0，补充来源包已独立核准。A100最终就绪收据生成于北京时间2026-11-02 06:34:32；训练未启动。
 
 ## 固定范围与来源
 
@@ -32,7 +32,7 @@
 
 旧002已有1020帧完整RTX与10阶段独立admission，`native-v2 selected`、官方成功为true且无技术阻断。其admission SHA为 `5caf03553de78ff64d53d69b9a5eed18e0548060df71be95911fcfcf36cb3d27`，RTX completion SHA为 `53b6fb784abd31c94ef909e24513e7087b5a54e2f141b62b410b338123663566`。本轮复用既有RTX／audit证据，不重复已通过的物理／数值审计。
 
-旧002的无损视频、Parquet、1020帧clean DINO及frames侧车已有完整来源绑定；本次只读身份复核确认其SHA、大小、mtime仍匹配。本轮采用现有流水线，在新聚合包中实际提取全部100条的clean DINO并绑定新source／cache signature；旧002复用的是原RTX和独立admission，旧缓存及旧回执原字节保留。新99条的新RGB仍需真实RTX和DINO，已有旧002缓存不能被当作新99特征。当前不提前计为整包完成。
+旧002的无损视频、Parquet、1020帧clean DINO及frames侧车已有完整来源绑定；本次只读身份复核确认其SHA、大小、mtime仍匹配。本轮采用现有流水线，在新聚合包中实际提取全部100条的clean DINO并绑定新source／cache signature；旧002复用的是原RTX和独立admission，旧缓存及旧回执原字节保留。新99条的新RGB仍需真实RTX和DINO，已有旧002缓存不能被当作新99特征。本轮整包已完成实际A100验收，详情见文末最终交付记录；旧缓存与旧回执继续保留。
 
 来源和四份可复用payload的实际SHA见 `provenance_review_001/REPORT.json`，SHA `838a091e6fe0c5467804213d33ea9443a5afbc7a2c237db5a39919e1072f8e14`。
 
@@ -88,17 +88,35 @@ A100上传与最终CPU检查隐藏GPU、nice19，仅限制检查器自身允许C
 
 本机 `PICO_DATASET_READY.json`的SHA为 `fcf308b2820da1853e4492be3550f3bb7b6150507d2b95a7c71bf2aa017c491c`，实际`status=passed`、`production_ready_for_bound_pack_and_cache=true`，100条cache读取和每条首／中／尾共300次实际Dataset／collator查询通过，真实窗口数50,523。动作与mask形状`[30,80]`、状态`[1,45]`、历史特征`[6,5,1024]`；不是把50,523个窗口全部物化查询。继承统计SHA为 `931f2b536b2fd47e8d0964ad966202ccbda852d05ea88074be321987200a6ac4`，未重拟合；检查`GPU_used=false`、`CUDA_initialized=false`、`policy_constructed=false`、`training_started=false`。
 
-本机收据按其实际阶段保留`remote_production_ready=false`及`DINO_relocation_pending=true`，不能替代远端最终就绪。上传清单 `A100_TRANSFER_MANIFEST.json`的SHA为 `f31d9a1a37fc4f61844742f990864f3b6bb3503294ab5a0883c9fa7c7eabac68`，实际3,064个文件、36,373,589,231字节；这是待传输payload统计，不含后续工具归档、路径重绑备份和补充来源包。
+本机收据按其实际阶段保留`remote_production_ready=false`及`DINO_relocation_pending=true`，不能替代远端最终就绪。上传清单 `A100_TRANSFER_MANIFEST.json`的SHA为 `f31d9a1a37fc4f61844742f990864f3b6bb3503294ab5a0883c9fa7c7eabac68`，实际3,064个文件、36,373,589,231字节；这是初次传输payload统计，不含后续工具归档、路径重绑备份和补充来源包。
 
-上传中的被动连接观察见 `preparation_001/UPLOAD_NETWORK_OBSERVATION_001.json`：同一SSH进程143.215秒写出88,209,961字节，约0.616MB/s；当时TCP delivery约4.47Mb/s。Wi-Fi信号为−45dBm、节能关闭，不能仅据这些快照断言是Wi-Fi或服务端故障。按该段速率估算全清单约16.4小时，仅为当时估计，不是完成收据或时限承诺；主driver和上传进程继续运行，未更改参数或停止其他任务。
+上传中的被动连接观察见 `preparation_001/UPLOAD_NETWORK_OBSERVATION_001.json`：同一SSH进程143.215秒写出88,209,961字节，约0.616MB/s；当时TCP delivery约4.47Mb/s。Wi-Fi信号为−45dBm、节能关闭，不能仅据这些快照断言是Wi-Fi或服务端故障。按该段速率估算全清单约16.4小时，仅为当时估计，不是完成收据或时限承诺；该次观察时主driver和上传进程继续运行；此后主driver实际退出0，最终完成事件见下节，未为提速重启或修改主上传。
 
-## 远端交付完成后必须补入的真实回执
+## 实际A100交付完成
 
-以下字段均待本轮实际产物生成、回读验证后补全，不沿用旧100条的最终计数或SHA：
+最终数据汇总见`/home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_release_20261101/FINAL_DELIVERY_SUMMARY_001.json`。本批实际完成100条、56,423帧、50,523窗；
+100条真人轨迹仍只覆盖99种官方TRAIN初始化，不改写旧002与新99的冷姿态差异。
 
-- `A100_TRANSFER_MANIFEST.json`与`A100_BYTE_VERIFICATION.json`：实际文件数、字节数、SHA／size／纳秒mtime全部匹配及真实远端目录；字节阶段尚未完成的DINO重绑／生产读取标志保留原始阶段语义。
-- 远端DINO路径重绑：实际manifest SHA／signature、旧manifest备份、实际新source引用及数组字节未变；与最终远端生产读取绑定。
-- `A100_PICO_DATASET_READY.json`：实际SHA、`status=passed`、`remote_production_ready=true`、`DINO_relocation_pending=false`、100条实际帧／窗口数、CPU查询范围与实际payload/cache数量、当前文件身份复核、`training_started=false`。
-- 最终 `PROCESSING_STATUS.json`及driver退出记录：实际完成状态／returncode0、无剩余pending／错误，保留技术失败历史。只有上述最终远端收据全部符合本批冻结身份，才将本文更新为“数据交付完成”。
+- 主driver的`DRIVER_EXIT_001.json`实际`exit_code=0`，SHA `f927fb13cd92877226f529d4e20fbbec26360acb3bdd3f434217e2f513c45043`；
+  `PROCESSING_STATUS.json`为`A100_ready_for_training_not_started`，SHA `d93a219a4d66ffcd11b01695c0810815b42aaba98b5834fe81a1e0683ff8212c`。
+- 初次传输实际3,064文件、36,373,589,231字节全部通过SHA／size／纳秒mtime核对；
+  `A100_BYTE_VERIFICATION.json` SHA `6c06e56c4ef7e9f52fac6536dfe260afdae4b573d83258e74b86dad7d572bb37`。该字节阶段原有pending字段保留历史语义。
+- 最终`A100_PICO_DATASET_READY.json` SHA `672079bec26432011049f6a08939e17721814954dc3f99d63a51f46d88769426`，实际`status=passed`、
+  `remote_production_ready=true`、`DINO_relocation_pending=false`，绑定3,165个当前payload和100份cache。
+  A100实际Dataset／collator查询300次，覆盖每条首／中／尾；并非逐一物化全部50,523窗。
+- 远端重绑后的DINO manifest SHA `f891fe0860814f89a436f81959c1a86a3acc9510a184e27e4baec1b3e0eefd1d`；路径重绑收据SHA
+  `66d4d1b3fcd5ee3ea812ccdee0c061be609284f24ade6127cf1b1d7341cb688c`。原cache备份保留，训练数据与特征数组字节不变，
+  `PACK_READY.json`仍为 `f12d8d00ce0ec75e110f7bb7682ff9adb3b7d2006c84758b61d903e7a6f441b6`；本机READY的历史远端pending标志未重写。
+- 独立补充来源包已核对254个archive members／253份原文件；`SUPPLEMENTAL_VERIFICATION.json` SHA
+  `8dc6f31b01afd1fcd718669e1d319e4d993a6dfcd73e672bc17de85801fc5fc5`。该补充回执不替代Dataset READY，也没有重复生产数值验收。
+
+这些完成事实来自本轮实际收据及其当前身份绑定；不沿用旧批次结果，不重复RTX／DINO／物理／生产数值验收。
+远端CPU验收隐藏GPU、nice19并仅限制自身CPU；本轮没有启动训练，也不报告策略成功率。
+
+## 文档收尾的技术拦截
+
+北京时间2026-11-02 06:38，有限收尾脚本在文档validate阶段发现仓库现有可执行Git LFS hook，按预设保护退出。此时主driver及独立补充来源包已通过，工作树尚未被该脚本修改；这不是数据质量拒收或A100验收失败。
+
+`DOCS_FINALIZE_FAILURE_001.json`、`COMPLETION_SEQUENCE_EXIT_001.json`和原日志继续保留，不覆盖为成功。随后复核本轮真实完成收据并直接更新文档，正常执行已查看的Git LFS hooks提交；没有禁用hook、重启上传、重跑已通过的物理／数值验收或启动训练。
 
 本次授权仅处理与交付数据，不启动训练，不报告训练loss或策略闭环成功率。

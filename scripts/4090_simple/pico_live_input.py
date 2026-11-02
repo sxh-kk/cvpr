@@ -12,6 +12,7 @@ This module never starts/stops the service or sends commands to the headset.
 from __future__ import annotations
 
 import ctypes as C
+from collections import deque
 from dataclasses import dataclass, field
 import fcntl
 import json
@@ -272,6 +273,11 @@ class PicoReceiver:
         self._started = False
         self._sequence = 0
         self._latest: tuple[bytes, float, int] | None = None
+        self._last_callback_s = None
+        self._last_callback_gap_s = None
+        self._maximum_callback_gap_s = 0.
+        self._receive_gaps = deque(maxlen=32)
+        self._last_device_event = None
 
     def start(self) -> PicoReceiver:
         with self._lifecycle:
@@ -312,10 +318,40 @@ class PicoReceiver:
             raw = bytes(C.cast(pointer, C.POINTER(_DeviceState)).contents.stateJson)
             with self._mutex:
                 self._sequence += 1
+                if self._last_callback_s is not None:
+                    gap = received-self._last_callback_s
+                    self._last_callback_gap_s = gap
+                    self._maximum_callback_gap_s = max(self._maximum_callback_gap_s,gap)
+                    if gap >= .05:
+                        self._receive_gaps.append({'sequence':self._sequence,
+                            'host_monotonic_s':received,'gap_s':gap})
+                self._last_callback_s = received
                 self._latest = (raw, received, self._sequence)
         elif kind in (1 << 3, 1 << 5):
             with self._mutex:
+                self._last_device_event = {'kind':int(kind),'status':int(status),
+                    'host_monotonic_s':time.monotonic()}
                 self._latest = None
+
+    def telemetry(self):
+        """Bounded callback timing from this consumer, without parsing/consuming.
+
+        Host arrival gaps include network/service/SDK scheduling and do not by
+        themselves locate a failure in any one of those layers. They never
+        authorize reuse of an old action packet or change control deadlines.
+        """
+        with self._mutex:
+            now = time.monotonic()
+            return {'contract':'cvpr-pico-same-consumer-receive-telemetry-v1',
+                'sample_monotonic_s':now,'callback_sequence':self._sequence,
+                'latest_packet_available':self._latest is not None,
+                'last_callback_monotonic_s':self._last_callback_s,
+                'last_callback_age_s':None if self._last_callback_s is None else max(0.,now-self._last_callback_s),
+                'last_callback_gap_s':self._last_callback_gap_s,
+                'maximum_callback_gap_s':self._maximum_callback_gap_s,
+                'recent_receive_gaps_ge_50ms':[dict(item) for item in self._receive_gaps],
+                'last_device_event':dict(self._last_device_event) if self._last_device_event else None,
+                'scope':'same SDK consumer host arrivals; no network/service root-cause certificate'}
 
     def snapshot(self) -> PicoFrame | None:
         with self._mutex:

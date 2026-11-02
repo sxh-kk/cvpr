@@ -146,6 +146,10 @@ A100等待20k完整保存后的保护／导出、4090 SSH拉取及SHA核验见[�
 PICO 4 双手柄与脚踝定位器通过本机 SONIC v1.1 操控 SIMPLE G1，独立进程提供相机预览，同步记录真实状态与控制指令，退出后按同状态补渲染训练图像，见[PICO 仿真遥操作采集](docs/PICO_SIMPLE_TELEOP.md)。保存后独立验收，不将连接正常或原始录制完成当作成功训练示范。
 用户固定90条真人示例的独立审计、无损训练格式转换、DINO及A100交付见[数据核定与交付](docs/PICO_DATASET_ADMISSION.md)；当前采集退出后才执行GPU阶段。
 
+桌面Grasp的官方100份TRAIN初始化采用独立[PICO＋SONIC采集入口](docs/PICO_GRASP_COLLECTION.md)，
+保留原AMO控制差异和原生抓起判据；支持同一SDK接收端时序诊断及独立1Hz只读故障监测。
+采集阶段成功仍需后续RTX和训练数据终验。
+
 
 SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](docs/PICO_MOBILE_PP_TELEOP.md)：
 2026-10-28新一轮用`start_pico_mobile_pp_official99.sh`逐条采集官方TRAIN的99份不同初始化，成功原始物理复核后推进，失败同配置重试；

@@ -41,6 +41,31 @@ def edit(outer, mutate):
 
 
 class PicoTrackingTests(unittest.TestCase):
+    def test_receive_telemetry_captures_short_gap_without_consuming_or_refreshing_packet(self):
+        receiver=pico.PicoReceiver()
+        state=pico._DeviceState()
+        state.stateJson=json.dumps(payload()).encode()
+        with patch.object(pico.time,'monotonic',return_value=10.):
+            receiver._receive(None,1<<25,0,C.addressof(state))
+        with patch.object(pico.time,'monotonic',return_value=10.12):
+            receiver._receive(None,1<<25,0,C.addressof(state))
+        packet=receiver._latest
+        with patch.object(pico.time,'monotonic',return_value=10.13):
+            value=receiver.telemetry()
+        self.assertIs(receiver._latest,packet)
+        self.assertEqual(receiver._sequence,2)
+        self.assertAlmostEqual(value['last_callback_age_s'],.01)
+        self.assertAlmostEqual(value['maximum_callback_gap_s'],.12)
+        self.assertEqual(len(value['recent_receive_gaps_ge_50ms']),1)
+        value['recent_receive_gaps_ge_50ms'][0]['gap_s']=999
+        with patch.object(pico.time,'monotonic',return_value=10.14):
+            receiver._receive(None,1<<5,0,None)
+            disconnected=receiver.telemetry()
+        self.assertIsNone(receiver.snapshot())
+        self.assertFalse(disconnected['latest_packet_available'])
+        self.assertAlmostEqual(disconnected['recent_receive_gaps_ge_50ms'][0]['gap_s'],.12)
+        self.assertEqual(disconnected['last_device_event']['kind'],1<<5)
+
     def test_real_structure_current_analog_buttons_and_immutable_evidence(self):
         outer = payload()
         frame = pico.parse_tracking(outer, 10., 1)

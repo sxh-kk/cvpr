@@ -52,12 +52,19 @@ def command_block():
 
 
 def step_and_native_block():
-    statements, start = statement_list_containing(lambda node: isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Call) and ast.unparse(node.value.func) == "env.step"
-        and any("terminated" in ast.unparse(target) for target in node.targets))
+    # Select the enclosing timed control step, not its one-statement try body
+    # (nor a task-specific warmup/reset step elsewhere in run()).
+    def is_control_step(node):
+        return isinstance(node, ast.Try) and any(isinstance(child, ast.Assign)
+            and isinstance(child.value, ast.Call) and ast.unparse(child.value.func) == "env.step"
+            and any("terminated" in ast.unparse(target) for target in child.targets)
+            for child in node.body)
+    statements, start = statement_list_containing(is_control_step)
+    assert start >= 2 and is_assign(statements[start - 2], "environment_started")
+    assert is_assign(statements[start - 1], "substep_costs")
     assert isinstance(statements[start + 1], ast.If)
     assert ast.unparse(statements[start + 1].test) == "pending_mobile_quality_row is not None"
-    return statements[start:start + 2]
+    return statements[start - 2:start + 2]
 
 
 class FakeReference:
@@ -154,6 +161,7 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
             model=SimpleNamespace(joint=joint), data=SimpleNamespace(time=0., joint=joint), BODY_JOINT_NAMES=["b" + str(i) for i in range(29)],
             physical_snapshot=lambda *_: {"body_q29": [0.] * 29}, root_pose=lambda *_: root.copy(),
             mobile_mode="navigation", mobile_tick=0, mobile_control=mobile, reference=reference,
+            grasp=False, tick_costs=entry.OperationCosts(), substep_costs=None,
             mobile_continuous=False, mobile_policy="locked_upper_mode0", mobile_vr=None,
             mobile_follow_source_timestamp=None,
             mobile_preparation_wall=None,

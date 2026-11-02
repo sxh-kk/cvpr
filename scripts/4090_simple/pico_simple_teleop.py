@@ -1536,6 +1536,7 @@ def run(args):
             result.setdefault('rejections',[]).append({'sim_time_s':float(data.time),
                 'tick50':global_tick,'reason':error_text,'pc_wall_time_ns':time.time_ns(),
                 'mobile_planner_fault':mobile_control.status().get('last_fault') if mobile_control else None,
+                'pico_receive_telemetry':receiver.telemetry() if receiver is not None else None,
                 'current_loop_wall_timing':loop_timer.snapshot() if loop_timer else None,
                 'previous_loop_wall_timing':last_loop_wall_timing})
             result['rejections'] = result['rejections'][-128:]
@@ -2259,6 +2260,7 @@ def run(args):
                 'background_review':review_status,
                 'mobile_collection_progress':collection_progress.receipt() if collection_progress else None,
                 'tracking':quality,'calibrated':calibration_fresh,'error':error_text,
+                'pico_receive_telemetry':receiver.telemetry() if receiver is not None else None,
                 'hand_control':feedback,'hand_feedback_error':feedback_error,
                 'recording':episode.status if episode else None,'episode_count':len(result['episodes']),
                 'sim_time_s':float(data.time),'decoder_calls':controller.decoder_calls,

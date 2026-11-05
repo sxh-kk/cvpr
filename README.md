@@ -177,10 +177,14 @@ A100全部传输字节／文件身份、DINO路径重绑及300次实际CPU生产
 末batch训练loss0.4521014392375946，历史Handover回归loss10.945638656616211（不是Mobile验证，且后期升高）。
 13份模型及9500／10000完整恢复状态CPU最终验收通过，未做GPU恢复训练或任务成功率验收，
 详见[Mobile完整训练与验收](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#用户后续授权的独立训练完整训练结果与验收)。
-最新Mobile task-step10000已完成本机4090的level0固定十例：每例1200步／24秒（含warmup），
+2026-10-27旧批Mobile task-step10000已完成本机4090的level0固定十例：每例1200步／24秒（含warmup），
 实际`.9`原生成功0/10、机器人跌倒0/10，十例HTTP／在线DINO身份／视频读帧验收均通过。
 这是同scene6的双来源SONIC控制器适配诊断；部分case在首次策略前目标已翻倒，逐例阶段及限制见
 [Mobile本机闭环评测记录](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#最新task-step10000的本机闭环诊断)。
+
+2026-11-05新增[Mobile官方30份初始化评测](docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md)，
+按Level 0／1／2各10例准备，默认使用最新官方99＋历史1条数据训练、用户停止前已保存的6000步权重。
+本次训练未完成10000步，独立绑定停止与保存证据；当前因A100连接超时尚未取得新权重，未开始评测。
 用户后续授权同一100条按完整episode固定95训练／5验证，从原joint38000 fresh训练20k，
 每1000步对比完整Mobile验证与clean训练probe，4k起每500步保存33份模型；
 新入口、隔离协议及实际记录见[95／5过拟合诊断](docs/PICO_MOBILE_PP_DATASET_ADMISSION.md#固定100条的95训练5验证与20k过拟合诊断)。

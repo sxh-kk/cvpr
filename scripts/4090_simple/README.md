@@ -14,6 +14,12 @@
 A100已提供CPU导出与保存完成等待工具`export_bundle.py`，4090可通过SSH／rsync拉取资源。
 具体源路径、READY判定、SHA校验及当前缺项见[资源交接](../../docs/4090_SIMPLE_TRANSFER.md)。
 
+Mobile P&P最新官方99＋历史1条数据训练的停止点，使用独立的
+`prepare_mobile_pp_official_eval.py`绑定模型及训练停止／保存证据，
+再由`evaluate_mobile_pp30.py`运行Level 0／1／2各10份官方初始化。
+不能套用旧Mobile100完整10000步的部署合同；参数、技术错误分母、
+本轮实际进度与限制见[官方30例评测](../../docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md)。
+
 ## Handover任务微调权重的本机测评
 
 `prepare_task_snapshot.py`专用于从UnifoLM38k初始化的task50联合微调checkpoint。

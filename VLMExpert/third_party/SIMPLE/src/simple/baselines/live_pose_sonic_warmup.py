@@ -43,10 +43,13 @@ def reference_input(body_q, reference_wxyz, actual_wxyz):
 
 
 class LivePoseSonicWarmup:
-    def __init__(self, resource_dir, hand_policy="measured"):
+    def __init__(self, resource_dir, hand_policy="measured", arm_profile="legacy"):
         if hand_policy not in ("measured", "open"):
             raise ValueError("Warmup hand policy must be measured or open")
+        if arm_profile not in ("legacy", "wrist_retreat_v1"):
+            raise ValueError("Unknown warmup arm profile")
         self.hand_policy = hand_policy
+        self.arm_profile = arm_profile
         import onnxruntime as ort
         root = Path(resource_dir).resolve(strict=True)
         path = root / "model_encoder.onnx"
@@ -64,6 +67,7 @@ class LivePoseSonicWarmup:
 
     def reset(self):
         self.body_q = self.root_wxyz = self.hands = None
+        self.wrist_reference = None
         self.phase = "warmup_measured_pose_pd"
         self.receipt = {"kind":"live_initial_pose_sonic_v1_1", "encoder_sha256":ENCODER_SHA256,
             "helper_source_sha256":_sha(__file__),
@@ -75,6 +79,14 @@ class LivePoseSonicWarmup:
             "initialization_count":0, "encoder_calls":0, "events":[],
             "proprioception":"ten real 50Hz frames before latent; no invented measurements",
             "camera_history":"real observations only; no source RGB, teacher future or state forcing"}
+        if getattr(self, "arm_profile", "legacy") != "legacy":
+            self.receipt.update(arm_profile=self.arm_profile,
+                arm_reference_scope="fixed causal first-wrist retreat in heading frame; no object feedback",
+                arm_handoff_seconds=.2)
+
+    def finish(self, controller, observation):
+        if self.wrist_reference is not None:
+            controller.finish_warmup_arms(observation)
 
     def command(self, robot, controller, observation):
         state43_to45(observation["joint_qpos"], observation["joint_names"])
@@ -95,10 +107,18 @@ class LivePoseSonicWarmup:
                 "root_wxyz":self.root_wxyz.tolist(),"hands":measured_hands}
             self.receipt["initial_live_reference_sha256"] = hashlib.sha256(json.dumps(
                 reference,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()
+        encoder_body = self.body_q
+        if getattr(self, "arm_profile", "legacy") == "wrist_retreat_v1":
+            from simple.baselines.warmup_wrist_reference import WarmupWristReference
+            if self.wrist_reference is None:
+                self.wrist_reference = WarmupWristReference(robot.mjModel, robot.mjData)
+            encoder_body, diagnostic = self.wrist_reference.reference(robot.mjData, self.body_q)
+            controller.set_warmup_arm_target(encoder_body[15:], observation, gravity_compensation=True)
+            self.receipt["arm_reference"] = self.wrist_reference.receipt
         if len(controller._history) < 10:
             self.phase = "warmup_measured_pose_pd"
             return controller.hold(observation)
-        value = reference_input(self.body_q, self.root_wxyz, actual_root)
+        value = reference_input(encoder_body, self.root_wxyz, actual_root)
         token = np.asarray(self.session.run([self.output_name], {self.input_name:value})[0], np.float32)
         if token.shape != (1,64) or not np.isfinite(token).all():
             raise ValueError("Invalid live-pose warmup token")

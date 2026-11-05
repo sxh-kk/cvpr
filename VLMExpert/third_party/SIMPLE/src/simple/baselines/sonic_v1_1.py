@@ -175,6 +175,104 @@ class SonicV11OnnxController:
         self.decoder_calls = 0
         self.clipped_torque_elements = 0
         self._pd_binding = None
+        self._warmup_arm_target = None
+        self._warmup_arm_handoff_time = None
+        self._warmup_arm_gravity = False
+        self._warmup_arm_force_weight = 0.
+        self._warmup_gravity_binding = None
+        self.warmup_arm_receipt = {"enabled": False, "events": [], "handoff_seconds": .2,
+            "gravity_physics_steps":0, "maximum_absolute_gravity_torque_nm":0.}
+
+    def set_warmup_arm_target(self, target14, observation, *, gravity_compensation=False):
+        """Opt-in robot-only preparation reference; never write simulator state.
+
+        The caller supplies a causal FK/IK target at the real observation rate.
+        Position PD, actuator bounds, fingers and the other15 joints retain
+        their existing controller path. No override is active by default.
+        """
+        value = np.asarray(target14, dtype=np.float64)
+        time_s = float(observation["sim_time_s"])
+        if value.shape != (14,) or not np.isfinite(value).all() or not np.isfinite(time_s):
+            raise ValueError("Warmup arm reference requires14 finite targets and a real timestamp")
+        if self._warmup_arm_handoff_time is not None:
+            raise ValueError("Cannot re-enter arm preparation after policy handoff; reset the controller")
+        self._warmup_arm_target = value.copy()
+        self._warmup_arm_gravity = bool(gravity_compensation)
+        self.warmup_arm_receipt["enabled"] = True
+        self.warmup_arm_receipt["arm_gravity_compensation"] = self._warmup_arm_gravity
+        self.warmup_arm_receipt["gravity_scope"] = "robot-only private qpos; zero qvel qfrc_bias; named arm14 only; original torque clipping"
+
+    def finish_warmup_arms(self, observation):
+        """Blend back to learned decoder targets over a fixed0.2s interval."""
+        if self._warmup_arm_target is None:
+            return
+        time_s = float(observation["sim_time_s"])
+        if not np.isfinite(time_s):
+            raise ValueError("Arm handoff needs a finite real timestamp")
+        if self._warmup_arm_handoff_time is None:
+            self._warmup_arm_handoff_time = time_s
+            self.warmup_arm_receipt["handoff_start_sim_time_s"] = time_s
+
+    def _prepare_arm_targets(self, model, time_s):
+        if self._warmup_arm_target is None:
+            return
+        wanted = self._warmup_arm_target
+        for name, target in zip(BODY_JOINT_NAMES[15:], wanted):
+            joint = model.joint(name)
+            if bool(joint.limited[0]) and not joint.range[0] <= target <= joint.range[1]:
+                raise ValueError("Warmup arm reference exceeds joint range: " + name)
+        if self._warmup_arm_handoff_time is None:
+            weight = 0.
+        else:
+            u = np.clip((time_s-self._warmup_arm_handoff_time)/.2, 0., 1.)
+            weight = float(u*u*(3.-2.*u))
+        decoder_arms = self._body_target[15:].copy()
+        self._body_target[15:] = (1.-weight)*wanted + weight*decoder_arms
+        self._warmup_arm_force_weight = (1.-weight) if self._warmup_arm_gravity else 0.
+        # Previous action must represent the position target actually applied,
+        # rather than the raw decoder output that the preparation overrode.
+        self._last_raw_action = np.asarray(
+            ((self._body_target-DEFAULT_ANGLES)/ACTION_SCALE)[POLICY_TO_BODY], dtype=np.float32)
+        self.warmup_arm_receipt["events"].append({"sim_time_s":float(time_s),
+            "learned_target_weight":weight, "gravity_weight":self._warmup_arm_force_weight,
+            "desired_arm14":wanted.tolist(),
+            "decoder_arm14":decoder_arms.tolist(), "applied_arm14":self._body_target[15:].tolist()})
+        if weight >= 1.:
+            self._warmup_arm_target = None
+            self.warmup_arm_receipt["handoff_completed_sim_time_s"] = float(time_s)
+
+    def _arm_gravity_feedforward(self, model, data):
+        """Gravity-only arm torques from private FK/dynamics, never live forces."""
+        if self._warmup_arm_force_weight == 0.:
+            return None
+        import mujoco
+        binding = self._warmup_gravity_binding
+        if binding is None or binding["model"] is not model:
+            names = BODY_JOINT_NAMES + SIMPLE_HAND_JOINT_NAMES
+            binding = {"model":model, "data":mujoco.MjData(model),
+                "root":int(model.joint("floating_base_joint").qposadr[0]),
+                "robot_qadr":np.array([int(model.joint(name).qposadr[0]) for name in names]),
+                "arm_dofs":np.array([int(model.joint(name).dofadr[0]) for name in BODY_JOINT_NAMES[15:]])}
+            self._warmup_gravity_binding = binding
+        scratch, root, coordinates = binding["data"], binding["root"], binding["robot_qadr"]
+        root_q = data.qpos[root:root+7]
+        robot_q = data.qpos[coordinates]
+        if not np.isfinite(np.r_[root_q, robot_q]).all():
+            raise ValueError("Nonfinite robot pose for arm gravity compensation")
+        scratch.qpos[root:root+7] = root_q
+        scratch.qpos[coordinates] = robot_q
+        scratch.qvel[:] = 0.
+        mujoco.mj_forward(model, scratch)
+        value = scratch.qfrc_bias[binding["arm_dofs"]] * self._warmup_arm_force_weight
+        if not np.isfinite(value).all():
+            raise ValueError("Nonfinite arm gravity feedforward")
+        receipt = self.warmup_arm_receipt
+        receipt["gravity_physics_steps"] += 1
+        receipt["maximum_absolute_gravity_torque_nm"] = max(
+            receipt["maximum_absolute_gravity_torque_nm"], float(np.abs(value).max()))
+        receipt.setdefault("first_gravity_sim_time_s", float(data.time))
+        receipt["last_gravity_sim_time_s"] = float(data.time)
+        return dict(zip(BODY_JOINT_NAMES[15:], value))
 
     def hold(self, observation):
         state = dict(zip(observation["joint_names"], observation["joint_qpos"]))
@@ -233,6 +331,7 @@ class SonicV11OnnxController:
                 self._body_target = body_targets(np.asarray(raw_action)[0])
                 self._last_raw_action = np.asarray(raw_action[0], dtype=np.float32).copy()
                 self.decoder_calls += 1
+            self._prepare_arm_targets(model, t)
         self._apply_named_pd(model, data, hand_targets)
 
     def _pd_indices(self, model, data, names):
@@ -299,6 +398,9 @@ class SonicV11OnnxController:
             return self._apply_named_pd_scalar(model, data, targets, gains, joint_to_actuator)
         target, gain = target.astype(np.float64, copy=False), gain.astype(np.float64, copy=False)
         torque = gain[:, 0] * (target - data.qpos[binding["qpos"]]) - gain[:, 1] * data.qvel[binding["qvel"]]
+        gravity = self._arm_gravity_feedforward(model, data)
+        if gravity is not None:
+            torque += np.asarray([gravity.get(name, 0.) for name in names])
         if not np.isfinite(torque).all():
             # No ctrl/count has been written. Re-run the original scalar order
             # so a nonfinite later channel preserves the same failure prefix.
@@ -319,11 +421,14 @@ class SonicV11OnnxController:
 
     def _apply_named_pd_scalar(self, model, data, targets, gains, joint_to_actuator):
         """Original ordered fallback for exceptional/nonfinite scalar inputs."""
+        gravity = self._arm_gravity_feedforward(model, data)
         for name, target in targets.items():
             aid = joint_to_actuator[name]
             joint = data.joint(name)
             kp, kd = gains[name]
             torque = kp * (target - joint.qpos[0]) - kd * joint.qvel[0]
+            if gravity is not None:
+                torque += gravity.get(name, 0.)
             if not np.isfinite(torque):
                 raise ValueError("Nonfinite SONIC PD torque")
             lower, upper = model.actuator_ctrlrange[aid] if model.actuator_ctrllimited[aid] else (-np.inf, np.inf)

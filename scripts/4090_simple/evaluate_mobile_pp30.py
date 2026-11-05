@@ -137,7 +137,7 @@ def freeze_inputs(args):
         source["psi/" + relative] = file_identity(REPO / "VLMExpert/src/psi" / relative)
     for relative in ("tasks/g1_wholebody_locomotion_pick_between_tables_teleop.py", "envs/sonic_loco_manip.py",
                      "envs/base_dual_env.py", "baselines/dual_source_psi0.py", "baselines/sonic_v1_1.py",
-                     "baselines/live_pose_sonic_warmup.py"):
+                     "baselines/live_pose_sonic_warmup.py", "baselines/warmup_wrist_reference.py"):
         source["SIMPLE/" + relative] = file_identity(REPO / "VLMExpert/third_party/SIMPLE/src/simple" / relative)
     source["deployment_ready"] = file_identity(ready_path)
     artifacts = ready.get("deployment_artifacts")
@@ -171,7 +171,10 @@ def freeze_inputs(args):
                           "sampling_seed": args.sampling_seed + level * 10 + row["episode_index"]})
         unchanged(identity)
         metadata_files.append(identity)
+    arm_profile = getattr(args, "warmup_arm_profile", "legacy")
+    require(arm_profile in ("legacy", "wrist_retreat_v1"), "Unknown warmup arm profile")
     return {"contract": CONTRACT, "prepared_utc": now(), "task_id": "simple/" + TASK,
+            "warmup_arm_profile": arm_profile,
             "checkpoint_step": args.checkpoint_step, "model": model, "deployment": str(args.deployment),
             "training_manifest": manifest, "metadata_files": metadata_files, "sources": source,
             "official_repository": "USC-PSI-Lab/psi-data", "official_revision": OFFICIAL_REVISION,
@@ -218,6 +221,9 @@ def commands(args, case, directory):
         "--hand-torque-profile", "mjcf_limits", "--warmup-control", "live_pose_sonic_v1_1",
         "--warmup-hand-policy", "measured", "--body-token-projection", "none", "--video",
         "--worker-wall-timeout", "1800", "--worker-task", TASK]
+    arm_profile = getattr(args, "warmup_arm_profile", "legacy")
+    if arm_profile != "legacy":
+        simulator.extend(["--warmup-arm-profile", arm_profile])
     return {"server": server, "simulator": simulator}
 
 
@@ -345,6 +351,53 @@ def validate_rtc_execution(result, ticks, requests, policy):
             "control_ticks_per_window": window, "all_requests_and_action_indices_aligned": True}
 
 
+def validate_warmup_arms(episode, ticks, expected_profile, expected_helper_sha=None):
+    """Bind an explicit preparation variant to actual causal control evidence."""
+    warmup = episode.get("warmup_control", {})
+    require(warmup.get("arm_profile", "legacy") == expected_profile, "Warmup arm profile differs from frozen campaign")
+    if expected_profile == "legacy":
+        return
+    require(expected_profile == "wrist_retreat_v1", "Unknown frozen arm profile")
+    reference, control = warmup.get("arm_reference", {}), warmup.get("arm_controller", {})
+    if expected_helper_sha is not None:
+        require(reference.get("helper_source_sha256") == expected_helper_sha, "Actual wrist helper differs from frozen source")
+    require(reference.get("kind") == "first_live_robot_world_wrist_retreat_v1"
+            and reference.get("object_feedback") is False and reference.get("contact_feedback") is False
+            and reference.get("future_teacher") is False and reference.get("live_state_writes") is False
+            and reference.get("history_injection") is False, "Missing causal robot-only arm reference")
+    profile = reference.get("profile", {})
+    require(all(profile.get(key) == value for key, value in
+                (("backward_m", .05), ("outward_each_m", .03), ("upward_m", .05), ("transition_s", .2))),
+            "Fixed wrist preparation trajectory changed")
+    count = episode["warmup_frames"]
+    events, actual = reference.get("events", []), control.get("events", [])
+    require(reference.get("calls") == count == len(events) and len(actual) >= count,
+            "Arm profile lacks every real warmup reference/control sample")
+    require(control.get("enabled") is True and control.get("arm_gravity_compensation") is True
+            and control.get("gravity_physics_steps", 0) >= count * 4,
+            "Arm gravity preparation did not run on all warmup physical steps")
+    close_number(control["first_gravity_sim_time_s"], ticks[0]["sim_time_s"], "Arm preparation missed its first physical step")
+    for index, event in enumerate(events):
+        close_number(event["sim_time_s"], ticks[index]["sim_time_s"], "Wrist reference not on the real observation clock")
+        close_number(actual[index]["sim_time_s"], ticks[index]["sim_time_s"], "Arm controller clock differs")
+        require(event.get("legs_waist_reference_unchanged") is True, "Wrist reference modified non-arm desired joints")
+        desired = [value for side in event["arms_left_right"] for value in side["desired_joint_q7"]]
+        require(len(desired) == 14 and len(actual[index]["applied_arm14"]) == 14,
+                "Missing14-joint actual arm target")
+        for a, b in zip(desired, actual[index]["applied_arm14"]):
+            close_number(a, b, "Applied arm target differs from the encoded preparation reference")
+        close_number(actual[index]["learned_target_weight"], 0., "Warmup arm override ended before policy")
+        close_number(actual[index]["gravity_weight"], 1., "Warmup gravity support changed")
+    if len(ticks) > count:
+        close_number(control["handoff_start_sim_time_s"], ticks[count]["sim_time_s"], "Arm handoff did not start with the first learned action")
+        close_number(actual[count]["learned_target_weight"], 0., "First policy arm target jumps at handoff")
+        if ticks[-1]["sim_time_s"] >= ticks[count]["sim_time_s"] + .22:
+            close_number(control["handoff_completed_sim_time_s"] - control["handoff_start_sim_time_s"], .2,
+                         "Preparation did not return to unmodified learned control after0.2s")
+            close_number(actual[-1]["learned_target_weight"], 1., "Preparation still overrides the later learned policy")
+            close_number(actual[-1]["gravity_weight"], 0., "Preparation gravity support leaked into later policy")
+
+
 def validate_case(directory, case, frozen):
     """Read actual trace, both HTTP sides and decoded video; never infer success from geometry."""
     from run_closed_loop import worker_result_errors
@@ -377,6 +430,8 @@ def validate_case(directory, case, frozen):
     require(0 < len(ticks) <= 1200 and len(ticks) == episode["frames"] == episode["warmup_frames"] + episode["policy_frames"],
             "Incomplete tick ledger")
     require(episode["warmup_frames"] == min(len(ticks), 50), "Causal warmup was removed or extended beyond the official budget")
+    validate_warmup_arms(episode, ticks, frozen.get("warmup_arm_profile", "legacy"),
+                        frozen.get("sources", {}).get("SIMPLE/baselines/warmup_wrist_reference.py", {}).get("sha256"))
     require(all(type(tick["terminated"]) is bool and type(tick["truncated"]) is bool for tick in ticks), "Native flags are not bool")
     for index, tick in enumerate(ticks):
         require(tick["phase"] == ("warmup_measured_pose_pd" if index < 10 else
@@ -434,7 +489,8 @@ def validate_case(directory, case, frozen):
             "ticks": len(ticks), "warmup_ticks": episode["warmup_frames"], "policy_ticks": episode["policy_frames"],
             "simulated_seconds": episode["simulated_seconds"], "video_probe": probe[0], "video": str(video),
             "evidence": [file_identity(path) for path in paths], "formal_evaluation_eligible": False,
-            "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution}
+            "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution,
+            "warmup_arm_profile": frozen.get("warmup_arm_profile", "legacy")}
 
 
 def preflight(args):
@@ -542,6 +598,8 @@ def main(argv=None):
     parser.add_argument("--sampling-seed", type=int, default=20261105)
     parser.add_argument("--rtc-mode", choices=("off", "test_time"), default="off")
     parser.add_argument("--execute-steps", type=int, help="Default30 with RTC off,15 with test_time; must align to50Hz ticks")
+    parser.add_argument("--warmup-arm-profile", choices=("legacy", "wrist_retreat_v1"), default="legacy",
+                        help="Explicit separate preparation variant; never changes archived baseline results")
     args = parser.parse_args(argv)
     require(len(args.expected_model_sha256) == 64 and all(char in "0123456789abcdef" for char in args.expected_model_sha256), "Expected SHA must be lowercase SHA256")
     require(args.checkpoint_step > 0 and 1024 <= args.port <= 65535 and 0 <= args.sampling_seed <= 2**32 - 30, "Invalid step/port/seed")
@@ -559,6 +617,7 @@ def main(argv=None):
              "checkpoint_step": args.checkpoint_step, "model_sha256": args.expected_model_sha256,
              "cases": [], "formal_evaluation_eligible": False, "boundary": BOUNDARY,
              "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": policy}
+    state["warmup_arm_profile"] = args.warmup_arm_profile
     write(args.output / "state.json", state)
     try:
         for case in frozen["cases"]:

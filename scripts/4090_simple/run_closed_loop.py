@@ -245,6 +245,8 @@ def parse_args():
                         default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
     parser.add_argument("--warmup-hand-policy", choices=("measured", "open"), default="measured",
                         help="Optional neutral zero hand targets during live-pose SONIC warmup only")
+    parser.add_argument("--warmup-arm-profile", choices=("legacy", "wrist_retreat_v1"), default="legacy",
+                        help="Explicit new robot-only wrist preparation protocol; legacy remains unchanged")
     parser.add_argument("--body-token-projection", choices=("none", "fsq_v1_1"), default="none",
                         help="Optional denormalized body64 projection to the fixed SONIC v1.1 32-level FSQ grid")
     parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(TASKS))
@@ -305,6 +307,10 @@ def parse_args():
         parser.error("--warmup-control live_pose_sonic_v1_1 requires --sync-observations")
     if args.warmup_hand_policy == "open" and args.warmup_control != "live_pose_sonic_v1_1":
         parser.error("--warmup-hand-policy open requires --warmup-control live_pose_sonic_v1_1")
+    if args.warmup_arm_profile != "legacy" and args.warmup_control != "live_pose_sonic_v1_1":
+        parser.error("--warmup-arm-profile requires --warmup-control live_pose_sonic_v1_1")
+    if args.warmup_arm_profile != "legacy" and args.tasks != [MOBILE_PP_TASK]:
+        parser.error("wrist_retreat_v1 is validated only for the explicit Mobile P&P task")
     if args.initial_physics_run is not None:
         if (not args.initial_physics_run.is_absolute() or not args.sync_observations or
                 args.episodes_per_task != 1 or len(args.tasks) != 1 or
@@ -453,7 +459,8 @@ def run_worker(args):
         warmup_control = None
         if args.warmup_control == "live_pose_sonic_v1_1":
             from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
-            warmup_control = LivePoseSonicWarmup(args.sonic_resources, hand_policy=args.warmup_hand_policy)
+            warmup_control = LivePoseSonicWarmup(args.sonic_resources, hand_policy=args.warmup_hand_policy,
+                                               arm_profile=args.warmup_arm_profile)
         agent = DualSourcePsi0Agent(raw.task.robot, client=client, controller=controller,
                                    execute_steps=args.execute_steps, warmup_control=warmup_control,
                                    body_token_projection=args.body_token_projection)
@@ -676,6 +683,8 @@ def run_worker(args):
                 episode["warmup_control"] = (deepcopy(warmup_control.receipt) if warmup_control is not None
                     else {"kind":"measured_pose_pd", "balance_decoder_during_history":False})
                 episode["warmup_control"]["actual_warmup_decoder_calls"] = episode.get("warmup_decoder_calls", controller.decoder_calls)
+                if args.warmup_arm_profile != "legacy":
+                    episode["warmup_control"]["arm_controller"] = deepcopy(controller.warmup_arm_receipt)
                 episode["body_token_projection"] = deepcopy(agent.projection_receipt)
                 episode["continue_after_official_success"] = args.continue_after_task_success
                 episode["strategy_quality_assessment"] = (

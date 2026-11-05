@@ -293,6 +293,10 @@ class DualSourcePsi0Agent:
                 return self.controller.hold(observation)
             if chunk.shape != (self.execute_steps, 80) or not np.isfinite(chunk).all():
                 raise ValueError(f"Expected a finite ({self.execute_steps}, 80) denormalized policy action window")
+            if self.warming_up and self.warmup_control is not None:
+                finish = getattr(self.warmup_control, "finish", None)
+                if finish is not None:
+                    finish(self.controller, observation)
             self._chunk, self._chunk_time, idx = chunk.copy(), float(t), 0
             self.warming_up = False
         latent, hands = split_action80(self._chunk[idx])

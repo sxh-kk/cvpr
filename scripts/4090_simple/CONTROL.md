@@ -274,6 +274,29 @@ CPU MJB／ORT 的 1.5 秒物理检查支持它修复首秒失稳，实际 RTX／
 `open` 与其他 warmup-control 组合会被拒绝。它用于缩小训练首窗口与部署闭手启动的手形差异，
 不能据此宣称任务成功，或已经消除身体／伸手阶段等其余分布差异。
 
+Mobile P&P 可另选 `--warmup-arm-profile wrist_retreat_v1`，默认仍是 `legacy`。
+它要求显式单任务 `G1WholebodyLocomotionPickBetweenTablesTeleop-v0`、live-pose SONIC与同步观测，
+属于新的部署预热控制版本，不改写旧测评结果，也不适用于未经验证的其它任务。
+
+- 从首个真实post-reset状态读取机器人双腕位置／朝向和骨盆水平heading。
+  两腕用统一规则后退5厘米、分别向外3厘米、上抬5厘米；0.2秒cubic smoothstep过渡后保持world目标与首腕朝向。
+  私有MjData的有界DLS仅求14个肩／肘／腕关节，不读取物体位置、接触或teacher。
+- 前10个PD控制tick同样使用该臂参考，随后SONIC encoder的期望臂参考与实际位置PD目标一致。
+  腿／腰期望reference和手指策略不直接覆盖，但whole-body平衡输出可能因真实历史改变而不同。
+- 从首个受控5毫秒物理子步起，对14个臂关节增加纯重力前馈：私有MjData只复制当前机器人root和43关节qpos，
+  将qvel置零后取`qfrc_bias`，因此不混入速度相关项。该转矩与原PD相加后仍经过原actuator限幅；
+  不更改gain、手指力矩上限、根部外力、碰撞、solver、物体或live qpos/qvel。
+- 首次学习策略命令到来后，以固定0.2秒cubic权重交还decoder臂目标，同时衰减前馈至零。
+  `previous raw action`从实际施加的body29位置目标反算，保留真实50Hz proprioception及RGB历史。
+  这是平滑参考和有限混合接管，不是对实际关节速度或绝对无碰撞的保证。
+
+`warmup_control.arm_reference`保存首机器人状态身份、固定目标、每帧IK残差与迭代数；
+`warmup_control.arm_controller`保存实际目标、混合权重及200Hz前馈调用次数／峰值／首末时刻。
+前10帧事件中的`decoder_arm14`表示覆盖前的PD／base target；只有decoder实际运行后才是其输出。
+不可达但有限的IK残差应保留为控制器限制，不能事后删除案例或重写native成功标志。
+正式30例入口也接受该显式开关，冻结helper源SHA并验实际参考／控制时钟、首步生效及有限交接收据。
+物理对照与完整学习策略闭环成功率分开验收，见[Mobile评测记录](../../docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md)。
+
 `--body-token-projection fsq_v1_1` 是独立、显式的 consumer 选项，默认 `none` 保留连续输出。
 它仅将 HTTP 已反归一化的 body64 四舍五入到 `1/16` 网格（ties-to-even），并限制到
 固定官方 v1.1 encoder 的32个 level：`[-1, 15/16]`。此范围来自已核 ONNX 的 Round／16，

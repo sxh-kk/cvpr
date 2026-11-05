@@ -118,6 +118,21 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("20261134", command["server"])
         self.assertEqual(simulator[simulator.index("--worker-task") + 1], evaluate.TASK)
 
+    def test_explicit_wrist_preparation_is_frozen_routed_and_not_a_baseline_default(self):
+        original = evaluate.freeze_inputs(self.args)
+        self.assertEqual(original['warmup_arm_profile'], 'legacy')
+        case = original['cases'][0]
+        self.assertNotIn('--warmup-arm-profile', evaluate.commands(self.args, case, self.root/'legacy')['simulator'])
+        self.args.warmup_arm_profile = 'wrist_retreat_v1'
+        frozen = evaluate.freeze_inputs(self.args)
+        self.assertEqual(frozen['warmup_arm_profile'], 'wrist_retreat_v1')
+        self.assertIn('SIMPLE/baselines/warmup_wrist_reference.py', frozen['sources'])
+        simulator = evaluate.commands(self.args, case, self.root/'new')['simulator']
+        self.assertEqual(simulator[simulator.index('--warmup-arm-profile')+1], 'wrist_retreat_v1')
+        self.args.warmup_arm_profile = 'unbound_variant'
+        with self.assertRaisesRegex(ValueError, 'Unknown warmup'):
+            evaluate.freeze_inputs(self.args)
+
     def test_changed_runtime_component_or_unbound_artifact_is_refused(self):
         (self.args.deployment / "motion/joint_motion.ckpt").write_bytes(b"wrong new Motion")
         with self.assertRaisesRegex(ValueError, "Deployment artifact differs"):

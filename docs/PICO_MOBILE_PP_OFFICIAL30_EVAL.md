@@ -194,3 +194,60 @@ CUDA_VISIBLE_DEVICES=0 /home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
 ```
 
 该命令为本版入口，实际启动和完成以新根的进程收据、逐例证据及最终`status=complete`为准。
+
+### RTC版实际30例结果（已完成）
+
+`official30_rtc_001`于2026-11-05 19:50:59–21:32:37（北京时间）实际完成，
+`OFFICIAL30_RTC_PROCESS_001.json`记录源提交`c1efe3b02ad37f42c7fa6b5792a85c4a9c0a0ab5`和退出码0。
+`state.json`与`FINAL_EVALUATION_ACCEPTANCE.json`均为`complete`，30例全部技术有效。
+
+- Level 0：6/10（60%），成功case为0、1、5、6、7、8；原基线3/10。
+- Level 1：5/10（50%），成功case为0、1、5、6、7；原基线4/10。
+- Level 2：4/10（40%），成功case为1、2、3、8；原基线3/10。
+- 合计：15/30（50.0%），原基线10/30（33.3%），本轮观察到提高16.7个百分点。
+- 技术异常0例、未尝试0例、跌倒0例、策略前跌倒0例；15例未成功均完整跑满24秒。
+
+配对结果为：两版都成功8例、失败转成功7例、成功转失败2例、两版都失败13例。
+新增成功为L0/case01、06、07，L1/case00、06，以及L2/case01、08；
+退步为L1/case08和L2/case05。无自动重跑、延时或成功标准改动。
+三等级全部10例均完成独立增量原证据复核，`LEVEL{0,1,2}_PREFIX_10_INDEPENDENT_REVIEW_001.json`
+分别核准6／5／4次成功及技术有效性。
+
+全30例实际记录共1171次`test_time`采样；首段plain与后续RTC路由、15×80响应、
+25tick整窗消费、真实逐tick观察、HTTP不推进仿真钟、参数grad为None，
+以及640×360／50fps视频逐例通过验收。评测自身服务、仿真与监督器均已退出；没有停止其他任务。
+
+新运行根中：
+
+- `official30_rtc_001/FINAL_EVALUATION_ACCEPTANCE.json`：完整30例实际验收，
+  SHA256为`64e45508ff51fa59753efab1952652c2bc350d38e74dfff60bf98f47889f3704`。
+- `OFFICIAL30_RTC_COMPARISON.json`：同模型、同固定初始化的配对汇总，
+  SHA256为`c75bf83d9ab1b9dc075dece7c60057279096174f18d3cc4090752e9fff523d74`。
+- `official30_rtc_paired_cases.csv`：全30例的两版成功标志、时长、视频及原JSON路径。
+- `official30_rtc_001/level{0,1,2}/case_00..09/CASE_SUMMARY.json`：逐例RTC执行与原生结果。
+- `FINAL_RESULT_INDEPENDENT_REVIEW_001.json`：复用三个等级的独立前缀复核并确认证据未变，
+  全30唯一覆盖、两版模型／初始化／seed身份、state／final逐字节一致及实际退出码0均通过；
+  SHA256为`3cf1b5f28eb8b73e59100457941b379361d553c8d203f202548c7d517ae9c151`。
+
+该差异是本轮固定30例的观察值，既包含RTC也包含执行窗口从30帧缩短到15帧的影响，
+不作为纯RTC因果效应、跨seed显著性或新场景泛化证明；原SONIC适配及非确定性内核边界保持。
+
+## 相关工作的Mobile P&P报告值（2026-11-05核对）
+
+这里记录原作者公开值，不将其当成本机统一配置复现。每等级10次的公开表中，
+Ψ₀为7／5／6，即18/30（60.0%）；λ₀为9／7／7，即23/30（76.7%）；
+StarVLA为9／8／8，即25/30（83.3%）。来源为
+[SIMPLE官方当前表](https://github.com/physical-superintelligence-lab/SIMPLE#-simulation-benchmarking-results)和
+[λ₀ v2 Table 2](https://arxiv.org/html/2610.18950v2)。
+λ₀的90.0%是六任务180次的整体值；其Appendix D.2明确采用逐任务最佳记录配置，
+未确立仅由验证集选配置，不能视为统一checkpoint／推理设置下的对照。
+
+ACT还存在来源差异：SIMPLE当前表为6／5／7，λ₀表2引用为5／5／5，分别保留，不合并。
+新运行根的`MOBILE_PP_RELATED_WORK_REPORTED_METRICS.json`、
+`mobile_pp_related_work_reported_metrics.csv`保存12条主表记录及来源，含ACT两条版本。
+
+另有[WholeBodyWAM（WBC-Grounded Coordination）论文](https://arxiv.org/html/2609.16644v1)
+使用不同SONIC后训练与任务微调设置。其Table II的PickBetweenTables百分比和其他五个方法
+保存为独立组`additional_SONIC_paper`及`mobile_pp_related_work_sonic_paper_metrics.csv`，
+只列原百分比与三等级等权均值，不换算成官方30例计数，不将其六任务Overall混作本任务指标。
+公开值的模型、训练数据、控制器与配置选择口径应随引用保留，不能据此声称本机结果是公平排名。

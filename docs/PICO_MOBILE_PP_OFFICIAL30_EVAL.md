@@ -232,6 +232,9 @@ CUDA_VISIBLE_DEVICES=0 /home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
 该差异是本轮固定30例的观察值，既包含RTC也包含执行窗口从30帧缩短到15帧的影响，
 不作为纯RTC因果效应、跨seed显著性或新场景泛化证明；原SONIC适配及非确定性内核边界保持。
 
+6000步RTC版15次未成功的逐例阶段分类、原视频打包，以及后续同配置5000步权重测评，
+见[RTC失败阶段复核与5000步测评](PICO_MOBILE_PP_RTC_FAILURES_AND_5000.md)。
+
 ## 相关工作的Mobile P&P报告值（2026-11-05核对）
 
 这里记录原作者公开值，不将其当成本机统一配置复现。每等级10次的公开表中，

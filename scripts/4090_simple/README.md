@@ -20,6 +20,12 @@ Mobile P&P最新官方99＋历史1条数据训练的停止点，使用独立的
 不能套用旧Mobile100完整10000步的部署合同；参数、技术错误分母、
 本轮实际进度与限制见[官方30例评测](../../docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md)。
 
+2026-11-05已实际取回最新停止点6000步模型，完成源前后／本机SHA核准、
+完整VLM／Action严格CPU加载及同一joint的新Motion导出；`official30_001`已完整结束、进程返回0。
+Level 0／1／2分别为3/10、4/10、3/10原生成功，合计10/30，技术异常和跌倒均为0。
+30份固定初始化均通过逐例HTTP、在线DINO、时钟与视频验收；完整汇总、CSV和证据路径见上述记录。
+结果属于SONIC控制器适配诊断，`formal_evaluation_eligible=false`保持不变。
+
 ## Handover任务微调权重的本机测评
 
 `prepare_task_snapshot.py`专用于从UnifoLM38k初始化的task50联合微调checkpoint。

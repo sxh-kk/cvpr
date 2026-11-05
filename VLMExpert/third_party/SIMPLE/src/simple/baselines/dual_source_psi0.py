@@ -134,11 +134,15 @@ class HistoryWarmingUp(RuntimeError):
 
 class DualSourceHttpActionClient:
     """Local HTTP transport with explicit observe/reset and warming-up handling."""
-    def __init__(self, server_ip="127.0.0.1", server_port=22085, *, timeout_s=120.0, session=None):
+    def __init__(self, server_ip="127.0.0.1", server_port=22085, *, timeout_s=120.0, session=None,
+                 execute_steps=30):
         if server_ip not in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("Independent SIMPLE evaluation requires a localhost model service")
         if not 0 < int(server_port) < 65536 or not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("Invalid localhost port or HTTP timeout")
+        if isinstance(execute_steps, bool) or not isinstance(execute_steps, int) or not 1 <= execute_steps <= 30:
+            raise ValueError("execute_steps must be an integer in [1, 30]")
+        self.execute_steps = execute_steps
         host = "[::1]" if server_ip == "::1" else server_ip
         self.base_url = f"http://{host}:{int(server_port)}"
         self.timeout_s = float(timeout_s)
@@ -170,8 +174,8 @@ class DualSourceHttpActionClient:
         result = ResponseMessage.deserialize(self._post(
             "/act", self._request(image_dict, instruction, state_dict, history)))
         action = np.asarray(result.action)
-        if action.shape != (30, 80) or not np.isfinite(action).all():
-            raise ValueError("Dual-source server must return finite actions with shape (30, 80)")
+        if action.shape != (self.execute_steps, 80) or not np.isfinite(action).all():
+            raise ValueError(f"Dual-source server must return finite actions with shape ({self.execute_steps}, 80)")
         if result.err != 0.0:
             raise RuntimeError(f"Dual-source service reported an error: {result.err}")
         return action
@@ -221,7 +225,9 @@ class DualSourcePsi0Agent:
         if body_token_projection not in ("none", "fsq_v1_1"):
             raise ValueError("Unknown body token projection mode")
         self.body_token_projection = body_token_projection
-        self.client = client or DualSourceHttpActionClient(host, port)
+        self.client = client or DualSourceHttpActionClient(host, port, execute_steps=execute_steps)
+        if getattr(self.client, "execute_steps", execute_steps) != execute_steps:
+            raise ValueError("Client response window must equal the agent's actual execute_steps")
         self.execute_steps = execute_steps
         self.session_id = session_id or f"dual-source-{uuid.uuid4().hex}"
         self.episode_id = None
@@ -285,8 +291,8 @@ class DualSourcePsi0Agent:
                     self.warmup_phase = self.warmup_control.phase
                     return command
                 return self.controller.hold(observation)
-            if chunk.shape != (30, 80) or not np.isfinite(chunk).all():
-                raise ValueError("Expected a finite (30, 80) denormalized policy action chunk")
+            if chunk.shape != (self.execute_steps, 80) or not np.isfinite(chunk).all():
+                raise ValueError(f"Expected a finite ({self.execute_steps}, 80) denormalized policy action window")
             self._chunk, self._chunk_time, idx = chunk.copy(), float(t), 0
             self.warming_up = False
         latent, hands = split_action80(self._chunk[idx])

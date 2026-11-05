@@ -88,6 +88,28 @@ def unchanged(record):
             "Frozen input changed: " + record["path"])
 
 
+def evaluation_policy(args):
+    """Explicit inference change; the checkpoint and physical protocol stay fixed."""
+    mode = getattr(args, "rtc_mode", "off")
+    steps = getattr(args, "execute_steps", None)
+    if steps is None:
+        steps = 15 if mode == "test_time" else 30
+    require(mode in ("off", "test_time"), "Only off or test_time RTC evaluation is supported")
+    require(type(steps) is int and 1 <= steps <= 30 and steps * 50 % 30 == 0,
+            "Execution window must align exactly to both 30Hz actions and 50Hz control ticks")
+    require(mode != "test_time" or steps < 30, "Test-time RTC needs a nonempty previous-plan overlap")
+    return {"rtc_mode": mode, "rtc_enabled": mode == "test_time", "prediction_horizon": 30,
+            "execute_steps": steps, "inference_steps": 10, "action_hz": 30, "control_hz": 50,
+            "control_ticks_per_window": steps * 50 // 30,
+            "rtc_exec_shift": steps if mode == "test_time" else None,
+            "rtc_inference_delay": 0 if mode == "test_time" else None,
+            "rtc_min_exec_horizon": steps if mode == "test_time" else None,
+            "pig_mask_schedule": "exponential" if mode == "test_time" else None,
+            "pig_guidance_alpha": .9 if mode == "test_time" else None,
+            "simulation_paused_during_HTTP": True,
+            "scope": "synchronous previous-plan continuity guidance; not asynchronous latency compensation"}
+
+
 def freeze_inputs(args):
     """CPU preparation gate; no model construction or simulator import."""
     from capture_simple import remap_episode_paths
@@ -111,6 +133,8 @@ def freeze_inputs(args):
     require(model["sha256"] == args.expected_model_sha256, "Actual checkpoint bytes differ from requested SHA")
     source = {name: file_identity(REPO / "scripts/4090_simple" / name) for name in
               ("evaluate_mobile_pp30.py", "serve_evaluation.py", "run_closed_loop.py", "capture_simple.py", "video_capture.py")}
+    for relative in ("deploy/serve_psi0_simple.py", "deploy/dual_source_runtime.py", "models/psi0.py", "models/dual_source_action.py"):
+        source["psi/" + relative] = file_identity(REPO / "VLMExpert/src/psi" / relative)
     for relative in ("tasks/g1_wholebody_locomotion_pick_between_tables_teleop.py", "envs/sonic_loco_manip.py",
                      "envs/base_dual_env.py", "baselines/dual_source_psi0.py", "baselines/sonic_v1_1.py",
                      "baselines/live_pose_sonic_warmup.py"):
@@ -153,7 +177,8 @@ def freeze_inputs(args):
             "official_repository": "USC-PSI-Lab/psi-data", "official_revision": OFFICIAL_REVISION,
             "cases": cases, "boundary": BOUNDARY, "formal_evaluation_eligible": False,
             "maximum_steps_including_warmup": 1200, "maximum_simulated_seconds": 24,
-            "effective_native_success_criteria": .9, "source_archive_success_criteria": .4}
+            "effective_native_success_criteria": .9, "source_archive_success_criteria": .4,
+            "evaluation_policy": evaluation_policy(args)}
 
 
 def environment(args, python):
@@ -174,15 +199,20 @@ def environment(args, python):
 
 
 def commands(args, case, directory):
+    policy = evaluation_policy(args)
+    options = ["--rtc-mode", policy["rtc_mode"], "--execute-steps", str(policy["execute_steps"])]
+    if policy["rtc_enabled"]:
+        options.extend(["--rtc-inference-delay", "0", "--min-exec-horizon", str(policy["execute_steps"]),
+                        "--pig-mask-schedule", "exponential", "--pig-guidance-alpha", "0.9"])
     server = [str(MODEL_PY), str(REPO / "scripts/4090_simple/serve_evaluation.py"),
               "--run-dir", str(args.deployment), "--ckpt-step", str(args.checkpoint_step),
               "--sampling-seed", str(case["sampling_seed"]), "--output", str(directory / "server"),
-              "--port", str(args.port)]
+              "--port", str(args.port), *options]
     simulator = [str(SIM_PY), str(REPO / "scripts/4090_simple/run_closed_loop.py"),
         "--data-root", str(args.data_root), "--sonic-resources", str(args.runtime_root / "resources/sonic_v1_1"),
         "--output", str(directory / "simulation"), "--tasks", TASK, "--episode-start", str(case["case_index"]),
         "--episodes-per-task", "1", "--dr-level", str(case["level"]), "--seed", "0", "--seconds", "24",
-        "--execute-steps", "30", "--expected-checkpoint-step", str(args.checkpoint_step), "--port", str(args.port),
+        *options, "--expected-checkpoint-step", str(args.checkpoint_step), "--port", str(args.port),
         "--mobile-official-protocol", "--sync-observations", "--isaac-observation-only", "--sim-mode", "mujoco_isaac",
         "--diagnostic-unverified-sonic", "--pd-profile", "official_v1_1_ankle_pitch_1_5",
         "--hand-torque-profile", "mjcf_limits", "--warmup-control", "live_pose_sonic_v1_1",
@@ -241,10 +271,17 @@ def stop_owned(process):
     process.wait(timeout=15)
 
 
-def runtime_gate(startup, expected, model_sha, seed, pid):
+def runtime_gate(startup, expected, model_sha, seed, pid, policy=None):
+    policy = policy or evaluation_policy(argparse.Namespace())
     require(startup.get("weight_sha256") == model_sha and startup.get("pid") == pid
-            and startup.get("sampling_seed") == seed and startup.get("Ta") == 30
-            and startup.get("rtc") is False and startup.get("inference_steps") == 10, "Actual server identity differs")
+            and startup.get("sampling_seed") == seed and startup.get("Ta") == policy["execute_steps"]
+            and startup.get("rtc") is policy["rtc_enabled"] and startup.get("inference_steps") == 10, "Actual server identity differs")
+    if policy["rtc_enabled"]:
+        for key in ("rtc_mode", "rtc_exec_shift", "rtc_inference_delay", "rtc_min_exec_horizon", "pig_mask_schedule", "pig_guidance_alpha"):
+            require(startup.get(key) == policy[key], "Actual RTC startup differs: " + key)
+        require(startup.get("Tp") == 30, "RTC must preserve the full30 prediction horizon")
+        require(startup.get("parameter_tensor_count", 0) > 0 and startup.get("trainable_parameter_tensor_count") == 0
+                and startup.get("parameter_gradient_tensor_count") == 0, "RTC policy parameters must stay frozen and gradient-free")
     actual = startup["online_dino_runtime"]
     keys = ("torch_version", "transformers_version", "local_file_sha256", "preprocessing", "image_process",
             "normalization", "inference_dtype", "storage_dtype", "shape", "token_order")
@@ -257,7 +294,8 @@ def runtime_gate(startup, expected, model_sha, seed, pid):
                 "compile_model", "preprocessor", "pillow_version"):
         require(actual["optimization"][key] == expected["optimization"][key], "Actual DINO optimization differs: " + key)
     return {"status": "passed", "actual": actual, "runtime_fields_compared": list(keys),
-            "derived_runtime_weights_sha256": derived, "cross_device_bitwise_equivalence_claimed": False}
+            "derived_runtime_weights_sha256": derived, "evaluation_policy": policy,
+            "cross_device_bitwise_equivalence_claimed": False}
 
 
 def json_lines(path):
@@ -266,6 +304,45 @@ def json_lines(path):
 
 def close_number(actual, expected, message):
     require(math.isfinite(actual) and math.isclose(actual, expected, rel_tol=0, abs_tol=1e-8), message)
+
+
+def validate_rtc_execution(result, ticks, requests, policy):
+    """Prove actual RTC calls and exactly consumed windows, rather than an enabled flag."""
+    info = result["server_info"]
+    require(info.get("rtc_enabled") is True and info.get("rtc_mode") == "test_time"
+            and info.get("action", {}).get("action_exec_horizon") == policy["execute_steps"], "RTC response contract differs")
+    for key in ("rtc_exec_shift", "rtc_inference_delay", "rtc_min_exec_horizon", "pig_mask_schedule", "pig_guidance_alpha"):
+        require(info.get(key) == policy[key], "RTC live server contract differs: " + key)
+    successful = [row for row in requests if row["status"] == 200]
+    for request in requests:
+        counts = request.get("sampler_calls", {})
+        require(set(counts) == {"plain", "test_time", "train"}
+                and all(type(v) is int and v >= 0 for v in counts.values()), "Missing actual RTC sampler audit counts")
+        require(request.get("parameter_gradient_tensor_count") == 0, "RTC accumulated policy parameter gradients")
+    policy_ticks = [tick for tick in ticks if tick["phase"] == "policy_latent"]
+    window = policy["control_ticks_per_window"]
+    require(len(successful) == (len(policy_ticks) + window - 1) // window,
+            "RTC must replan exactly after each fully consumed execution window")
+    for index, request in enumerate(successful):
+        close_number(float(request["sim_time_s"]), policy_ticks[index * window]["sim_time_s"], "RTC request is shifted from the consumed action clock")
+        expected_path = "plain" if index == 0 else "test_time"
+        require(request.get("sampling_path") == expected_path, "RTC flag lacks the actual expected sampler call")
+        require(request.get("response_action_shape") == [policy["execute_steps"], 80], "RTC response is not the exact execution window")
+        calls = request.get("sampler_calls", {})
+        require(calls.get(expected_path) == 1 and sum(calls.values()) == 1, "RTC sampler call count differs")
+    for request in requests:
+        if request["status"] == 425:
+            require(request.get("sampling_path") is None and sum(request.get("sampler_calls", {}).values()) == 0,
+                    "Warmup rejection ran an RTC or plain sampler")
+    for index, tick in enumerate(policy_ticks):
+        group_start = policy_ticks[index // window * window]["sim_time_s"]
+        close_number(tick["chunk_start_sim_time_s"], group_start, "RTC chunk anchoring changed during execution")
+        expected_index = math.floor((tick["sim_time_s"] - group_start) * policy["action_hz"] + 1e-7)
+        require(tick["action_index_at_30hz"] == expected_index and 0 <= expected_index < policy["execute_steps"],
+                "RTC executed a stale, duplicated-window or out-of-window action")
+    return {"status": "passed", "plain_requests": min(1, len(successful)),
+            "test_time_requests": max(0, len(successful) - 1), "execution_window": policy["execute_steps"],
+            "control_ticks_per_window": window, "all_requests_and_action_indices_aligned": True}
 
 
 def validate_case(directory, case, frozen):
@@ -341,6 +418,8 @@ def validate_case(directory, case, frozen):
         close_number(float(client["history"]["sim_time_s"]), float(server["sim_time_s"]), "Client/server timestamp differs")
     observed = [row["history"]["sim_time_s"] for row in http if row["endpoint"] == "/observe"]
     require(observed == [row["sim_time_s"] for row in ticks], "History is not sourced from each current observation")
+    policy = frozen.get("evaluation_policy", evaluation_policy(argparse.Namespace()))
+    rtc_execution = (validate_rtc_execution(result, ticks, requests, policy) if policy["rtc_enabled"] else None)
     video = Path(episode["video"]["path"]).resolve(strict=True)
     require(video == (episode_dir / "rollout.mp4").resolve() and episode["video"]["ffmpeg_returncode"] == 0, "Wrong/incomplete case video")
     probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-threads", "1", "-select_streams", "v:0",
@@ -355,7 +434,7 @@ def validate_case(directory, case, frozen):
             "ticks": len(ticks), "warmup_ticks": episode["warmup_frames"], "policy_ticks": episode["policy_frames"],
             "simulated_seconds": episode["simulated_seconds"], "video_probe": probe[0], "video": str(video),
             "evidence": [file_identity(path) for path in paths], "formal_evaluation_eligible": False,
-            "model_sha256": frozen["model"]["sha256"]}
+            "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution}
 
 
 def preflight(args):
@@ -405,7 +484,7 @@ def execute(args, case, frozen, state):
                     raise TimeoutError("Model server startup exceeded480s")
                 time.sleep(1)
             acceptance = runtime_gate(read(directory / "server/startup.json"), read(args.training_manifest)["encoder"],
-                args.expected_model_sha256, case["sampling_seed"], server.pid)
+                args.expected_model_sha256, case["sampling_seed"], server.pid, evaluation_policy(args))
             acceptance["training_manifest_sha256"] = frozen["training_manifest"]["sha256"]
             write(directory / "ONLINE_DINO_RUNTIME_ACCEPTANCE.json", acceptance)
             row["status"] = "simulating"
@@ -461,9 +540,12 @@ def main(argv=None):
     parser.add_argument("--checkpoint-step", type=int, default=6000)
     parser.add_argument("--port", type=int, default=21075)
     parser.add_argument("--sampling-seed", type=int, default=20261105)
+    parser.add_argument("--rtc-mode", choices=("off", "test_time"), default="off")
+    parser.add_argument("--execute-steps", type=int, help="Default30 with RTC off,15 with test_time; must align to50Hz ticks")
     args = parser.parse_args(argv)
     require(len(args.expected_model_sha256) == 64 and all(char in "0123456789abcdef" for char in args.expected_model_sha256), "Expected SHA must be lowercase SHA256")
     require(args.checkpoint_step > 0 and 1024 <= args.port <= 65535 and 0 <= args.sampling_seed <= 2**32 - 30, "Invalid step/port/seed")
+    policy = evaluation_policy(args)
     for name in ("deployment", "data_root", "training_manifest", "runtime_root"):
         setattr(args, name, getattr(args, name).resolve(strict=True))
     require(args.output.is_absolute() and not args.output.exists(), "Campaign must be a fresh absolute directory")
@@ -476,7 +558,7 @@ def main(argv=None):
     state = {"contract": CONTRACT, "status": "running", "created_utc": now(), "planned_cases": 30,
              "checkpoint_step": args.checkpoint_step, "model_sha256": args.expected_model_sha256,
              "cases": [], "formal_evaluation_eligible": False, "boundary": BOUNDARY,
-             "technical_errors_are_task_failures": False, "automatic_retries": 0}
+             "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": policy}
     write(args.output / "state.json", state)
     try:
         for case in frozen["cases"]:

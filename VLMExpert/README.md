@@ -1074,9 +1074,12 @@ NumPy base64 图像编码；`history` 必须含稳定的 `session_id`、每次 e
 `episode_id` 和真实 `sim_time_s`。观察可使用空 state，动作请求须带已按训练顺序映射的
 43维 state（服务补到45维），或带末两维为零的45维 state。`/act` 的成功响应仍为
 `ResponseMessage.serialize()`，只返回配置的执行窗口，内部完整预测保持 `30×80`。
-当前 `DualSourcePsi0Agent` 接收完整 `30×80` chunk，首轮使用上述30行窗口、
-`execute_steps=30` 与 RTC off。服务允许较短执行窗口，但客户端须相应适配响应行数，
-且实际执行步数必须与服务的 `action_exec_horizon` 一致后才能使用 RTC。
+`DualSourcePsi0Agent` 默认接收 `30×80`，使用上述30行窗口、`execute_steps=30` 与 RTC off；
+也支持明确声明的 `(execute_steps,80)` 响应，客户端与服务实际执行窗必须一致。
+Mobile官方30例的test-time RTC入口使用15行／0.5秒窗口（50Hz下恰好25tick），
+`rtc_mode=test_time`、d0／s15／exponential／alpha0.9，不要求模型训练时启用RTC。
+该路径保持同步HTTP暂停仿真钟，仅检验计划衔接，不能宣称异步延迟补偿；
+与旧30行RTC off对比同时包含更短重规划窗口的变化。详见[实际评测记录](../docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md)。
 
 客户端从 episode 开始，且在动作执行队列期间，持续将真实相机帧发送到 `/observe`；
 `/act` 同时提交当前帧并按 `t−1.0,t−0.8,…,t` 选取6个不同的因果观察。

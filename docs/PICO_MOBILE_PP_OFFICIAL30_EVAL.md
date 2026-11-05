@@ -145,3 +145,52 @@ MuJoCo负责物理，Isaac RTX只同步呈现同一状态，HTTP等待不推进�
 这次使用官方初始化、时间和成功语义，但不是原官方控制器的认证benchmark；
 Level 0仍为训练同一场景，不能将全部30例概括为独立新场景泛化。
 Grasp采集器及其它任务不停止、不重启；实际启动前核对本机GPU计算任务。
+
+## 同一6000步模型的test-time RTC版本
+
+用户另行授权开启test-time RTC。复用上述已经严格加载、源／本机SHA核准的新6000步部署，
+不重训、不重导Motion、不改数据、统计或官方初始化。新运行根为
+`/home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_eval30_testtimertc_20261105`，
+与原`official30_001`分开保存；首次请求及基线验收SHA见新根的`EVALUATION_REQUEST.json`。
+
+该模型训练配置为`model.rtc=false`，只使用现有推理期`rtc_mode=test_time`，不冒充训练期RTC。
+完整预测仍为30×80，每次实际执行前15帧（0.5秒，恰好25个50Hz控制tick）后重新规划；
+服务保留归一化完整预测，左移15行、补零15行，客户端只接收反归一化后的15×80。
+固定`d=0`、`s=15`、`mask_schedule=exponential`、`guidance_alpha=0.9`及10步采样。
+软mask前15行非零、后15行严格为零，不约束补零尾部；现有VJP覆盖全部80维，
+包括最终不执行的末2个padding通道，本轮不另改采样算法。
+
+仍采用同步HTTP等待时暂停仿真时钟的协议，RTC用于相邻计划的连续性guidance，
+不宣称异步实时延迟补偿。相较原RTC off／执行30帧，本版同时更改了执行窗口，
+分数差不能独立归因于RTC。物理、控制器、因果历史、1秒预热、24秒总预算与原生0.9标准均保持。
+
+生产启动收据绑定实际RTC参数；逐请求记录实际plain／test_time模型方法调用和响应shape。
+验收除原30例门外，还核对首次plain、后续test_time、425不采样、每25tick整窗消费、
+请求间隔0.5秒以及动作索引和chunk起点，拒绝只开flag或客户端仍执行旧30帧的情况。
+运行前需完成新增CPU回归和batch1、单张4090、连续两次真实采样的GPU健康检查；
+GPU健康检查使用旧视频RGB回放和零state，只核对数值、VJP和冻结参数，不是物理评测或成功率证据。
+
+新增关键路径CPU回归已通过52项（运行时33项、campaign19项），实际命令和范围分别保存于
+`RTC_RUNTIME_CPU_REGRESSION_001.json`、`CPU_CAMPAIGN_REGRESSION_002.json`及关联日志。
+单卡4090、batch1的两次真实GPU采样已返回0，`gpu_health_001/GPU_RTC_ACCEPTANCE.json`
+记录首plain／次test_time、10次实际VJP调用及后9步非零修正依据，两份15×80输出均有限。
+1941个参数张量全部冻结，前后参数grad均为None；GPU峰值allocated为9,593,193,984字节。
+首次外部launcher缺少`data_root`参数，在模型／GPU启动前失败，原因和原日志已另存，
+修正launcher后才执行上述GPU检查，不将该准备失败混入30例任务分母。
+检查日志含attention backward非确定性内核提示；固定seed不代表RTC跨次逐bit一致，
+本轮保留现有attention实现，不擅自切换内核。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
+  scripts/4090_simple/evaluate_mobile_pp30.py \
+  --deployment /home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_eval30_20261105/deployment \
+  --data-root /home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_eval30_20261105/data_root \
+  --training-manifest /home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_eval30_20261105/source/release_metadata/dino/manifest.json \
+  --output /home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_eval30_testtimertc_20261105/official30_rtc_001 \
+  --runtime-root /home/zxc/CVPR_Evaluation_runtime \
+  --expected-model-sha256 ffe51673a13da83be6b3596a7ebee9a730f47cd61c9e69bc97e3c267d4d6f4a2 \
+  --checkpoint-step 6000 --port 21076 --sampling-seed 20261105 \
+  --rtc-mode test_time --execute-steps 15
+```
+
+该命令为本版入口，实际启动和完成以新根的进程收据、逐例证据及最终`status=complete`为准。

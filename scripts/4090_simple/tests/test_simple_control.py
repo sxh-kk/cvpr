@@ -50,8 +50,9 @@ class FakeController:
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, execute_steps=30):
         self.resets, self.observed, self.queries = [], [], []
+        self.execute_steps = execute_steps
 
     def reset(self, session_id, episode_id):
         self.resets.append((session_id, episode_id))
@@ -63,7 +64,7 @@ class FakeClient:
         self.queries.append((images, instruction, state, history))
         if history["sim_time_s"] < 1.0:
             raise HistoryWarmingUp({"status": "warming_up"})
-        return np.repeat(np.arange(30, dtype=np.float32)[:, None], 80, axis=1)
+        return np.repeat(np.arange(self.execute_steps, dtype=np.float32)[:, None], 80, axis=1)
 
 
 def observation(t):
@@ -166,6 +167,42 @@ class SimpleControlContracts(unittest.TestCase):
         self.assertEqual(client.query_action({}, "pick", {}, history=hist).shape, (30, 80))
         with self.assertRaises(ValueError):
             DualSourceHttpActionClient("115.191.40.142")
+
+    def test_short_rtc_window_replans_at_25_real_ticks_and_never_replays_old_rows(self):
+        client, controller = FakeClient(15), FakeController()
+        agent = DualSourcePsi0Agent(None, client=client, controller=controller, execute_steps=15)
+        agent.reset(episode_id="short")
+        for tick in range(101):
+            agent.get_action(observation(tick*.02))
+        self.assertEqual([query[-1]["sim_time_s"] for query in client.queries[-3:]], [1.,1.5,2.])
+        self.assertEqual(len(client.observed),101)
+        np.testing.assert_array_equal([call[0][0] for call in controller.calls],
+            [int(np.floor((tick % 25)*.02*30+1e-7)) for tick in range(51)])
+        agent.reset(episode_id="fresh")
+        self.assertIsNone(agent._chunk)
+        self.assertIsNone(agent._chunk_time)
+        self.assertEqual(agent.get_action(observation(0)).type,"unit_hold")
+
+    def test_short_window_requires_matching_client_and_response_shape(self):
+        with self.assertRaisesRegex(ValueError,"Client response window"):
+            DualSourcePsi0Agent(None, client=FakeClient(), controller=FakeController(),execute_steps=15)
+        class Session:
+            def post(self,url,*,json,timeout):
+                response=requests.Response();response.status_code=200
+                response._content=__import__("json").dumps(ResponseMessage(np.zeros((30,80)),0).serialize()).encode()
+                return response
+        client=DualSourceHttpActionClient(session=Session(),execute_steps=15)
+        with self.assertRaisesRegex(ValueError,r"\(15, 80\)"):
+            client.query_action({},"",{},history={})
+        class ShortSession:
+            def post(self,url,*,json,timeout):
+                response=requests.Response();response.status_code=200
+                response._content=__import__("json").dumps(ResponseMessage(np.zeros((15,80)),0).serialize()).encode()
+                return response
+        short=DualSourceHttpActionClient(session=ShortSession(),execute_steps=15)
+        self.assertEqual(short.query_action({},"",{},history={}).shape,(15,80))
+        for value in (0,31,True,1.5):
+            with self.assertRaises(ValueError):DualSourceHttpActionClient(execute_steps=value)
 
     def test_decoder_proprioception_layout_is_term_major_and_real_50hz(self):
         history = [(i * .02, np.full(3, i), np.full(29, i + 10), np.full(29, i + 20),

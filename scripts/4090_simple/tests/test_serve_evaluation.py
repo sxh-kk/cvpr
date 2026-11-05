@@ -31,14 +31,26 @@ class Stub:
         np.random.rand(draws)
         torch.rand(draws)
         self.noises = []
-    def predict_action(self, payload, request):
+        self.Ta, self.Tp, self.enable_rtc, self.rtc_mode, self.num_inference_steps = 30, 30, False, "off", 10
+        self.exec_shift, self.rtc_inference_delay, self.min_exec_horizon = 15, 0, 15
+        self.pig_mask_schedule, self.pig_guidance_alpha = "exponential", .9
+        self.model = SimpleNamespace(parameters=lambda: (), predict_action=self.draw,
+                                     predict_action_with_rtc_flow=self.draw)
+        self.has_previous = False
+    def draw(self):
         self.noises.append((random.random(), float(np.random.rand()), torch.rand(3).tolist()))
+        return np.zeros((self.Ta, 80), dtype=np.float32)
+    def predict_action(self, payload, request):
         if payload.get("fail"):
             raise HTTPException(425, "warming_up")
-        return JSONResponse({"ok": True})
+        method = self.model.predict_action_with_rtc_flow if self.enable_rtc and self.has_previous else self.model.predict_action
+        action = method()
+        self.has_previous = True
+        return JSONResponse({"action": action.tolist(), "err": 0.})
     def observe(self, payload):
         return JSONResponse({"observed": True})
     def reset(self, payload):
+        self.has_previous = False
         return JSONResponse({"reset": True})
 
 
@@ -102,8 +114,41 @@ class AuditContracts(unittest.TestCase):
             rows = [json.loads(line) for line in (Path(root) / "requests.jsonl").read_text().splitlines()]
             self.assertEqual([row["ordinal"] for row in rows], [1, 2])
             self.assertEqual([row["status"] for row in rows], [425, 409])
-            self.assertNotEqual(rows[0]["rng_before"], rows[0]["rng_after"])
+            self.assertEqual(rows[0]["rng_before"], rows[0]["rng_after"])
             self.assertEqual(rows[1]["rng_before"], rows[1]["rng_after"])
+
+    def test_actual_test_time_sampler_and_window_are_recorded(self):
+        def factory():
+            stub = Stub(1)
+            stub.Ta, stub.enable_rtc, stub.rtc_mode = 15, True, "test_time"
+            return stub
+        with tempfile.TemporaryDirectory() as root:
+            server = module.audited_server(factory, 7, seed, Path(root), "source")
+            startup = json.loads((Path(root) / "startup.json").read_text())
+            self.assertEqual({name: startup[name] for name in ("Ta", "Tp", "rtc", "rtc_mode",
+                "rtc_exec_shift", "rtc_inference_delay", "rtc_min_exec_horizon", "pig_mask_schedule", "pig_guidance_alpha")},
+                dict(Ta=15, Tp=30, rtc=True, rtc_mode="test_time", rtc_exec_shift=15,
+                     rtc_inference_delay=0, rtc_min_exec_horizon=15, pig_mask_schedule="exponential", pig_guidance_alpha=.9))
+            identity = {"session_id": "s", "episode_id": "a", "sim_time_s": 1.}
+            with self.assertRaises(HTTPException):
+                server.predict_action({"history": identity, "fail": True}, None)
+            server.predict_action({"history": identity}, None)
+            server.predict_action({"history": {**identity, "sim_time_s": 1.5}}, None)
+            rows = [json.loads(line) for line in (Path(root) / "requests.jsonl").read_text().splitlines()]
+            self.assertEqual([row["sampling_path"] for row in rows], [None, "plain", "test_time"])
+            self.assertEqual([row["sampler_calls"] for row in rows], [dict(plain=0,test_time=0,train=0),
+                dict(plain=1,test_time=0,train=0),dict(plain=0,test_time=1,train=0)])
+            self.assertEqual([row["response_action_shape"] for row in rows[1:]], [[15,80],[15,80]])
+            self.assertTrue(all(row["parameter_gradient_tensor_count"] == 0 for row in rows))
+
+    def test_rtc_cli_rejects_full_chunk_misaligned_or_delayed_synchronous_windows(self):
+        args = SimpleNamespace(execute_steps=15, rtc_mode="test_time", rtc_inference_delay=0,
+            min_exec_horizon=15, pig_guidance_alpha=.9)
+        module.validate_runtime_options(args)
+        for changes in (dict(execute_steps=30),dict(execute_steps=10),dict(rtc_inference_delay=1),
+                        dict(min_exec_horizon=14),dict(pig_guidance_alpha=float("nan"))):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                module.validate_runtime_options(SimpleNamespace(**(vars(args)|changes)))
 
 
 if __name__ == "__main__":

@@ -181,6 +181,44 @@ def worker_result_errors(result, expected_episodes: int):
     return errors
 
 
+def requested_rtc_contract(args):
+    """Declare synchronous plan stitching; never invent an asynchronous delay."""
+    enabled = args.rtc_mode == "test_time"
+    if not math.isfinite(args.pig_guidance_alpha) or not 0 <= args.pig_guidance_alpha <= 1:
+        raise ValueError("RTC guidance alpha must be finite and in [0,1]")
+    horizon = args.execute_steps if args.min_exec_horizon is None else args.min_exec_horizon
+    if enabled:
+        if args.execute_steps >= 30 or args.execute_steps * 50 % 30:
+            raise ValueError("Test-time RTC requires a shorter execution window exactly aligned to 50Hz ticks")
+        if not args.execute_steps <= horizon <= 30 or not 0 <= args.rtc_inference_delay <= 30-horizon:
+            raise ValueError("RTC requires execute-steps <= min-exec-horizon and d+s <=30")
+        if args.rtc_inference_delay != 0:
+            raise ValueError("Synchronous paused-clock RTC requires zero inference delay")
+    return {"rtc_enabled": enabled, "rtc_mode": args.rtc_mode,
+            "rtc_exec_shift": args.execute_steps if enabled else None,
+            "rtc_inference_delay": args.rtc_inference_delay if enabled else None,
+            "rtc_min_exec_horizon": horizon if enabled else None,
+            "pig_mask_schedule": args.pig_mask_schedule if enabled else None,
+            "pig_guidance_alpha": args.pig_guidance_alpha if enabled else None,
+            "num_inference_steps": 10}
+
+
+def validate_server_info(server_info, args):
+    expected = requested_rtc_contract(args)
+    action = server_info.get("action", {})
+    if (server_info.get("ckpt_step") != args.expected_checkpoint_step or
+            action.get("action_dim") != 80 or action.get("action_chunk_size") != 30 or
+            action.get("action_exec_horizon") != args.execute_steps or
+            server_info.get("online_history", {}).get("frames") != 6):
+        raise ValueError("Evaluation requires the requested checkpoint, six-frame history and matching action window")
+    actual = {name: server_info.get(name) for name in expected}
+    if actual != expected:
+        raise ValueError(f"Actual service RTC configuration differs: expected={expected}, actual={actual}")
+    return {"status": "passed", "requested": expected, "actual": actual,
+            "action_exec_horizon": args.execute_steps, "action_chunk_size": 30,
+            "synchronization": "synchronous HTTP pauses simulation; no asynchronous latency compensation claim"}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
@@ -216,6 +254,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--execute-steps", type=int, default=30)
+    parser.add_argument("--rtc-mode", choices=("off", "test_time"), default="off")
+    parser.add_argument("--rtc-inference-delay", type=int, default=0)
+    parser.add_argument("--min-exec-horizon", type=int)
+    parser.add_argument("--pig-mask-schedule", choices=("exponential", "linear", "hard"), default="exponential")
+    parser.add_argument("--pig-guidance-alpha", type=float, default=.9)
     parser.add_argument("--http-timeout", type=float, default=120.0)
     parser.add_argument("--worker-wall-timeout", type=float, default=900.0)
     parser.add_argument("--fall-height", type=float, default=.35)
@@ -283,6 +326,10 @@ def parse_args():
             parser.error(f"--{name.replace('_', '-')} must be finite and positive")
     if args.seconds < 1.2 or args.episodes_per_task < 1 or args.episode_start < 0 or not 1 <= args.execute_steps <= 30:
         parser.error("Need >=1.2 simulated seconds, positive episode count and execute-steps in [1,30]")
+    try:
+        requested_rtc_contract(args)
+    except ValueError as error:
+        parser.error(str(error))
     return args
 
 
@@ -356,7 +403,8 @@ def run_worker(args):
             sync_mujoco_observations=args.sync_observations, hand_torque_profile=args.hand_torque_profile)
         result["controller_identity"] = controller.identity
         result["formal_evaluation_eligible"] = False
-        client = MeasuredClient(server_ip="127.0.0.1", server_port=args.port, timeout_s=args.http_timeout)
+        client = MeasuredClient(server_ip="127.0.0.1", server_port=args.port, timeout_s=args.http_timeout,
+                                execute_steps=args.execute_steps)
         health = client.session.get(client.base_url + "/health", timeout=5)
         health.raise_for_status()
         result["server_health"] = health.json()
@@ -364,15 +412,7 @@ def run_worker(args):
         server_info.raise_for_status()
         server_info = server_info.json()
         result["server_info"] = server_info
-        action_contract = server_info.get("action", {})
-        if (server_info.get("ckpt_step") != args.expected_checkpoint_step or
-                action_contract.get("action_dim") != 80 or
-                action_contract.get("action_chunk_size") != 30 or
-                action_contract.get("action_exec_horizon") != 30 or
-                server_info.get("online_history", {}).get("frames") != 6):
-            raise ValueError("Smoke requires the requested checkpoint step, 6-frame history and 30x80 response")
-        if server_info.get("rtc_enabled") is not False:
-            raise ValueError("Bounded synchronous smoke requires RTC disabled; restart the service with RTC off")
+        result["rtc_contract"] = validate_server_info(server_info, args)
         result["initial_metadata_get_requests"] = 2
         metadata = args.data_root / "eval" / args.worker_task / f"dr-level-{args.dr_level}" / "meta/episodes.jsonl"
         mobile_initializer = None

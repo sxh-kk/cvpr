@@ -26,6 +26,12 @@ Level 0／1／2分别为3/10、4/10、3/10原生成功，合计10/30，技术异
 30份固定初始化均通过逐例HTTP、在线DINO、时钟与视频验收；完整汇总、CSV和证据路径见上述记录。
 结果属于SONIC控制器适配诊断，`formal_evaluation_eligible=false`保持不变。
 
+同一6000步权重的test-time RTC版本通过`evaluate_mobile_pp30.py --rtc-mode test_time --execute-steps 15`
+显式启用，完整预测30帧，每0.5秒重规划，d0／s15／exponential／alpha0.9。
+RTC off默认仍执行30帧。服务与客户端执行窗、实际RTC调用及25tick窗口均须通过验收；
+使用独立新输出目录，保留同步暂停仿真钟和官方物理／成功标准。
+该对比同时包含更短执行窗口的变化，详见上述评测文档。
+
 ## Handover任务微调权重的本机测评
 
 `prepare_task_snapshot.py`专用于从UnifoLM38k初始化的task50联合微调checkpoint。

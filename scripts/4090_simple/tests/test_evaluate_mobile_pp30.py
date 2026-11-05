@@ -140,6 +140,82 @@ class CampaignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "server identity"):
             evaluate.runtime_gate(startup, expected, self.args.expected_model_sha256, 44, 999)
 
+    def test_rtc_protocol_has_real_overlap_and_exact_control_clock(self):
+        self.args.rtc_mode = "test_time"
+        policy = evaluate.evaluation_policy(self.args)
+        self.assertEqual((policy["execute_steps"], policy["control_ticks_per_window"]), (15, 25))
+        self.assertEqual((policy["rtc_inference_delay"], policy["rtc_min_exec_horizon"]), (0, 15))
+        frozen = evaluate.freeze_inputs(self.args)
+        self.assertEqual(frozen["evaluation_policy"], policy)
+        for command in evaluate.commands(self.args, frozen["cases"][0], self.root / "case").values():
+            self.assertEqual(command[command.index("--rtc-mode") + 1], "test_time")
+            self.assertEqual(command[command.index("--execute-steps") + 1], "15")
+        for steps in (0, 10, 30):
+            self.args.execute_steps = steps
+            with self.assertRaises(ValueError):
+                evaluate.evaluation_policy(self.args)
+
+    def test_rtc_startup_must_match_actual_guidance_and_horizon(self):
+        self.args.rtc_mode = "test_time"
+        policy = evaluate.evaluation_policy(self.args)
+        startup = {"weight_sha256": self.args.expected_model_sha256, "pid": 123, "sampling_seed": 44,
+                   "Ta": 15, "Tp": 30, "rtc": True, "inference_steps": 10, "online_dino_runtime": encoder(),
+                   "parameter_tensor_count": 12, "trainable_parameter_tensor_count": 0, "parameter_gradient_tensor_count": 0}
+        startup.update({k: policy[k] for k in ("rtc_mode", "rtc_exec_shift", "rtc_inference_delay",
+                       "rtc_min_exec_horizon", "pig_mask_schedule", "pig_guidance_alpha")})
+        evaluate.runtime_gate(startup, encoder(), self.args.expected_model_sha256, 44, 123, policy)
+        for key, value in (("rtc_mode", "train"), ("rtc_exec_shift", 10), ("rtc_inference_delay", 15),
+                           ("pig_guidance_alpha", 0.), ("Tp", 15), ("rtc", False), ("parameter_gradient_tensor_count", 1)):
+            changed = dict(startup, **{key: value})
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                evaluate.runtime_gate(changed, encoder(), self.args.expected_model_sha256, 44, 123, policy)
+
+    def rtc_ledger(self):
+        policy = evaluate.evaluation_policy(SimpleNamespace(rtc_mode="test_time"))
+        info = {"rtc_enabled": True, "rtc_mode": "test_time", "action": {"action_exec_horizon": 15}}
+        info.update({k: policy[k] for k in ("rtc_exec_shift", "rtc_inference_delay", "rtc_min_exec_horizon",
+                                         "pig_mask_schedule", "pig_guidance_alpha")})
+        ticks, requests = [], [{"status": 425, "sampling_path": None, "sampler_calls": {"plain": 0, "test_time": 0, "train": 0},
+                               "parameter_gradient_tensor_count": 0}]
+        for i in range(51):
+            t = 1.005 + i * .02
+            start = 1.005 + (i // 25) * .5
+            ticks.append({"phase": "policy_latent", "sim_time_s": t, "chunk_start_sim_time_s": start,
+                          "action_index_at_30hz": int((t - start) * 30 + 1e-7)})
+            if i % 25 == 0:
+                path = "plain" if i == 0 else "test_time"
+                requests.append({"status": 200, "sim_time_s": str(t), "sampling_path": path,
+                    "sampler_calls": {"plain": int(i == 0), "test_time": int(i != 0), "train": 0},
+                    "response_action_shape": [15, 80], "parameter_gradient_tensor_count": 0})
+        return {"server_info": info}, ticks, requests, policy
+
+    def test_rtc_acceptance_proves_real_calls_response_rows_and_consumed_windows(self):
+        result, ticks, requests, policy = self.rtc_ledger()
+        accepted = evaluate.validate_rtc_execution(result, ticks, requests, policy)
+        self.assertEqual((accepted["plain_requests"], accepted["test_time_requests"]), (1, 2))
+        mutations = [lambda r, t, q: q[2].update(sampling_path="plain"),
+                     lambda r, t, q: q[2].update(response_action_shape=[30, 80]),
+                     lambda r, t, q: q[2].update(sim_time_s="1.345"),
+                     lambda r, t, q: q[2].update(sampler_calls={"plain": 1, "test_time": 1}),
+                     lambda r, t, q: q[0].update(sampling_path="test_time", sampler_calls={"test_time": 1}),
+                     lambda r, t, q: t[25].update(action_index_at_30hz=15),
+                     lambda r, t, q: t[26].update(chunk_start_sim_time_s=1.005),
+                     lambda r, t, q: q[2].update(parameter_gradient_tensor_count=1),
+                     lambda r, t, q: q[0].pop("sampler_calls"),
+                     lambda r, t, q: q.pop()]
+        for mutate in mutations:
+            r, t, q = deepcopy((result, ticks, requests))
+            mutate(r, t, q)
+            with self.assertRaises(ValueError):
+                evaluate.validate_rtc_execution(r, t, q, policy)
+
+    def test_rtc_audit_preserves_native_success_during_warmup_or_first_window(self):
+        result, ticks, requests, policy = self.rtc_ledger()
+        warmup = evaluate.validate_rtc_execution(result, [], requests[:1], policy)
+        self.assertEqual((warmup["plain_requests"], warmup["test_time_requests"]), (0, 0))
+        first_window = evaluate.validate_rtc_execution(result, ticks[:1], requests[:2], policy)
+        self.assertEqual((first_window["plain_requests"], first_window["test_time_requests"]), (1, 0))
+
     def test_frozen_model_and_source_change_is_not_silently_accepted(self):
         frozen = evaluate.freeze_inputs(self.args)
         path = Path(frozen["model"]["path"])

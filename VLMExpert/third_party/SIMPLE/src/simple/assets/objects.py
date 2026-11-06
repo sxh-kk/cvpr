@@ -6,6 +6,7 @@ Licensed under the terms in LICENSE file.
 """
 
 from .asset_manager import AssetManager
+from .collision_meshes import _collision_meshes_mujoco
 from simple.core.asset import Asset
 import os
 
@@ -90,9 +91,7 @@ class ObjectsAssetManager(AssetManager):
             f'{self.src_dir}/models/{asset_id_int:03d}/coacd_0.05/',
             auto_download=True,
         )
-        collision_meshes_mujoco= []
-        for dir, dirs, files in os.walk(collision_mesh_new_dir):
-            collision_meshes_mujoco = [dir + "/" + file for file in files if file.startswith('convex_piece')]
+        collision_meshes_mujoco = _collision_meshes_mujoco(collision_mesh_new_dir)
     
         stable_poses = np.array([[ 4.99879344e-01, -3.56605453e-05,  0.012,
          0.7071, 0.7071, 0, 0]])
@@ -146,8 +145,7 @@ class ObjectsAssetManager(AssetManager):
                 f'{self.src_dir}/models/{model_id:03d}/coacd_0.05/',
                 auto_download=True,
             )
-            for dir, dirs, files in os.walk(collision_mesh_new_dir):
-                collision_meshes_mujoco = [dir + "/" + file for file in files if file.startswith('convex_piece')]
+            collision_meshes_mujoco = _collision_meshes_mujoco(collision_mesh_new_dir)
 
             assets_info[model_id] = {
                 'name': Objects_Names[model_id].replace(' ', '_').replace('-', '_'),

@@ -297,6 +297,10 @@ Mobile P&P 可另选 `--warmup-arm-profile wrist_retreat_v1`，默认仍是 `leg
 正式30例入口也接受该显式开关，冻结helper源SHA并验实际参考／控制时钟、首步生效及有限交接收据。
 物理对照与完整学习策略闭环成功率分开验收，见[Mobile评测记录](../../docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md)。
 
+物体碰撞mesh枚举按原`os.walk`顺序累计所有`convex_piece*`，纹理子目录不能清空先前发现的mesh。
+若一个资源没有任何碰撞piece，加载器在场景编译前明确报错；不以虚设质量或简化碰撞替代缺失资源。
+官方30例运行冻结Objects／GraspNet加载器、共享枚举helper和MuJoCo构建器源码身份。
+
 `--body-token-projection fsq_v1_1` 是独立、显式的 consumer 选项，默认 `none` 保留连续输出。
 它仅将 HTTP 已反归一化的 body64 四舍五入到 `1/16` 网格（ties-to-even），并限制到
 固定官方 v1.1 encoder 的32个 level：`[-1, 15/16]`。此范围来自已核 ONNX 的 Round／16，

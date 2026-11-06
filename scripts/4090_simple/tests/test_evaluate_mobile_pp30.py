@@ -77,6 +77,8 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("/home/official/SIMPLE/data", frozen["cases"][0]["source_row"]["environment_config"])
         self.assertEqual(frozen["cases"][0]["local_environment_config"]["asset"], str(self.args.data_root / "asset.usd"))
         self.assertFalse(frozen["formal_evaluation_eligible"])
+        for name in ("engines/mujoco.py", "assets/objects.py", "assets/graspnet.py", "assets/collision_meshes.py"):
+            self.assertIn("SIMPLE/" + name, frozen["sources"])
 
     def test_refuse_pending_ready_wrong_step_model_or_manifest(self):
         for field, value in (("status", "pending"), ("contract", "old-complete10000"), ("task_step", 10000),

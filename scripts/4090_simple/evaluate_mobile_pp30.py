@@ -136,6 +136,7 @@ def freeze_inputs(args):
     for relative in ("deploy/serve_psi0_simple.py", "deploy/dual_source_runtime.py", "models/psi0.py", "models/dual_source_action.py"):
         source["psi/" + relative] = file_identity(REPO / "VLMExpert/src/psi" / relative)
     for relative in ("tasks/g1_wholebody_locomotion_pick_between_tables_teleop.py", "envs/sonic_loco_manip.py",
+                     "engines/mujoco.py", "assets/objects.py", "assets/graspnet.py", "assets/collision_meshes.py",
                      "envs/base_dual_env.py", "baselines/dual_source_psi0.py", "baselines/sonic_v1_1.py",
                      "baselines/live_pose_sonic_warmup.py", "baselines/warmup_wrist_reference.py"):
         source["SIMPLE/" + relative] = file_identity(REPO / "VLMExpert/third_party/SIMPLE/src/simple" / relative)

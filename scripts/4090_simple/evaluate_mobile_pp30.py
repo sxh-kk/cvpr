@@ -98,16 +98,26 @@ def evaluation_policy(args):
     require(type(steps) is int and 1 <= steps <= 30 and steps * 50 % 30 == 0,
             "Execution window must align exactly to both 30Hz actions and 50Hz control ticks")
     require(mode != "test_time" or steps < 30, "Test-time RTC needs a nonempty previous-plan overlap")
+    minimum = getattr(args, "rtc_min_exec_horizon", None)
+    require(mode == "test_time" or minimum is None, "RTC minimum horizon requires test_time mode")
+    horizon = steps if minimum is None else minimum
+    require(mode != "test_time" or type(horizon) is int and steps <= horizon <= 30,
+            "RTC minimum horizon must satisfy execute_steps <= s <=30")
     return {"rtc_mode": mode, "rtc_enabled": mode == "test_time", "prediction_horizon": 30,
             "execute_steps": steps, "inference_steps": 10, "action_hz": 30, "control_hz": 50,
             "control_ticks_per_window": steps * 50 // 30,
             "rtc_exec_shift": steps if mode == "test_time" else None,
             "rtc_inference_delay": 0 if mode == "test_time" else None,
-            "rtc_min_exec_horizon": steps if mode == "test_time" else None,
+            "rtc_min_exec_horizon": horizon if mode == "test_time" else None,
             "pig_mask_schedule": "exponential" if mode == "test_time" else None,
             "pig_guidance_alpha": .9 if mode == "test_time" else None,
             "simulation_paused_during_HTTP": True,
             "scope": "synchronous previous-plan continuity guidance; not asynchronous latency compensation"}
+
+
+def evaluation_budget(args):
+    from run_closed_loop import mobile_time_budget
+    return mobile_time_budget(getattr(args, "seconds", 24))
 
 
 def freeze_inputs(args):
@@ -174,13 +184,18 @@ def freeze_inputs(args):
         metadata_files.append(identity)
     arm_profile = getattr(args, "warmup_arm_profile", "legacy")
     require(arm_profile in ("legacy", "wrist_retreat_v1"), "Unknown warmup arm profile")
+    budget = evaluation_budget(args)
+    boundary = BOUNDARY + ("; explicit30s extension, not the original24s budget"
+                           if budget["budget_variant"] == "extended30s" else "")
     return {"contract": CONTRACT, "prepared_utc": now(), "task_id": "simple/" + TASK,
             "warmup_arm_profile": arm_profile,
             "checkpoint_step": args.checkpoint_step, "model": model, "deployment": str(args.deployment),
             "training_manifest": manifest, "metadata_files": metadata_files, "sources": source,
             "official_repository": "USC-PSI-Lab/psi-data", "official_revision": OFFICIAL_REVISION,
-            "cases": cases, "boundary": BOUNDARY, "formal_evaluation_eligible": False,
-            "maximum_steps_including_warmup": 1200, "maximum_simulated_seconds": 24,
+            "cases": cases, "boundary": boundary, "formal_evaluation_eligible": False,
+            "time_budget": budget,
+            "maximum_steps_including_warmup": budget["max_episode_steps"],
+            "maximum_simulated_seconds": budget["maximum_simulated_seconds"],
             "effective_native_success_criteria": .9, "source_archive_success_criteria": .4,
             "evaluation_policy": evaluation_policy(args)}
 
@@ -204,9 +219,10 @@ def environment(args, python):
 
 def commands(args, case, directory):
     policy = evaluation_policy(args)
+    budget = evaluation_budget(args)
     options = ["--rtc-mode", policy["rtc_mode"], "--execute-steps", str(policy["execute_steps"])]
     if policy["rtc_enabled"]:
-        options.extend(["--rtc-inference-delay", "0", "--min-exec-horizon", str(policy["execute_steps"]),
+        options.extend(["--rtc-inference-delay", "0", "--min-exec-horizon", str(policy["rtc_min_exec_horizon"]),
                         "--pig-mask-schedule", "exponential", "--pig-guidance-alpha", "0.9"])
     server = [str(MODEL_PY), str(REPO / "scripts/4090_simple/serve_evaluation.py"),
               "--run-dir", str(args.deployment), "--ckpt-step", str(args.checkpoint_step),
@@ -215,7 +231,8 @@ def commands(args, case, directory):
     simulator = [str(SIM_PY), str(REPO / "scripts/4090_simple/run_closed_loop.py"),
         "--data-root", str(args.data_root), "--sonic-resources", str(args.runtime_root / "resources/sonic_v1_1"),
         "--output", str(directory / "simulation"), "--tasks", TASK, "--episode-start", str(case["case_index"]),
-        "--episodes-per-task", "1", "--dr-level", str(case["level"]), "--seed", "0", "--seconds", "24",
+        "--episodes-per-task", "1", "--dr-level", str(case["level"]), "--seed", "0",
+        "--seconds", str(budget["maximum_simulated_seconds"]),
         *options, "--expected-checkpoint-step", str(args.checkpoint_step), "--port", str(args.port),
         "--mobile-official-protocol", "--sync-observations", "--isaac-observation-only", "--sim-mode", "mujoco_isaac",
         "--diagnostic-unverified-sonic", "--pd-profile", "official_v1_1_ankle_pitch_1_5",
@@ -223,6 +240,8 @@ def commands(args, case, directory):
         "--warmup-hand-policy", "measured", "--body-token-projection", "none", "--video",
         "--worker-wall-timeout", "1800", "--worker-task", TASK]
     arm_profile = getattr(args, "warmup_arm_profile", "legacy")
+    if budget["budget_variant"] != "official24s":
+        simulator.extend(["--mobile-time-limit-seconds", str(budget["maximum_simulated_seconds"])])
     if arm_profile != "legacy":
         simulator.extend(["--warmup-arm-profile", arm_profile])
     return {"server": server, "simulator": simulator}
@@ -401,7 +420,12 @@ def validate_warmup_arms(episode, ticks, expected_profile, expected_helper_sha=N
 
 def validate_case(directory, case, frozen):
     """Read actual trace, both HTTP sides and decoded video; never infer success from geometry."""
-    from run_closed_loop import worker_result_errors
+    from run_closed_loop import mobile_time_budget, worker_result_errors
+    budget = mobile_time_budget(frozen.get("maximum_simulated_seconds", 24))
+    require(frozen.get("maximum_steps_including_warmup", 1200) == budget["max_episode_steps"],
+            "Frozen Mobile step budget differs from its declared seconds")
+    require("time_budget" not in frozen or frozen["time_budget"] == budget, "Frozen Mobile time budget differs")
+    maximum_steps = budget["max_episode_steps"]
     base = directory / "simulation" / TASK
     result_path = base / "result.json"
     result = read(result_path)
@@ -419,7 +443,10 @@ def validate_case(directory, case, frozen):
             and episode["local_environment_config"] == case["local_environment_config"], "Frozen official configuration differs")
     protocol = episode["mobile_protocol"]
     require(protocol["effective_success_criteria"] == .9 and protocol["source_metadata_success_criteria"] == .4
-            and protocol["max_episode_steps"] == 1200 and protocol["reset_dr_level"] is None, "Native protocol differs")
+            and protocol["max_episode_steps"] == maximum_steps and protocol["reset_dr_level"] is None, "Native protocol differs")
+    for key, expected in budget.items():
+        require((key not in protocol and budget["budget_variant"] == "official24s") or protocol.get(key) == expected,
+                "Actual Mobile time budget differs: " + key)
     render = result["render_contract"]
     require(render["render_engine"] == "Isaac RTX" and render["authoritative_physics"] == "MuJoCo"
             and render["sync_no_time_advance"] is True and render["isaac_observation_only"] is True, "Render/physics binding differs")
@@ -428,7 +455,7 @@ def validate_case(directory, case, frozen):
                 "Actual simulator environment source differs from frozen source")
     episode_dir = base / f"episode-{case['case_index']}"
     ticks = json_lines(episode_dir / "trace.jsonl")
-    require(0 < len(ticks) <= 1200 and len(ticks) == episode["frames"] == episode["warmup_frames"] + episode["policy_frames"],
+    require(0 < len(ticks) <= maximum_steps and len(ticks) == episode["frames"] == episode["warmup_frames"] + episode["policy_frames"],
             "Incomplete tick ledger")
     require(episode["warmup_frames"] == min(len(ticks), 50), "Causal warmup was removed or extended beyond the official budget")
     validate_warmup_arms(episode, ticks, frozen.get("warmup_arm_profile", "legacy"),
@@ -445,7 +472,8 @@ def validate_case(directory, case, frozen):
     native = ticks[-1]["terminated"]
     require(native == episode["task_success_observed"] and (episode["status"] == "task_terminated") == native, "Native success mismatch")
     if not native:
-        require(episode["status"] == "env_truncated" and len(ticks) == 1200 and ticks[-1]["truncated"], "Unsuccessful case lacks full official budget")
+        require(episode["status"] == "env_truncated" and len(ticks) == maximum_steps and ticks[-1]["truncated"],
+                "Unsuccessful case lacks full frozen Mobile budget")
     close_number(episode["simulated_seconds"], len(ticks) * .02, "Wrong total time including warmup")
     # Native success even during warmup is retained; policy execution is not an extra success gate.
     requests = json_lines(directory / "server/requests.jsonl")
@@ -491,7 +519,9 @@ def validate_case(directory, case, frozen):
             "simulated_seconds": episode["simulated_seconds"], "video_probe": probe[0], "video": str(video),
             "evidence": [file_identity(path) for path in paths], "formal_evaluation_eligible": False,
             "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution,
-            "warmup_arm_profile": frozen.get("warmup_arm_profile", "legacy")}
+            "warmup_arm_profile": frozen.get("warmup_arm_profile", "legacy"), "time_budget": budget,
+            "maximum_steps_including_warmup": maximum_steps,
+            "maximum_simulated_seconds": budget["maximum_simulated_seconds"]}
 
 
 def preflight(args):
@@ -597,8 +627,12 @@ def main(argv=None):
     parser.add_argument("--checkpoint-step", type=int, default=6000)
     parser.add_argument("--port", type=int, default=21075)
     parser.add_argument("--sampling-seed", type=int, default=20261105)
+    parser.add_argument("--seconds", type=int, choices=(24, 30), default=24,
+                        help="Total simulated budget including1s warmup;30s is an explicit extension of the original24s cases")
     parser.add_argument("--rtc-mode", choices=("off", "test_time"), default="off")
     parser.add_argument("--execute-steps", type=int, help="Default30 with RTC off,15 with test_time; must align to50Hz ticks")
+    parser.add_argument("--rtc-min-exec-horizon", type=int,
+                        help="Test-time RTC soft-mask horizon s; default execute-steps, with execute-steps <= s <=30 and d=0")
     parser.add_argument("--warmup-arm-profile", choices=("legacy", "wrist_retreat_v1"), default="legacy",
                         help="Explicit separate preparation variant; never changes archived baseline results")
     args = parser.parse_args(argv)
@@ -616,9 +650,12 @@ def main(argv=None):
     write(args.output / "FROZEN_CAMPAIGN.json", frozen)
     state = {"contract": CONTRACT, "status": "running", "created_utc": now(), "planned_cases": 30,
              "checkpoint_step": args.checkpoint_step, "model_sha256": args.expected_model_sha256,
-             "cases": [], "formal_evaluation_eligible": False, "boundary": BOUNDARY,
+             "cases": [], "formal_evaluation_eligible": False, "boundary": frozen["boundary"],
              "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": policy}
     state["warmup_arm_profile"] = args.warmup_arm_profile
+    state["time_budget"] = frozen["time_budget"]
+    state["maximum_steps_including_warmup"] = frozen["maximum_steps_including_warmup"]
+    state["maximum_simulated_seconds"] = frozen["maximum_simulated_seconds"]
     write(args.output / "state.json", state)
     try:
         for case in frozen["cases"]:

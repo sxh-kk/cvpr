@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from run_closed_loop import (MOBILE_PP_TASK, episode_reset_options, episode_termination,
-                             mobile_official_protocol, mobile_time_limit, parse_args)
+                             mobile_official_protocol, mobile_time_budget, mobile_time_limit, parse_args)
 
 
 class CounterEnv(gym.Env):
@@ -67,6 +67,34 @@ class MobileProtocolTests(unittest.TestCase):
         self.assertTrue(episode['task_success_observed'])
         self.assertEqual(episode['first_task_success_sim_time_s'], 2.3)
 
+    def test_explicit30s_runs_past1200_and_truncates_at1500_with_warmup_included(self):
+        config = self.config(); before = deepcopy(config)
+        protocol = mobile_official_protocol(config, 30)
+        self.assertEqual(protocol['budget_variant'], 'extended30s')
+        self.assertEqual(protocol['max_episode_steps'], 1500)
+        self.assertEqual(protocol['maximum_simulated_seconds'], 30)
+        self.assertEqual(protocol['source_metadata_max_episode_steps'], 1200)
+        self.assertEqual(protocol['effective_success_criteria'], .9)
+        self.assertEqual(protocol['warmup_steps_included'], 50)
+        self.assertTrue(protocol['budget_includes_warmup'])
+        self.assertEqual(config, before)
+        env = mobile_time_limit(CounterEnv(), 30); env.reset()
+        for step in range(1, 1501):
+            _, _, terminated, truncated, _ = env.step(0)
+            self.assertFalse(terminated)
+            self.assertEqual(truncated, step == 1500)
+        self.assertEqual(env.unwrapped.steps, 1500)
+        env.reset()
+        self.assertFalse(env.step(0)[3])
+
+    def test_shorter_inner_time_limit_cannot_silently_override30s(self):
+        inner = gym.wrappers.TimeLimit(CounterEnv(), max_episode_steps=1200)
+        with self.assertRaisesRegex(ValueError, 'Inner Mobile TimeLimit'):
+            mobile_time_limit(gym.wrappers.OrderEnforcing(inner), 30)
+        for seconds in (0, 24.0, 25, 29, 31, True, float('nan')):
+            with self.subTest(seconds=seconds), self.assertRaises(ValueError):
+                mobile_time_budget(seconds)
+
     def test_wrong_task_or_time_contract_is_rejected(self):
         for field, value in [('max_episode_steps', 15000), ('render_hz', 30), ('physics_dt', .002)]:
             config = self.config(); config['metadata'][field] = value
@@ -83,6 +111,24 @@ class MobileProtocolTests(unittest.TestCase):
                 self.assertTrue(parse_args().mobile_official_protocol)
             for extra in (['--stop-on-fall'], ['--worker-task', 'G1WholebodyHandoverTeleop-v0']):
                 with patch.object(sys, 'argv', base + extra), patch('sys.stderr'):
+                    with self.assertRaises(SystemExit): parse_args()
+
+    def test_extended_budget_requires_matching_outer_clock_and_explicit_official_scope(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = ['run_closed_loop.py', '--data-root', temp, '--sonic-resources', temp,
+                    '--output', temp + '/out', '--tasks', MOBILE_PP_TASK,
+                    '--seconds', '30', '--mobile-official-protocol']
+            with patch.object(sys, 'argv', base), patch('sys.stderr'):
+                with self.assertRaises(SystemExit): parse_args()
+            with patch.object(sys, 'argv', base + ['--mobile-time-limit-seconds', '30']):
+                args = parse_args()
+                self.assertEqual(args.mobile_time_limit_seconds, 30)
+                self.assertEqual(args.seconds, 30)
+            no_official = [part for part in base if part != '--mobile-official-protocol']
+            for command in (no_official + ['--mobile-time-limit-seconds', '30'],
+                            base + ['--mobile-time-limit-seconds', '25'],
+                            base + ['--mobile-time-limit-seconds', '30', '--seconds', '24']):
+                with patch.object(sys, 'argv', command), patch('sys.stderr'):
                     with self.assertRaises(SystemExit): parse_args()
 
 

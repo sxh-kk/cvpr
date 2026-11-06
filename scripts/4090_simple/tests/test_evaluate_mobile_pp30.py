@@ -77,6 +77,8 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("/home/official/SIMPLE/data", frozen["cases"][0]["source_row"]["environment_config"])
         self.assertEqual(frozen["cases"][0]["local_environment_config"]["asset"], str(self.args.data_root / "asset.usd"))
         self.assertFalse(frozen["formal_evaluation_eligible"])
+        self.assertEqual(frozen["time_budget"]["budget_variant"], "official24s")
+        self.assertEqual((frozen["maximum_simulated_seconds"], frozen["maximum_steps_including_warmup"]), (24, 1200))
         for name in ("engines/mujoco.py", "assets/objects.py", "assets/graspnet.py", "assets/collision_meshes.py"):
             self.assertIn("SIMPLE/" + name, frozen["sources"])
 
@@ -135,6 +137,25 @@ class CampaignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unknown warmup'):
             evaluate.freeze_inputs(self.args)
 
+    def test30s_freeze_and_commands_bind_effective_budget_without_rewriting_archive(self):
+        self.args.seconds = 30
+        original = [path.read_bytes() for path in self.metadata]
+        frozen = evaluate.freeze_inputs(self.args)
+        budget = frozen['time_budget']
+        self.assertEqual((budget['budget_variant'], budget['max_episode_steps']), ('extended30s', 1500))
+        self.assertEqual((frozen['maximum_simulated_seconds'], frozen['maximum_steps_including_warmup']), (30, 1500))
+        self.assertEqual(budget['source_metadata_max_episode_steps'], 1200)
+        self.assertEqual(budget['warmup_steps_included'], 50)
+        self.assertTrue(budget['budget_includes_warmup'])
+        self.assertIn('not the original24s', frozen['boundary'])
+        self.assertEqual(frozen['effective_native_success_criteria'], .9)
+        self.assertTrue(all(case['local_environment_config']['metadata']['max_episode_steps'] == 1200
+                            for case in frozen['cases']))
+        self.assertEqual(original, [path.read_bytes() for path in self.metadata])
+        command = evaluate.commands(self.args, frozen['cases'][0], self.root/'case')['simulator']
+        for option in ('--seconds', '--mobile-time-limit-seconds'):
+            self.assertEqual(command[command.index(option)+1], '30')
+
     def test_changed_runtime_component_or_unbound_artifact_is_refused(self):
         (self.args.deployment / "motion/joint_motion.ckpt").write_bytes(b"wrong new Motion")
         with self.assertRaisesRegex(ValueError, "Deployment artifact differs"):
@@ -187,24 +208,55 @@ class CampaignTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 evaluate.runtime_gate(changed, encoder(), self.args.expected_model_sha256, 44, 123, policy)
 
-    def rtc_ledger(self):
-        policy = evaluate.evaluation_policy(SimpleNamespace(rtc_mode="test_time"))
-        info = {"rtc_enabled": True, "rtc_mode": "test_time", "action": {"action_exec_horizon": 15}}
+    def test_shorter_execution_preserves_explicit15_step_rtc_mask_horizon(self):
+        self.args.rtc_mode, self.args.execute_steps, self.args.rtc_min_exec_horizon = 'test_time', 6, 15
+        policy = evaluate.evaluation_policy(self.args)
+        self.assertEqual((policy['execute_steps'], policy['control_ticks_per_window']), (6, 10))
+        self.assertEqual((policy['rtc_exec_shift'], policy['rtc_inference_delay'], policy['rtc_min_exec_horizon']), (6, 0, 15))
+        self.assertEqual(policy['pig_guidance_alpha'], .9)
+        frozen = evaluate.freeze_inputs(self.args)
+        self.assertEqual(frozen['evaluation_policy'], policy)
+        for command in evaluate.commands(self.args, frozen['cases'][0], self.root/'case').values():
+            self.assertEqual(command[command.index('--execute-steps')+1], '6')
+            self.assertEqual(command[command.index('--min-exec-horizon')+1], '15')
+        for horizon in (0, 5, 31, 15.0, True):
+            self.args.rtc_min_exec_horizon = horizon
+            with self.subTest(horizon=horizon), self.assertRaisesRegex(ValueError, 'minimum horizon'):
+                evaluate.evaluation_policy(self.args)
+        self.args.rtc_mode, self.args.rtc_min_exec_horizon = 'off', 15
+        with self.assertRaisesRegex(ValueError, 'requires test_time'):
+            evaluate.evaluation_policy(self.args)
+
+    def rtc_ledger(self, execute_steps=15, min_horizon=None):
+        policy = evaluate.evaluation_policy(SimpleNamespace(rtc_mode="test_time", execute_steps=execute_steps,
+                                                          rtc_min_exec_horizon=min_horizon))
+        window = policy['control_ticks_per_window']
+        info = {"rtc_enabled": True, "rtc_mode": "test_time", "action": {"action_exec_horizon": execute_steps}}
         info.update({k: policy[k] for k in ("rtc_exec_shift", "rtc_inference_delay", "rtc_min_exec_horizon",
                                          "pig_mask_schedule", "pig_guidance_alpha")})
         ticks, requests = [], [{"status": 425, "sampling_path": None, "sampler_calls": {"plain": 0, "test_time": 0, "train": 0},
                                "parameter_gradient_tensor_count": 0}]
-        for i in range(51):
+        for i in range(window*2+1):
             t = 1.005 + i * .02
-            start = 1.005 + (i // 25) * .5
+            start = 1.005 + (i // window) * window * .02
             ticks.append({"phase": "policy_latent", "sim_time_s": t, "chunk_start_sim_time_s": start,
                           "action_index_at_30hz": int((t - start) * 30 + 1e-7)})
-            if i % 25 == 0:
+            if i % window == 0:
                 path = "plain" if i == 0 else "test_time"
                 requests.append({"status": 200, "sim_time_s": str(t), "sampling_path": path,
                     "sampler_calls": {"plain": int(i == 0), "test_time": int(i != 0), "train": 0},
-                    "response_action_shape": [15, 80], "parameter_gradient_tensor_count": 0})
+                    "response_action_shape": [execute_steps, 80], "parameter_gradient_tensor_count": 0})
         return {"server_info": info}, ticks, requests, policy
+
+    def test_exec6_s15_acceptance_uses10_control_ticks_and_distinct_mask_horizon(self):
+        result, ticks, requests, policy = self.rtc_ledger(execute_steps=6, min_horizon=15)
+        accepted = evaluate.validate_rtc_execution(result, ticks, requests, policy)
+        self.assertEqual((accepted['plain_requests'], accepted['test_time_requests']), (1, 2))
+        self.assertEqual(accepted['execution_window'], 6)
+        self.assertAlmostEqual(ticks[10]['sim_time_s']-ticks[0]['sim_time_s'], .2)
+        result['server_info']['rtc_min_exec_horizon'] = 6
+        with self.assertRaisesRegex(ValueError, 'RTC live server contract differs'):
+            evaluate.validate_rtc_execution(result, ticks, requests, policy)
 
     def test_rtc_acceptance_proves_real_calls_response_rows_and_consumed_windows(self):
         result, ticks, requests, policy = self.rtc_ledger()
@@ -311,7 +363,7 @@ class CampaignTests(unittest.TestCase):
         episode = {"episode_index": 0, "dr_level": 0, "seed": 0, "source_scene_reset_dr_level": None,
             "source_metadata_sha256": case["metadata_sha256"], "local_environment_config": case["local_environment_config"],
             "mobile_protocol": {"effective_success_criteria": .9, "source_metadata_success_criteria": .4,
-                                "max_episode_steps": 1200, "reset_dr_level": None},
+                                **frozen['time_budget'], "reset_dr_level": None},
             "frames": count, "warmup_frames": min(count, 50), "policy_frames": max(0, count-50), "episode_id": eid,
             "status": "task_terminated" if native else "env_truncated", "finite_states": True,
             "diagnostic_loop_executed": count > 50, "decoder_calls": max(0, count-50),
@@ -340,6 +392,37 @@ class CampaignTests(unittest.TestCase):
         directory, case, frozen, result, probe = self.evidence_fixture(native=True, count=8)
         with patch.object(evaluate.subprocess, "check_output", return_value=json.dumps(probe).encode()):
             self.assertTrue(evaluate.validate_case(directory, case, frozen)["native_success"])
+
+    def test30s_failure_acceptance_requires_all1500_real_ticks(self):
+        self.args.seconds = 30
+        directory, case, frozen, result, probe = self.evidence_fixture(count=1500)
+        with patch.object(evaluate.subprocess, 'check_output', return_value=json.dumps(probe).encode()):
+            row = evaluate.validate_case(directory, case, frozen)
+        self.assertFalse(row['native_success'])
+        self.assertEqual((row['ticks'], row['warmup_ticks'], row['policy_ticks']), (1500, 50, 1450))
+        self.assertEqual((row['simulated_seconds'], row['maximum_simulated_seconds']), (30, 30))
+        self.assertEqual(row['time_budget']['budget_variant'], 'extended30s')
+        result['episodes'][0]['mobile_protocol']['max_episode_steps'] = 1200
+        self.write(directory/'simulation'/evaluate.TASK/'result.json', result)
+        with self.assertRaisesRegex(ValueError, 'Native protocol differs'):
+            evaluate.validate_case(directory, case, frozen)
+
+    def test30s_declaration_cannot_accept_a1200_tick_truncated_failure(self):
+        self.args.seconds = 30
+        directory, case, frozen, result, probe = self.evidence_fixture(count=1200)
+        with self.assertRaisesRegex(ValueError, 'full frozen Mobile budget'):
+            evaluate.validate_case(directory, case, frozen)
+        frozen['maximum_steps_including_warmup'] = 1200
+        with self.assertRaisesRegex(ValueError, 'Frozen Mobile step budget'):
+            evaluate.validate_case(directory, case, frozen)
+
+    def test30s_native_success_can_still_terminate_before_the_budget(self):
+        self.args.seconds = 30
+        directory, case, frozen, result, probe = self.evidence_fixture(native=True, count=61)
+        with patch.object(evaluate.subprocess, 'check_output', return_value=json.dumps(probe).encode()):
+            row = evaluate.validate_case(directory, case, frozen)
+        self.assertTrue(row['native_success'])
+        self.assertEqual(row['maximum_steps_including_warmup'], 1500)
 
     def test_execute_direct_worker_preserves_early_native_success_returncode(self):
         frozen = evaluate.freeze_inputs(self.args)
@@ -390,6 +473,28 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(operation.call_count, 30)
         final = evaluate.read(self.args.output / "FINAL_EVALUATION_ACCEPTANCE.json")
         self.assertEqual((final["status"], final["technically_valid_cases"], final["native_successes"]), ("incomplete", 29, 0))
+
+    def test30s_state_and_final_bind_extension_and_never_launch_during_cpu_fixture(self):
+        self.args.runtime_root.mkdir()
+        argv = []
+        for name in ('deployment', 'data-root', 'training-manifest', 'output', 'runtime-root'):
+            argv.extend(['--'+name, str(getattr(self.args, name.replace('-', '_')))])
+        argv.extend(['--expected-model-sha256', self.args.expected_model_sha256, '--seconds', '30'])
+
+        def execute(args, case, frozen, state):
+            state['cases'].append({'level': case['level'], 'case_index': case['case_index'],
+                                   'status': 'complete', 'native_success': False})
+
+        with patch.object(evaluate, 'execute', side_effect=execute), patch.object(evaluate.subprocess, 'Popen') as launch:
+            self.assertEqual(evaluate.main(argv), 0)
+            launch.assert_not_called()
+        frozen = evaluate.read(self.args.output/'FROZEN_CAMPAIGN.json')
+        for name in ('state.json', 'FINAL_EVALUATION_ACCEPTANCE.json'):
+            result = evaluate.read(self.args.output/name)
+            self.assertEqual(result['time_budget'], frozen['time_budget'])
+            self.assertEqual(result['time_budget']['budget_variant'], 'extended30s')
+            self.assertEqual((result['maximum_steps_including_warmup'], result['maximum_simulated_seconds']), (1500, 30))
+            self.assertIn('not the original24s', result['boundary'])
 
     def test_invalid_video_clock_native_or_http_is_technical(self):
         directory, case, frozen, result, probe = self.evidence_fixture(native=True, count=61)

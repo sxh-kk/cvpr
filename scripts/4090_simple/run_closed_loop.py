@@ -90,7 +90,18 @@ def episode_reset_options(environment_config, dr_level, *, recorded_handover=Fal
             "dr_level": None if recorded_handover or recorded_mobile else dr_level}
 
 
-def mobile_official_protocol(environment_config):
+def mobile_time_budget(seconds=24):
+    """Separate the unchanged source budget from an explicit extended diagnostic."""
+    if type(seconds) is not int or seconds not in (24, 30):
+        raise ValueError("Mobile time limit must be exactly24 or30 simulated seconds")
+    return {"budget_variant": "official24s" if seconds == 24 else "extended30s",
+            "max_episode_steps": seconds * 50, "maximum_simulated_seconds": seconds,
+            "source_metadata_max_episode_steps": 1200, "source_metadata_maximum_simulated_seconds": 24,
+            "budget_includes_warmup": True, "warmup_steps_included": 50,
+            "warmup_simulated_seconds_included": 1.}
+
+
+def mobile_official_protocol(environment_config, time_limit_seconds=24):
     """Keep original reset metadata; use the actual upstream CLI time budget.
 
     The archive's success_criteria is descriptive metadata. SIMPLE reset only
@@ -101,17 +112,25 @@ def mobile_official_protocol(environment_config):
             or metadata.get("max_episode_steps") != 1200
             or metadata.get("render_hz") != 50 or metadata.get("physics_dt") != .005):
         raise ValueError("Mobile official-case protocol requires the unchanged1200-step/50Hz task metadata")
-    return {"max_episode_steps": 1200, "observation_hz": 50, "maximum_simulated_seconds": 24.,
+    budget = mobile_time_budget(time_limit_seconds)
+    return {**budget, "observation_hz": 50,
             "reset_dr_level": None, "source_metadata_success_criteria": metadata.get("success_criteria"),
             "source_metadata_split": metadata.get("split"), "effective_success_criteria": .9,
             "success_semantics": "upstream task.check_success; stop on native terminated",
             "initialization": "official task reset; no teacher row or PICO cold-profile injection",
-            "boundary": "official fixed cases with dual-source SONIC controller adaptation; not certified original-controller benchmark"}
+            "boundary": ("official fixed cases with dual-source SONIC controller adaptation; not certified original-controller benchmark"
+                         + ("; explicit30s extension, not the original24s budget" if time_limit_seconds == 30 else ""))}
 
 
-def mobile_time_limit(env):
+def mobile_time_limit(env, time_limit_seconds=24):
     import gymnasium as gym
-    return gym.wrappers.TimeLimit(env, max_episode_steps=1200)
+    steps = mobile_time_budget(time_limit_seconds)["max_episode_steps"]
+    wrapped = env
+    while isinstance(wrapped, gym.Wrapper):
+        if isinstance(wrapped, gym.wrappers.TimeLimit) and wrapped._max_episode_steps < steps:
+            raise ValueError("Inner Mobile TimeLimit is shorter than the selected effective budget")
+        wrapped = wrapped.env
+    return gym.wrappers.TimeLimit(env, max_episode_steps=steps)
 
 
 def mobile_matched_protocol(initializer):
@@ -269,7 +288,9 @@ def parse_args():
     parser.add_argument("--continue-after-task-success", action="store_true",
                         help="Handover only: retain official success flag but continue to the observation time limit")
     parser.add_argument("--mobile-official-protocol", action="store_true",
-                        help="Mobile only: original case DR state, native .9 success and exact1200-step TimeLimit")
+                        help="Mobile only: original case DR state and native .9 success; default1200-step TimeLimit")
+    parser.add_argument("--mobile-time-limit-seconds", type=int, choices=(24, 30), default=24,
+                        help="Official fixed Mobile cases only: explicit24s/1200 or extended30s/1500 ticks, including1s warmup")
     parser.add_argument("--sim-mode", choices=("mujoco", "mujoco_isaac", "isaacsim"), default="mujoco")
     parser.add_argument("--compatibility-evidence", type=Path)
     parser.add_argument("--diagnostic-unverified-sonic", action="store_true",
@@ -282,9 +303,12 @@ def parse_args():
     args = parser.parse_args()
     if args.continue_after_task_success and args.tasks != ["G1WholebodyHandoverTeleop-v0"]:
         parser.error("Continuing after official success is only supported for Handover observation")
-    if args.mobile_official_protocol and (args.tasks != [MOBILE_PP_TASK] or args.seconds < 24
+    if args.mobile_time_limit_seconds != 24 and not args.mobile_official_protocol:
+        parser.error("--mobile-time-limit-seconds30 requires --mobile-official-protocol; matched and other tasks retain their original budget")
+    if args.mobile_official_protocol and (args.tasks != [MOBILE_PP_TASK]
+            or args.seconds != args.mobile_time_limit_seconds
             or args.stop_on_fall or args.worker_task not in (None, MOBILE_PP_TASK)):
-        parser.error("--mobile-official-protocol requires only Mobile P&P, --seconds >=24 and no --stop-on-fall; TimeLimit remains1200 steps")
+        parser.error("--mobile-official-protocol requires only Mobile P&P, --seconds equal to --mobile-time-limit-seconds and no --stop-on-fall")
     matched = args.mobile_initialization_manifest is not None
     if matched != (args.mobile_initialization_case is not None) or matched != (args.expected_mobile_split_sha256 is not None):
         parser.error("Mobile initialization requires manifest, case and --expected-mobile-split-sha256 from the current model training receipt")
@@ -437,7 +461,7 @@ def run_worker(args):
         else:
             first_config, _ = load_fixed_episode(metadata, args.episode_start, args.data_root)
         if args.mobile_official_protocol:
-            result["mobile_protocol"] = mobile_official_protocol(first_config)
+            result["mobile_protocol"] = mobile_official_protocol(first_config, args.mobile_time_limit_seconds)
         config = SimLoopConfig().load_wbc_yaml()
         config["ENV_NAME"] = "simple"
         config["SIMULATE_DT"] = float(first_config["metadata"]["physics_dt"])
@@ -449,7 +473,7 @@ def run_worker(args):
                        sync_mujoco_observations=args.sync_observations,
                        isaac_observation_only=args.isaac_observation_only)
         if args.mobile_official_protocol or mobile_initializer is not None:
-            env = mobile_time_limit(env)
+            env = mobile_time_limit(env, args.mobile_time_limit_seconds if args.mobile_official_protocol else 24)
         raw = env.unwrapped
         result["render_contract"] = simulation_render_contract(raw,args)
         if args.sync_observations and raw.isaac is not None:
@@ -491,7 +515,7 @@ def run_worker(args):
             else:
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
                 if args.mobile_official_protocol:
-                    protocol = mobile_official_protocol(env_config)
+                    protocol = mobile_official_protocol(env_config, args.mobile_time_limit_seconds)
                 obs, info = env.reset(seed=seed, options=episode_reset_options(
                     env_config, args.dr_level, recorded_handover=args.handover_initialization is not None,
                     recorded_mobile=args.worker_task == MOBILE_PP_TASK))

@@ -566,6 +566,43 @@ trace的物体pose／接触／reward来自`next_sim_time_s`，比同一行写入
 
 本节没有新启动仿真、重跑失败案例或修改权重／控制器／评分逻辑。
 
+### 5000步、30秒与更短执行窗的独立版本（2026-11-06）
+
+用户在上述8例复核后授权优化、将任务时限改为30秒并改用5000步权重。
+本次采用单一预先冻结的组合配置，不根据各case成败调参或自动重跑：
+
+- 复用已完成严格CPU加载及独立Motion导出的5000步部署：
+  `/home/zxc/CVPR_Evaluation_runtime/mobile_pp_official100_ckpt5000_testtimertc_20261105/deployment`；
+  模型SHA256为`50d12beded25fa0dce5be9153bf4ce9807fe89fb952ab21f7733011d04828ba4`。
+  不使用6000步joint或其Motion，不启动／恢复训练，也不重复已完成的数据数值验收。
+- 保留已验收`wrist_retreat_v1`初始化及有限臂交接、具名映射、原SONIC／DINO／统计／物理资源。
+  仍恢复原Level 0／1／2各10份完整官方初始化，环境seed0，策略seed基数20261105。
+- 最多1500个50Hz控制tick，即30仿真秒，包含原50tick／1秒真实历史预热；
+  外层运行时限和实际Gym TimeLimit统一延长。归档metadata仍是原1200步／`.4`，
+  不改写源文件、场景、物理参数或原生`.9`成功函数。默认24秒／1200步和matched协议保持。
+- `test_time` RTC，预测30个30Hz动作、10步采样、d0／exponential／alpha0.9；
+  实际执行6行动作／10个50Hz控制tick，即每0.2仿真秒重规划，旧计划实际左移6行。
+  s仍显式为15，保留原逐位置软mask定义，尾补6行全部落在自由区。
+  这避免默认s6扩大软mask覆盖，但不代表实际闭环引导作用不变：请求频率、shift及每次执行的前段均改变。
+  新配置允许更频繁使用当前图像，是否改善放置和运输停滞必须由本轮真实结果判断。
+- 不加入诊断物体真值、未来轨迹、teacher动作或特权接触纠错；原生成功即终止，
+  无额外几何／脱手门，失败完整跑满1500tick；每例保留原视频和请求／控制时钟证据。
+
+campaign的显式参数为`--checkpoint-step 5000 --seconds 30 --rtc-mode test_time
+--execute-steps 6 --rtc-min-exec-horizon 15 --warmup-arm-profile wrist_retreat_v1`。
+底层另有`--mobile-time-limit-seconds`，默认24；campaign会同步传入30，
+避免仅修改外层`--seconds`、实际仍在1200tick截断。实际receipt同时保存source与effective预算。
+
+独立运行根为`/home/zxc/CVPR_Evaluation_runtime/mobile_pp5000_30s_fastRTC_20261106`，
+正式输出预定为`official30_001`。本节准备记录不代表已经启动或完成，
+实际状态以新根的`CAMPAIGN_PROCESS_001.json`、`FROZEN_CAMPAIGN.json`、
+逐例`CASE_SUMMARY.json`和真实最终验收为准。
+完成后从同一条真实轨迹统计前1200tick内的原生成功，以及1201–1500tick新增成功；
+这是本轮轨迹的24秒前缀，不伪称独立24秒重跑，也不按reward另行发明成功判定。
+
+该组合同时改变权重、初始化相对旧5000版、实际执行窗和预算，不能把与旧5000步8/30
+或6000步初始化优化版22/30的差异归因于某一个因素；30秒成绩不混作原24秒协议成绩。
+
 ## 相关工作的Mobile P&P报告值（2026-11-05核对）
 
 这里记录原作者公开值，不将其当成本机统一配置复现。每等级10次的公开表中，

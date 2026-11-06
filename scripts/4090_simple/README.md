@@ -35,6 +35,14 @@ RTC off默认仍执行30帧。服务与客户端执行窗、实际RTC调用及25
 总计15/30（50.0%），相对RTC off基线10/30增加5例；新增成功7例、退步2例。
 技术异常及跌倒均为0，逐例视频、实际1171次RTC调用、时序及参数无梯度已验收。
 
+Mobile固定初始化campaign默认仍为24秒／1200tick；显式`--seconds 30`采用独立的
+30秒／1500tick预算（均含1秒预热），并同步设置底层实际TimeLimit。
+底层手动运行须同时传`--seconds 30 --mobile-time-limit-seconds 30`，不改归档metadata。
+`--rtc-min-exec-horizon`可独立声明RTC软mask的s，默认仍跟随实际执行窗；例如
+`--execute-steps 6 --rtc-min-exec-horizon 15`每0.2秒重规划、保留原s15软mask。
+这会改变闭环轨迹，收益待实测。5000步／30秒的新组合版本和24秒前缀统计见
+[扩展时限测评](../../docs/PICO_MOBILE_PP_OFFICIAL30_EVAL.md#5000步30秒与更短执行窗的独立版本2026-11-06)。
+
 ## Handover任务微调权重的本机测评
 
 `prepare_task_snapshot.py`专用于从UnifoLM38k初始化的task50联合微调checkpoint。
@@ -516,7 +524,8 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM
 `E=/home/zxc/CVPR_Evaluation_runtime/mobile_pp100_eval_20261028`；output必须为新的仓库外目录，
 不能对已完成的deployment重复执行。`serve_evaluation.py`在模型构造后固定采样seed，
 并记录实际在线DINO metadata。`run_closed_loop.py --mobile-official-protocol`只支持Mobile任务，
-恢复固定case全部DR状态，使用当前任务实际`.9`原生成功、1200步／24秒（含真实观测warmup），不因跌倒提前退出。
+恢复固定case全部DR状态，默认使用当前任务实际`.9`原生成功、1200步／24秒（含真实观测warmup），不因跌倒提前退出。
+用户明确授权的30秒扩展须显式`--seconds 30 --mobile-time-limit-seconds 30`，使用1500步，独立标记并保留旧成绩。
 归档metadata的`.4`原样保留；两者差异及原生reward的累计语义必须同时说明。
 本轮为官方level0十例、双来源SONIC控制器适配诊断，不能称原控制器认证benchmark或新场景泛化；
 十例实际完成，原生成功0/10、机器人跌倒0/10；48项CPU检查与十例真实GPU闭环及视频读帧验收通过。

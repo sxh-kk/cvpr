@@ -157,6 +157,21 @@ class EvidenceWriterTests(unittest.TestCase):
             writer.check()
         self.assertEqual(writer.close(), receipt)
 
+    def test_larger_buffer_preserves_fifo_across_temporary_worker_stall(self):
+        writer = self.make(max_pending=1024)
+        writer.submit('block')
+        self.wait_until(lambda: (self.directory / 'entered').exists())
+        for number in range(512):
+            writer.submit('append', self.payload(number))
+        self.assertEqual(writer.check()['max_pending'], 1024)
+        (self.directory / 'release').write_text('release')
+        receipt = writer.close(timeout_s=10.)
+        self.assertTrue(receipt['completed'], receipt)
+        self.assertEqual(receipt['accepted'], 513)
+        self.assertEqual(receipt['acknowledged'], 513)
+        rows = [json.loads(line) for line in (self.directory / 'events.jsonl').read_text().splitlines()]
+        self.assertEqual(rows, [{'array': [i, i + 1], 'nested': {'values': [i]}} for i in range(512)])
+
     def test_serialization_error_is_sticky_without_accepting_request(self):
         writer = self.make()
         with self.assertRaisesRegex(EvidenceWriterError, 'serialization_error'):

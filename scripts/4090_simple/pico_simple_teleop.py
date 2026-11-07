@@ -1379,6 +1379,7 @@ def run(args):
             cpus = sorted(os.sched_getaffinity(0))
             evidence_session = DeferredEvidenceSession(prepared_deferred,
                 cpus=cpus[-4:-3] if len(cpus)>=4 else cpus[:1],
+                max_pending=getattr(args,'evidence_max_pending',64),
                 trace_path=output/'control_trace.jsonl')
             control_trace = evidence_session.trace
             result['evidence_writer_protocol'] = evidence_session.receipt()
@@ -2369,7 +2370,11 @@ def main():
     parser.add_argument('--port',type=int,default=43100)
     parser.add_argument('--seconds',type=float,default=0,help='Wall-clock limit after simulator warmup; 0 waits for operator')
     parser.add_argument('--max-lateness',type=float,default=.10)
+    parser.add_argument('--evidence-max-pending',type=int,default=64,
+        help='Bounded deferred evidence request buffer (1..4096); completion still requires every acknowledgement')
     args=parser.parse_args()
+    if not 1 <= args.evidence_max_pending <= 4096:
+        parser.error('Require evidence max pending in [1,4096]')
     if not args.output.is_absolute() or args.seconds<0 or not 0<args.max_lateness<=.5:
         parser.error('Require absolute output, nonnegative seconds, and max lateness in (0,.5]')
     run(args)

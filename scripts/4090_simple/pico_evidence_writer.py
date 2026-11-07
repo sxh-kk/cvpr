@@ -207,6 +207,7 @@ class EvidenceWriter:
         self._error = None
         self._fault = None
         self._accepted = self._acknowledged = 0
+        self._max_pending = max_pending
         self._max_request_bytes = max_request_bytes
         self._results = {}
         self._result_expected = set()
@@ -296,6 +297,7 @@ class EvidenceWriter:
     def _status(self):
         return {'contract': CONTRACT, 'status': 'failed' if self._error else 'closed' if self._closed else 'ready',
                 'accepted': self._accepted, 'acknowledged': self._acknowledged,
+                'max_pending': self._max_pending,
                 'pending': self._accepted - self._acknowledged, 'error': self._error,
                 'fault': self._fault, 'worker': self._worker}
 

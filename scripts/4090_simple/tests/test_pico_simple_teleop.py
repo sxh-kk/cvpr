@@ -18,6 +18,20 @@ import pico_simple_teleop as entry
 import pico_sonic_reference as reference
 
 
+class EvidenceBufferCliTests(unittest.TestCase):
+    def test_explicit_buffer_reaches_run_without_starting_devices(self):
+        with patch.object(sys,'argv',['collector','--output','/tmp/unused-pico-cli','--evidence-max-pending','1024']), patch.object(entry,'run') as run:
+            entry.main()
+        self.assertEqual(run.call_args.args[0].evidence_max_pending,1024)
+
+    def test_invalid_buffer_is_rejected_before_run(self):
+        for value in ('0','-1','4097'):
+            with self.subTest(value=value), patch.object(sys,'argv',['collector','--output','/tmp/unused-pico-cli','--evidence-max-pending',value]), patch.object(entry,'run') as run, patch('sys.stderr'):
+                with self.assertRaises(SystemExit):
+                    entry.main()
+                run.assert_not_called()
+
+
 def raw_packet(timestamp, kind=None):
     value = {'timeStampNs':timestamp,'Input':1,'Body':{'joints':[]}}
     if kind is not None:

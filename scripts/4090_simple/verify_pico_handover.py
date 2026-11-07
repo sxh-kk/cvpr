@@ -25,6 +25,9 @@ HANDOVER_TASK_ID = 'simple/G1WholebodyHandoverTeleop-v0'
 MOBILE_TASK_ID = 'simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0'
 MOBILE_CONTRACT = 'cvpr-pico-mobile-pp-production-verification-v1'
 MOBILE_PACK_CONTRACT = 'cvpr-pico-mobile-pp-lerobot-pack-v1'
+GRASP_TASK_ID = 'cvpr/G1SonicTabletopGraspPico-v0'
+GRASP_CONTRACT = 'cvpr-pico-grasp-production-verification-v1'
+GRASP_PACK_CONTRACT = 'cvpr-pico-grasp-lerobot-pack-v1'
 READY_NAME = 'PICO_DATASET_READY.json'
 SOURCE_FILES = ('source_initialization_receipt.json','source_run_config.json',
                 'source_dataset_statistics.json','source_state_info.json')
@@ -34,9 +37,9 @@ require, sha, read, jsonl = shared.require, shared.sha, shared.read, shared.json
 def production_protocol(task_id):
     from pack_pico_handover import task_protocol
     protocol = task_protocol(task_id)
-    kind = 'mobile-pp' if protocol['mobile'] else 'handover'
+    kind = protocol['kind']
     return {**protocol,
-        'production_contract':MOBILE_CONTRACT if protocol['mobile'] else CONTRACT,
+        'production_contract':GRASP_CONTRACT if protocol['grasp'] else MOBILE_CONTRACT if protocol['mobile'] else CONTRACT,
         'relocation_contract':f'cvpr-pico-{kind}-dino-host-relocation-v1',
         'transfer_contract':f'cvpr-pico-{kind}-a100-byte-transfer-v1',
         'byte_contract':f'cvpr-pico-{kind}-a100-byte-verification-v1'}
@@ -86,7 +89,7 @@ def shared_original_evidence(pack, payload, admission, archived, original, expec
             and archived.get('original_path')==original
             and payload.get(archived['path'])==archived.get('sha256')==expected
             and admission.get('bindings',{}).get(original)==expected,
-            'Mobile shared original '+role+' is not archived and SHA-bound')
+            'Native-task shared original '+role+' is not archived and SHA-bound')
     owned(pack,archived['path'])
 
 
@@ -95,8 +98,8 @@ def inspect_pack(pack, *, expected_episodes=None):
     ready = read(owned(pack,'PACK_READY.json'))
     from pack_pico_handover import artifact_protocol
     protocol = artifact_protocol(ready,'pack')
-    if protocol['mobile']:
-        require(ready.get('selection_policy')=='native_only','Mobile packed selection policy differs')
+    if protocol['native']:
+        require(ready.get('selection_policy')=='native_only','Native-task packed selection policy differs')
     require(ready.get('train_payload_packed') is True
             and ready.get('final_ready') is False and ready.get('normalization_refitted') is False,
             'Require an unpromoted independent PICO human pack with inherited statistics')
@@ -107,6 +110,12 @@ def inspect_pack(pack, *, expected_episodes=None):
     for relative,digest in payload.items():
         require(identity(owned(pack,relative))['sha256']==digest,'Packed bytes changed: '+relative)
     require(all(name in payload for name in SOURCE_FILES),'Missing inherited checkpoint contract files')
+    if protocol['grasp']:
+        info=read(owned(pack,'train/meta/info.json'))
+        target=info.get('features',{}).get('observation.object_poses',{})
+        names=['target.'+name for name in ('pos_x','pos_y','pos_z','quat_w','quat_x','quat_y','quat_z')]
+        require(target.get('shape')==[7] and target.get('dtype')=='float64' and target.get('names')==names,
+                'Grasp must retain only the real target pose without a fabricated container')
     episodes = jsonl(owned(pack,'train/meta/episodes.jsonl'))
     entries = ready.get('episodes',[])
     require(episodes and len(episodes)==len(entries)==ready.get('train_episodes'), 'PICO episode count differs')
@@ -120,9 +129,9 @@ def inspect_pack(pack, *, expected_episodes=None):
                 and human_uuid not in seen,'Missing/duplicate canonical human demonstration UUID')
         seen.add(human_uuid)
         source = episode.get('source_identity',{})
-        if protocol['mobile']:
-            require(episode.get('task_id')==entry.get('task_id')==MOBILE_TASK_ID,
-                    'Mobile episode task identity differs from its pack')
+        if protocol['native']:
+            require(episode.get('task_id')==entry.get('task_id')==protocol['task_id'],
+                    'Native-task episode task identity differs from its pack')
         require(episode.get('source_kind')=='live_pico_human' and entry.get('source_kind')=='live_pico_human'
                 and episode.get('split')=='train' and episode.get('split_restriction')=='train_only'
                 and episode.get('lineage_complete') is True
@@ -156,36 +165,53 @@ def inspect_pack(pack, *, expected_episodes=None):
         require(metadata_path in payload and metadata.get('source_kind')=='live_pico_human'
                 and metadata.get('human_demo_uuid')==human_uuid
                 and metadata.get('replay_source_sha256') is None,'Human source metadata differs')
-        if protocol['mobile']:
-            require(admission.get('task_id')==metadata.get('task_id')==MOBILE_TASK_ID,
-                    'Mobile admission/source task identity differs')
+        if protocol['native']:
+            require(admission.get('task_id')==metadata.get('task_id')==protocol['task_id'],
+                    'Native-task admission/source task identity differs')
             require(admission.get('selection_policy')=='native_only' and admission.get('technical_blocked') is False,
-                    'Mobile admission is not a complete native-only selection')
+                    'Native-task admission is not a complete native-only selection')
             required_evidence = {'metadata.json','episode.json','commands.jsonl',
                 'raw_quality_samples.jsonl','applied_force_samples.jsonl'}
-            require(required_evidence<=set(evidence),'Mobile original evidence coverage differs')
-            trace = admission.get('mobile_reference_audit',{}).get('control_trace',{})
-            archived = entry.get('mobile_control_trace_file',{})
-            require(isinstance(trace,dict),'Mobile original control trace metadata is missing')
+            require(required_evidence<=set(evidence),'Native-task original evidence coverage differs')
+            reference = admission.get(protocol['reference_key'],{})
+            trace = reference.get('control_trace',{})
+            archived = entry.get(protocol['evidence_prefix']+'_control_trace_file',{})
+            require(isinstance(trace,dict),'Native-task original control trace metadata is missing')
             shared_original_evidence(pack,payload,admission,archived,trace.get('path'),trace.get('sha256'),'control trace')
-            historical = admission.get('mobile_reference_audit',{}).get('historical_sources',{})
-            archived_history = entry.get('mobile_historical_source_files',{})
+            historical = reference.get('historical_sources',{})
+            archived_history = entry.get(protocol['evidence_prefix']+'_historical_source_files',{})
             require(isinstance(historical,dict) and isinstance(archived_history,dict),
-                    'Mobile historical source metadata is missing')
+                    'Native-task historical source metadata is missing')
             shared_original_evidence(pack,payload,admission,archived_history.get('manifest'),
                 historical.get('manifest_path'),historical.get('manifest_sha256'),'source manifest')
             expected_sources,archived_sources = historical.get('files'),archived_history.get('files')
             require(isinstance(expected_sources,list) and expected_sources
                     and isinstance(archived_sources,list) and len(expected_sources)==len(archived_sources),
-                    'Mobile historical implementation coverage differs')
+                    'Native-task historical implementation coverage differs')
             for source,copy in zip(expected_sources,archived_sources):
                 require(isinstance(source,dict) and isinstance(copy,dict)
                         and isinstance(source.get('filename'),str) and copy.get('filename')==source['filename'],
-                        'Mobile historical implementation role differs')
+                        'Native-task historical implementation role differs')
                 shared_original_evidence(pack,payload,admission,copy,source.get('path'),source.get('sha256'),'capture implementation')
+        if protocol['grasp']:
+            from pack_pico_handover import grasp_batch_sources
+            batch=grasp_batch_sources(admission)
+            if metadata.get('render_mode')=='mujoco_deferred':
+                completion=read(owned(pack,evidence.get('rtx_completion.json')))
+                require((completion.get('batch_execution') is None)==(batch is None),
+                        'Grasp batch admission and original renderer producer differ')
+            archived_batch=entry.get('grasp_batch_execution_files')
+            if batch is None:
+                require(archived_batch is None,'Single-episode Grasp producer cannot claim batch evidence')
+            else:
+                require(isinstance(archived_batch,dict) and set(archived_batch)==set(batch),
+                        'Grasp batch portable evidence coverage differs')
+                for role,source in batch.items():
+                    shared_original_evidence(pack,payload,admission,archived_batch[role],
+                        source['path'],source['sha256'],'Grasp batch '+role)
         required = set(protocol['base_checks'])
         if metadata.get('render_mode')=='mujoco_deferred':required.add('original_full_state_to_deferred_rtx_bridge')
-        if not protocol['mobile'] and metadata.get('quality_geometry_mode')=='deferred_geometry_with_original_solved_support':
+        if not protocol['native'] and metadata.get('quality_geometry_mode')=='deferred_geometry_with_original_solved_support':
             required.add('original_solved_support_and_deferred_geometry')
         if metadata.get('capture_start_protocol') is not None:required.add('independent_frozen_first_capture_boundary')
         require(required<=set(admission['checks']),'Human independent admission is missing mandatory checks')
@@ -219,8 +245,8 @@ def inspect_pack(pack, *, expected_episodes=None):
             and [(row.get('human_demo_uuid'),row.get('admission_sha256')) for row in selection.get('episodes',[])]
                 ==[(entry['human_demo_uuid'],entry['admission_sha256']) for entry in entries],
             'Frozen selected human UUID/admission identities differ from the packaged set')
-    if protocol['mobile']:
-        require(selection.get('task_id')==MOBILE_TASK_ID,'Mobile selected task identity differs')
+    if protocol['native']:
+        require(selection.get('task_id')==protocol['task_id'],'Native-task selected task identity differs')
     require(not (pack/'val').exists() and not (pack/'test').exists(),'Human release is train-only')
     return pack,ready,episodes,{e['episode_index']:e for e in entries}
 
@@ -238,6 +264,13 @@ def validate_labels(raw, length):
             and (mask[30:,:78]==1).all() and (mask[30:,78:]==0).all(),
             'Warmup NaNs, actual labels or 78+2 masks differ')
     return hands,tokens,state
+
+
+def validate_object_observations(raw,length,task_id):
+    if task_id==GRASP_TASK_ID:
+        target=np.asarray(raw.get('observation.object_poses'),dtype=np.float64)
+        require(target.shape==(length,7) and np.isfinite(target).all(),
+                'Grasp actual target-only object pose rows differ')
 
 
 def normalized(values, low, high, *, state=False):
@@ -292,8 +325,8 @@ def verify(pack, dino_root, reference_dino_root, run_config, output, *, expected
                 and relocation.get('manifest_sha256')==sha(dino_root/'manifest.json')
                 and relocation.get('data_and_features_byte_identical') is True,
                 'A100 production readiness requires the completed explicit host relocation')
-        if protocol['mobile']:
-            require(relocation.get('task_id')==MOBILE_TASK_ID,'Mobile relocated task identity differs')
+        if protocol['native']:
+            require(relocation.get('task_id')==protocol['task_id'],'Native-task relocated task identity differs')
         incoming_transfer_binding(release,include_cache=False)
         relocation_binding = {'path':str(relocation_path),'sha256':sha(relocation_path),
             'byte_verification_sha256':sha(release/'A100_BYTE_VERIFICATION.json')}
@@ -328,6 +361,7 @@ def verify(pack, dino_root, reference_dino_root, run_config, output, *, expected
             cached.features._mmap.close()
         raw = pq.read_table(owned(pack,entries[index]['parquet_path'])).to_pydict()
         validate_labels(raw,length)
+        validate_object_observations(raw,length,protocol['task_id'])
         require(np.array_equal(raw['frame_index'],np.arange(length))
                 and np.array_equal(raw['source_frame_index'],(np.arange(length)*50+29)//30)
                 and np.all(np.asarray(raw['source_episode_index'])==episode['source_episode_index']),
@@ -366,7 +400,7 @@ def verify(pack, dino_root, reference_dino_root, run_config, output, *, expected
         require(identity(path)==wanted,'Reference/config changed during CPU verification')
     require(not torch.cuda.is_initialized(),'CPU production reader unexpectedly initialized CUDA')
     report = {'contract':protocol['production_contract'],'task_id':protocol['task_id'],
-        **({'selection_policy':'native_only'} if protocol['mobile'] else {}),
+        **({'selection_policy':'native_only'} if protocol['native'] else {}),
         'status':'passed','created_utc':datetime.now(timezone.utc).isoformat(),
         'release_root':str(release),'pack_root':str(pack),'dino_root':str(dino_root),
         'train_episodes':len(episodes),'total_frames':ready['total_frames'],'train_windows':len(subset),
@@ -410,9 +444,9 @@ def incoming_transfer_binding(release, *, include_cache=True):
             and {relative:wanted for relative,wanted in transfer['files'].items()
                  if relative.startswith(('packed/','dino/'))}==local_ready.get('payload_files'),
             'Incoming byte verification must bind the original passed local production receipt')
-    if protocol['mobile']:
-        require(all(value.get('task_id')==MOBILE_TASK_ID for value in (transfer,report,local_ready)),
-                'Mobile transfer and CPU receipt task identities differ')
+    if protocol['native']:
+        require(all(value.get('task_id')==protocol['task_id'] for value in (transfer,report,local_ready)),
+                'Native-task transfer and CPU receipt task identities differ')
     for relative,wanted in transfer['files'].items():
         if not include_cache and relative.startswith('dino/'):
             continue

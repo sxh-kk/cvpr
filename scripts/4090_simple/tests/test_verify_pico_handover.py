@@ -79,8 +79,11 @@ def cache_and_transfer_fixture(root,pack,ready):
     video_key = 'observation.images.egocentric'
     length = ready['episodes'][0]['length']
     protocol = verify.production_protocol(ready.get('task_id',verify.HANDOVER_TASK_ID))
+    previous_info=verify.read(pack/'train/meta/info.json') if (pack/'train/meta/info.json').exists() else {}
+    feature_metadata=previous_info.get('features',{})
+    feature_metadata[video_key]={'dtype':'video','video_info':{'video.fps':30}}
     write(pack/'train/meta/info.json',{'fps':30,'total_episodes':1,'total_frames':length,
-        'features':{video_key:{'dtype':'video','video_info':{'video.fps':30}}},
+        'features':feature_metadata,
         'data_path':'data/chunk-000/episode_{episode_index:06d}.parquet',
         'video_path':'videos/chunk-000/{video_key}/episode_{episode_index:06d}.mp4'})
     freeze(pack,ready)
@@ -310,6 +313,81 @@ class PicoVerificationTests(unittest.TestCase):
         changed=deepcopy(original);changed.pop('task_id');write(path,changed)
         with self.assertRaisesRegex(ValueError,'task identities'):
             verify.incoming_transfer_binding(self.root)
+
+    def grasp_pack(self,root=None,*,batch=False):
+        from test_pack_pico_handover import make_grasp_case,fixture_grasp_batch_sources
+        import pack_pico_handover as packer
+        root=root or self.root
+        case=make_grasp_case(root,batch_sources=fixture_grasp_batch_sources(root,recovered=True) if batch else None)
+        ready=packer.pack(case['template'],case['selection'],case['output'])
+        return case['output'],ready
+
+    def test_grasp_ready_has_own_envelope_and_rejects_mobile_episode_even_after_rehash(self):
+        pack,ready=self.grasp_pack()
+        _,_,episodes,_=verify.inspect_pack(pack,expected_episodes=1)
+        self.assertEqual(episodes[0]['task_id'],verify.GRASP_TASK_ID)
+        protocol=verify.production_protocol(verify.GRASP_TASK_ID)
+        self.assertEqual(protocol['production_contract'],verify.GRASP_CONTRACT)
+        self.assertNotEqual(protocol['production_contract'],verify.MOBILE_CONTRACT)
+        changed=deepcopy(ready);changed.pop('task_id');freeze(pack,changed)
+        with self.assertRaisesRegex(ValueError,'Task identity'):verify.inspect_pack(pack)
+        path=pack/'train/meta/episodes.jsonl'
+        episode=json.loads(path.read_text());episode['task_id']=verify.MOBILE_TASK_ID
+        path.write_text(json.dumps(episode)+'\n');freeze(pack,ready)
+        with self.assertRaisesRegex(ValueError,'task identity'):verify.inspect_pack(pack)
+
+    def test_grasp_archived_reference_is_checked_independently_of_mobile_roles(self):
+        pack,ready=self.grasp_pack()
+        archived=ready['episodes'][0]['grasp_historical_source_files']['files'][0]
+        (pack/archived['path']).write_bytes(b'changed Grasp capture authority')
+        freeze(pack,ready)
+        with self.assertRaisesRegex(ValueError,'shared original'):verify.inspect_pack(pack)
+
+    def test_grasp_ready_rejects_fabricated_container_schema_and_nonfinite_target(self):
+        pack,ready=self.grasp_pack()
+        path=pack/'train/meta/info.json'
+        info=verify.read(path);info['features']['observation.object_poses']['shape']=[14]
+        write(path,info);freeze(pack,ready)
+        with self.assertRaisesRegex(ValueError,'fabricated container'):verify.inspect_pack(pack)
+        verify.validate_object_observations({'observation.object_poses':np.zeros((61,7))},61,verify.GRASP_TASK_ID)
+        for values in (np.zeros((61,14)),np.full((61,7),np.nan)):
+            with self.assertRaisesRegex(ValueError,'target-only'):
+                verify.validate_object_observations({'observation.object_poses':values},61,verify.GRASP_TASK_ID)
+
+    def test_grasp_real_cpu_cache_relocation_uses_distinct_contract_without_feature_reencoding(self):
+        pack,ready=self.grasp_pack()
+        dino,_,receipt=cache_and_transfer_fixture(self.root,pack,ready)
+        original_cache=verify.tree_inventory(dino)
+        original_pack=verify.tree_inventory(pack)
+        report=verify.relocate(pack,dino)
+        self.assertEqual(report['contract'],'cvpr-pico-grasp-dino-host-relocation-v1')
+        self.assertEqual(report['task_id'],verify.GRASP_TASK_ID)
+        self.assertTrue(report['data_and_features_byte_identical'])
+        self.assertFalse(report['remote_production_ready'])
+        self.assertEqual(verify.tree_inventory(pack),original_pack)
+        self.assertEqual(verify.tree_inventory(self.root/'dino.before-remote-relocation'),original_cache)
+        for name in ('features.npy','frames.npz'):
+            self.assertEqual(verify.identity(dino/'episodes/00000000'/name),receipt['outputs'][name])
+
+    def test_grasp_batch_proof_bytes_cannot_be_changed_even_after_fresh_payload_inventory(self):
+        for role in ('batch_code','report','frozen_manifest','recovery_receipt','process_exit','parentdriver'):
+            with self.subTest(role=role):
+                root=self.root/role;root.mkdir()
+                pack,ready=self.grasp_pack(root,batch=True)
+                verify.inspect_pack(pack,expected_episodes=1)
+                archived=ready['episodes'][0]['grasp_batch_execution_files'][role]
+                (pack/archived['path']).write_bytes(b'changed Grasp batch producer evidence')
+                freeze(pack,ready)
+                with self.assertRaisesRegex(ValueError,'shared original.*Grasp batch'):
+                    verify.inspect_pack(pack)
+
+    def test_grasp_batch_proof_cannot_be_downgraded_to_external_hash_only(self):
+        pack,ready=self.grasp_pack(batch=True)
+        entry=ready['episodes'][0]
+        archived=entry.pop('grasp_batch_execution_files')
+        entry['external_authority_bindings'].update({copy['original_path']:copy['sha256'] for copy in archived.values()})
+        freeze(pack,ready)
+        with self.assertRaisesRegex(ValueError,'portable evidence coverage'):verify.inspect_pack(pack)
 
 
 if __name__=='__main__':unittest.main()

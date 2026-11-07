@@ -144,14 +144,14 @@ def refresh(case):
     write(directory/"admission.json", case["audit"])
     protocol = packer.task_protocol(case["metadata"]["task_id"])
     write(case["selection"], {"contract":protocol["selection_contract"],
-        **({"task_id":packer.MOBILE_TASK_ID} if protocol["mobile"] else {}),"episodes":[{
+        **({"task_id":protocol["task_id"]} if protocol["native"] else {}),"episodes":[{
         "human_demo_uuid":case["identity"],"episode_dir":str(directory),
         "admission_path":str(directory/"admission.json"),
         "admission_sha256":packer.sha(directory/"admission.json"),"source_session":"live_human_fixture"}]})
 
 
-def make_mobile_case(root):
-    case = make_case(root)
+def make_mobile_case(root, *, deferred=False):
+    case = make_case(root,deferred=deferred)
     directory = case['directory']
     case['metadata'].update(task_id=packer.MOBILE_TASK_ID,
         quality_geometry_mode='deferred_geometry_with_original_solved_support',
@@ -184,6 +184,59 @@ def make_mobile_case(root):
 
 def selected(case):
     return packer.load_selection(case["selection"], packer.Bindings())
+
+
+def make_grasp_case(root, *, batch_sources=None):
+    """Explicitly synthetic Grasp attestation; no physics admission is claimed."""
+    case = make_mobile_case(root,deferred=batch_sources is not None)
+    directory = case['directory']
+    case['metadata'].update(task_id=packer.GRASP_TASK_ID, instruction=' Pick up the chips can. ')
+    case['instruction'] = case['metadata']['instruction']
+    write(directory/'metadata.json',case['metadata'])
+    events = case['events']
+    for event in events:
+        del event['objects']['container']
+    events_path = directory/'capture/events.jsonl'
+    events_path.write_text(''.join(json.dumps(event)+'\n' for event in events))
+    manifest = packer.read(directory/'capture/capture.json')
+    manifest.update(task_id=packer.GRASP_TASK_ID, instruction=case['instruction'],
+        events_sha256=packer.sha(events_path))
+    write(directory/'capture/capture.json',manifest)
+    audit = case['audit']
+    audit.update(contract=packer.GRASP_ADMISSION_CONTRACT, task_id=packer.GRASP_TASK_ID,
+        checks={name:{'passed':True} for name in packer.GRASP_BASE_CHECKS},
+        auditor_source_sha256={str(Path(packer.__file__).with_name(name)):
+            packer.sha(Path(packer.__file__).with_name(name)) for name in packer.GRASP_AUDITOR_FILES})
+    audit['grasp_reference_audit'] = audit.pop('mobile_reference_audit')
+    if batch_sources is not None:
+        audit['checks']['original_full_state_to_deferred_rtx_bridge']={'passed':True}
+        batch={'contract':'cvpr-pico-grasp-deferred-rtx-batch-v1','uuid':case['identity'],
+            'environment_lease_number':1,'completed_report_binds_this_receipt':True}
+        roles={**packer.GRASP_BATCH_ROLES,**packer.GRASP_BATCH_OPTIONAL_ROLES}
+        for role,path in batch_sources.items():
+            path_key,sha_key,_=roles[role]
+            batch.update({path_key:str(path),sha_key:packer.sha(path)})
+            case['external_bindings'][str(path)]=packer.sha(path)
+        audit['deferred_rtx_bridge']={'batch_execution':batch}
+        write(directory/'rtx_completion.json',{'synthetic_pack_unit_fixture_only':True,
+            'batch_execution':{'contract':batch['contract']}})
+    refresh(case)
+    return case
+
+
+def fixture_grasp_batch_sources(root, *, recovered=False):
+    """Source/report bytes only; this double does not attest a rendered batch."""
+    script=Path(packer.__file__).with_name('render_deferred_pico_batch.py')
+    report=root/'synthetic_batch_report.json';manifest=root/'synthetic_frozen_manifest.json'
+    write(report,{'synthetic_pack_unit_fixture_only':True,'producer_sha256':packer.sha(script)})
+    write(manifest,{'synthetic_pack_unit_fixture_only':True,'scope':'shared immutable batch proof double'})
+    sources={'batch_code':script,'report':report,'frozen_manifest':manifest}
+    if recovered:
+        for role in packer.GRASP_BATCH_OPTIONAL_ROLES:
+            path=root/('synthetic_'+role+'.json')
+            write(path,{'synthetic_pack_unit_fixture_only':True,'role':role})
+            sources[role]=path
+    return sources
 
 
 
@@ -433,6 +486,97 @@ class PackerTests(unittest.TestCase):
                 with self.assertRaises((ValueError,KeyError)):
                     packer.pack(case['template'],case['selection'],case['output'])
                 self.assertFalse(case['output'].exists())
+
+    def test_grasp_target_only_actual_conversion_keeps_task_and_original_pose_without_container(self):
+        import verify_pico_handover as verifier
+        case = make_grasp_case(self.root)
+        original = {str(p):packer.sha(p) for p in case['directory'].rglob('*') if p.is_file()}
+        report = packer.pack(case['template'],case['selection'],case['output'])
+        self.assertEqual(report['contract'],packer.GRASP_CONTRACT)
+        self.assertEqual(report['task_id'],packer.GRASP_TASK_ID)
+        self.assertEqual(report['selection_policy'],'native_only')
+        episode = report['episodes'][0]
+        self.assertIn('grasp_control_trace_file',episode)
+        self.assertNotIn('mobile_control_trace_file',episode)
+        self.assertIn('raw_quality_samples.jsonl',episode['evidence_files'])
+        table = pq.read_table(case['output']/episode['parquet_path'])
+        np.testing.assert_array_equal(table['observation.object_poses'].to_pylist(),
+            [event['objects']['target']['pose7'] for event in case['events']])
+        info = packer.read(case['output']/'train/meta/info.json')
+        feature = info['features']['observation.object_poses']
+        self.assertEqual(feature['shape'],[7])
+        self.assertTrue(all(name.startswith('target.') for name in feature['names']))
+        self.assertTrue(report['episodes'][0]['video']['pixels_exact'])
+        self.assertFalse(report['normalization_refitted'])
+        self.assertFalse(report['tokens_reencoded'])
+        verifier.inspect_pack(case['output'],expected_episodes=1)
+        self.assertEqual({str(p):packer.sha(p) for p in case['directory'].rglob('*') if p.is_file()},original)
+
+    def test_grasp_cannot_use_mobile_identity_or_omit_its_own_success_and_source_checks(self):
+        for change in ('selection_task','selection_contract','admission_contract','task','capture_task',
+                       'policy','technical','grasp_success','supervised_success','reference','auditor'):
+            with self.subTest(change=change):
+                root = self.root/change;root.mkdir();case = make_grasp_case(root)
+                if change.startswith('selection_'):
+                    value = packer.read(case['selection'])
+                    if change=='selection_task':value.pop('task_id')
+                    else:value['contract']=packer.MOBILE_SELECTION_CONTRACT
+                    write(case['selection'],value)
+                elif change=='capture_task':
+                    path=case['directory']/'capture/capture.json';value=packer.read(path)
+                    value['task_id']=packer.MOBILE_TASK_ID;write(path,value);refresh(case)
+                else:
+                    audit=case['audit']
+                    if change=='admission_contract':audit['contract']=packer.MOBILE_ADMISSION_CONTRACT
+                    elif change=='task':audit['task_id']=packer.MOBILE_TASK_ID
+                    elif change=='policy':audit['selection_policy']='handover_gate'
+                    elif change=='technical':audit['technical_blocked']=True
+                    elif change=='reference':audit.pop('grasp_reference_audit')
+                    elif change=='auditor':audit['auditor_source_sha256'].pop(str(Path(packer.__file__).with_name('pico_grasp_audit.py')))
+                    else:audit['checks'].pop('independent_native_grasp_task_success' if change=='grasp_success'
+                                            else 'independent_grasp_supervised_success_coverage')
+                    refresh(case)
+                with self.assertRaises((ValueError,KeyError)):selected(case)
+
+    def test_grasp_batch_evidence_is_copied_once_and_remains_portable_for_two_episodes(self):
+        import verify_pico_handover as verifier
+        sources=fixture_grasp_batch_sources(self.root,recovered=True)
+        first_root,second_root=self.root/'first',self.root/'second'
+        first_root.mkdir();second_root.mkdir()
+        first=make_grasp_case(first_root,batch_sources=sources)
+        second=make_grasp_case(second_root,batch_sources=sources)
+        selection=packer.read(first['selection'])
+        selection['episodes']+=packer.read(second['selection'])['episodes']
+        write(first['selection'],selection)
+        report=packer.pack(first['template'],first['selection'],first['output'])
+        a,b=report['episodes']
+        self.assertEqual(a['grasp_batch_execution_files'],b['grasp_batch_execution_files'])
+        for role,original in sources.items():
+            copied=a['grasp_batch_execution_files'][role]
+            self.assertEqual((first['output']/copied['path']).read_bytes(),original.read_bytes())
+            self.assertNotIn(str(original),a['external_authority_bindings'])
+        self.assertEqual(len([path for path in (first['output']/'accepted_evidence/grasp_batch').rglob('*')
+                              if path.is_file()]),len(sources))
+        verifier.inspect_pack(first['output'],expected_episodes=2)
+
+    def test_grasp_batch_admission_cannot_drop_producer_metadata_or_sha_binding(self):
+        for change in ('missing_descriptor','missing_binding','wrong_uuid','unpaired_recovery',
+                       'unpaired_parentdriver','parentdriver_without_exit'):
+            with self.subTest(change=change):
+                root=self.root/change;root.mkdir()
+                case=make_grasp_case(root,batch_sources=fixture_grasp_batch_sources(root,recovered=True))
+                if change=='missing_descriptor':case['audit'].pop('deferred_rtx_bridge')
+                elif change=='wrong_uuid':case['audit']['deferred_rtx_bridge']['batch_execution']['uuid']=str(uuid.uuid4())
+                elif change=='unpaired_recovery':case['audit']['deferred_rtx_bridge']['batch_execution'].pop('recovery_receipt_sha256')
+                elif change=='unpaired_parentdriver':case['audit']['deferred_rtx_bridge']['batch_execution'].pop('parentdriver_sha256')
+                elif change=='parentdriver_without_exit':
+                    batch=case['audit']['deferred_rtx_bridge']['batch_execution']
+                    batch.pop('process_exit_path');batch.pop('process_exit_sha256')
+                else:
+                    batch=case['audit']['deferred_rtx_bridge']['batch_execution']
+                    case['external_bindings'].pop(batch['report_path'])
+                refresh(case)
+                with self.assertRaisesRegex(ValueError,'Grasp batch'):selected(case)
 
 
 if __name__ == "__main__":

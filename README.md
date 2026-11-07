@@ -150,7 +150,8 @@ PICO 4 双手柄与脚踝定位器通过本机 SONIC v1.1 操控 SIMPLE G1，独
 保留原AMO控制差异和原生抓起判据；支持同一SDK接收端时序诊断及独立1Hz只读故障监测。
 采集阶段成功仍需后续RTX和训练数据终验。固定Grasp100新增独立target-only本地补图、
 准入、无损打包、clean DINO和真实CPU生产读取入口；126替代旧007，
-首条链路已实际通过，全量状态以[本轮处理记录](docs/PICO_GRASP_COLLECTION.md#固定100条的本地补图与训练准入)及其收据为准。
+本机100条已完成16,446帧RTX、独立准入、无损打包、clean DINO和300次实际CPU生产查询，
+10,546个完整训练窗口就绪；本次未上传或启动训练，见[本轮完成记录](docs/PICO_GRASP_COLLECTION.md#2026-11-07最终本机完成)及其独立收据。
 
 
 SIMPLE Benchmark 的 Mobile P&P 使用独立 [PICO 采集入口与操作说明](docs/PICO_MOBILE_PP_TELEOP.md)：

@@ -79,10 +79,32 @@ source /home/zxc/CVPR_Evaluation_runtime/local.env.sh
 5. 用真实CPU Dataset/collator逐条首/中/末查询完整动作未来及6帧DINO历史，
    独立生成`PICO_DATASET_READY.json`。GPU隐藏、未构建策略、未开始训练。
 
-当前全量结果以独立发布目录
-`/home/zxc/CVPR_Evaluation_runtime/pico_grasp100_20261107_human01/PROCESSING_STATUS.json`
-与最终就绪收据为准。首条126已完成177帧RTX、11项独立准入及真实打包/DINO/生产读取试处理；
-这份单条试验不能替代全100条验收，亦不代表A100远端就绪。
+### 2026-11-07最终本机完成
+
+独立发布目录为`/home/zxc/CVPR_Evaluation_runtime/pico_grasp100_20261107_human01`。
+本轮100条已实际完成16,446帧零步RTX、每条11项共1,100项独立准入、
+无损LeRobot转换和全部clean DINO。本机完整训练窗口为10,546个。
+实际CPU Dataset/collator每条首/中/末共300次查询通过；并非逐一物化全部窗口。
+动作及mask为`[30,80]`，状态为`[1,45]`，历史特征为`[6,5,1024]`；继承统计未重新拟合。
+
+`PICO_DATASET_READY.json`实际`status=passed`、
+`production_ready_for_bound_pack_and_cache=true`，SHA为
+`332a7ae2697e1a1d7a850b8b4df22139725635f95544922f558ee76854717f9b`。
+检查器确认`GPU_used=false`、`CUDA_initialized=false`、`training_started=false`。
+`PROCESSING_STATUS.json`为`local_training_data_ready_training_not_started`，
+独立观察器的`FULL_PROCESSING_004_EXIT.json`记录主进程退出0。
+本次未上传A100、不启动训练，不报告策略成功率或远端就绪。
+
+冻结范围仍为126替007、042恢复示范，原1200份源文件、history和progress均保持原样。
+`FINAL_LOCAL_COMPLETION.json`绑定最终清单、就绪/pack/cache摘要和实际检查计数。
+处理代码固定在独立`codex/grasp-admission-20261107`工作树的
+`1dbd375b8d25a9957834922dd691f4a21b540638`，与并行开发的XMovePick采集源码分开。
+
+旧两条试补图因Isaac关闭硬退出缺少批报告收尾，原report/exit/图像继续保留；
+只在精确历史producer源码、独立exit0和逐条完整RTX回执均绑定后核准复用，
+不把cleanup未返回改写为已返回。新批次在close前保存渲染完成状态，
+由外层独立进程退出回执确认退出码。中断/资源等待记录也独立留档，
+不覆盖为成功，不当作任务质量拒收；最终完成事实来自上述真实READY和exit0。
 
 ## 使用
 

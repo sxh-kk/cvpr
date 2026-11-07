@@ -221,3 +221,7 @@ Level 0为3/10、Level 1为4/10、Level 2为3/10，合计10/30原生成功，技
 旧v1／v2回执、replay技术失败与超时诊断均保留；这些早期回执不代替固定100条的完整RTX／DINO与生产读取验收。
 随后按用户明确要求恢复为独立会话`live_human_005_native_only`；实际源码匹配，planner CPU29、preview CPU30、native v2后台CPU31已核对，
 页面及相机恢复且收到有效全身追踪，操作者已重新跟随。恢复回执见`restore_collection_005/RESTORE_COMPLETE.json`，旧数据保留。
+
+## PICO XMovePick走近抓取采集
+
+独立XMovePick入口现支持连续双臂VR＋摇杆行走、官方99份TRAIN初始化与target-only原生成功复核。实际布置恢复、源材质缺失限制、操作及启动验收见[采集说明](docs/PICO_XMOVE_PICK_COLLECTION.md)。Grasp、Handover与Mobile数据和进度独立。

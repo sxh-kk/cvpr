@@ -155,7 +155,7 @@ EPISODE_SESSION_FIELDS = (
     'mobile_control_protocol','mobile_control_policy','mobile_encoder_mode','mobile_vr_source',
     'mobile_planner_model_sha256','actual_task_source_sha256',
     'actual_native_success_criteria','mobile_cold_start_profile','evidence_writer_protocol',
-    'source_official_task_id','grasp_adapter_identity','evidence_object_roles')
+    'source_official_task_id','grasp_adapter_identity','xmove_pick_adapter_identity','evidence_object_roles')
 
 
 def episode_session_identity(session_result):
@@ -283,8 +283,12 @@ def load_environment_config(path, data_root, *, profile='handover', rebind_offic
                 if key in ('usd_path','mdl_path','path','data_dir') and isinstance(item,str):
                     if '://' in item:
                         raise ValueError('Remote resource in environment config: '+label)
-                    if rebind_official_paths and item.startswith('/home/wenke/SIMPLE/data/'):
-                        relocated = str(data_root/item.removeprefix('/home/wenke/SIMPLE/data/'))
+                    official_prefixes = ('/home/wenke/SIMPLE/data/',)
+                    if profile == 'xmove_pick':
+                        official_prefixes += ('/home/songlin/workspace/projects/SIMPLE/data/',)
+                    source_prefix = next((prefix for prefix in official_prefixes if item.startswith(prefix)),None)
+                    if rebind_official_paths and source_prefix:
+                        relocated = str(data_root/item.removeprefix(source_prefix))
                         relocations.append({'field':label,'original':item,'local':relocated})
                         value[key] = item = relocated
                     candidate = Path(item)
@@ -311,6 +315,9 @@ def load_environment_config(path, data_root, *, profile='handover', rebind_offic
     if profile == 'grasp' and not grasp_config_is_adapted:
         from pico_grasp_task import adapt_official_config
         state,receipt['grasp_frame_adaptation'] = adapt_official_config(state)
+    if profile == 'xmove_pick':
+        from pico_xmove_pick_task import adapt_official_config
+        state,receipt['xmove_pick_adaptation'] = adapt_official_config(state)
     return state,receipt
 
 
@@ -694,12 +701,14 @@ def prepare_deferred_cache(prepare_function, output, index, *, model, objects, j
     """Do model I/O and verifier allocation before live control or recording."""
     directory = Path(output)/'prepared_models'/f'{index:04d}'
     grasp = task_id == 'cvpr/G1SonicTabletopGraspPico-v0'
-    roles = ('target',) if grasp else ('target','container')
+    xmove_pick = task_id == 'cvpr/G1SonicXMovePickPico-v0'
+    roles = ('target',) if grasp or xmove_pick else ('target','container')
     bindings = {role:model.body(objects[role].id).name for role in roles}
     metadata = {'object_body_names':bindings}
-    if grasp:
+    if grasp or xmove_pick:
         metadata.update(task_id=task_id,evidence_object_roles=list(roles),
-            source_official_task_id='simple/G1WholebodyTabletopGraspMP-v0')
+            source_official_task_id=('simple/G1WholebodyTabletopGraspMP-v0' if grasp
+                else 'simple/G1WholebodyXMovePickTeleop-v0'))
     started = time.perf_counter()
     prepared = prepare_function(directory,model=model,joint_names=list(joint_names),
         metadata=metadata)
@@ -969,31 +978,41 @@ def run(args):
     task_id,_ = task_identity(profile)
     mobile = profile == 'mobile_pp'
     grasp = profile == 'grasp'
-    object_roles = ('target',) if grasp else ('target','container')
+    xmove_pick = profile == 'xmove_pick'
+    target_only = grasp or xmove_pick
+    object_roles = ('target',) if target_only else ('target','container')
     mobile_policy = getattr(args,'mobile_control_policy','continuous_vr_mode1')
-    if grasp and mobile_policy != 'continuous_vr_mode1':
-        raise ValueError('Grasp requires its standing live-VR mode1 control policy')
+    if target_only and mobile_policy != 'continuous_vr_mode1':
+        raise ValueError('Target-only tasks require their explicit live-VR mode1 control policy')
     if not grasp and (getattr(args,'grasp_collection_plan',None) or getattr(args,'grasp_collection_progress',None)):
         raise ValueError('Grasp initialization options cannot be used by another task')
-    mobile_continuous = grasp or (mobile and mobile_policy == 'continuous_vr_mode1')
-    collection_plan = getattr(args,'grasp_collection_plan',None) if grasp else getattr(args,'mobile_collection_plan',None)
+    if not xmove_pick and (getattr(args,'xmove_pick_collection_plan',None) or getattr(args,'xmove_pick_collection_progress',None)):
+        raise ValueError('XMovePick initialization options cannot be used by another task')
+    if not mobile and (getattr(args,'mobile_collection_plan',None) or getattr(args,'mobile_collection_progress',None) or getattr(args,'mobile_cold_start',None)):
+        raise ValueError('Mobile initialization options cannot be used by another task')
+    mobile_continuous = target_only or (mobile and mobile_policy == 'continuous_vr_mode1')
+    collection_prefix = 'xmove_pick' if xmove_pick else 'grasp' if grasp else 'mobile'
+    collection_plan = getattr(args,collection_prefix+'_collection_plan',None)
     collection_progress = None
     if collection_plan:
-        if not (mobile or grasp) or args.environment_config or args.pico_replay:
+        if not (mobile or target_only) or args.environment_config or args.pico_replay:
             raise ValueError('Official initialization collection requires an explicit live task and no fixed config/replay')
-        if grasp:
+        if xmove_pick:
+            from pico_xmove_pick_collection_plan import load_plan
+            from pico_xmove_pick_collection_progress import CollectionProgress
+        elif grasp:
             from pico_grasp_collection_plan import load_plan
             from pico_grasp_collection_progress import CollectionProgress
         else:
             from pico_mobile_collection_plan import load_plan
             from pico_mobile_collection_progress import CollectionProgress
         rows = load_plan(collection_plan)
-        progress_path = (getattr(args,'grasp_collection_progress',None) if grasp else getattr(args,'mobile_collection_progress',None)) or output.parent/('official100_progress.json' if grasp else 'official99_progress.json')
+        progress_path = getattr(args,collection_prefix+'_collection_progress',None) or output.parent/('official100_progress.json' if grasp else 'official99_progress.json')
         collection_progress = CollectionProgress(rows,progress_path)
         if collection_progress.current is None:
             collection_progress.close()
             raise ValueError('本轮全部初始化均已完成，请勿重复采集')
-    if (mobile or grasp) and (not (args.environment_config or collection_plan) or args.render_mode != 'mujoco_deferred'):
+    if (mobile or target_only) and (not (args.environment_config or collection_plan) or args.render_mode != 'mujoco_deferred'):
         raise ValueError('This task requires its saved official scene and deferred capture')
     if grasp and (getattr(args,'mobile_collection_plan',None) or getattr(args,'mobile_cold_start',None)):
         raise ValueError('Grasp cannot consume a Mobile plan or cold pose')
@@ -1002,7 +1021,7 @@ def run(args):
         config_path = collection_progress.current['reset_config_path'] if collection_progress else args.environment_config
         environment_state,environment_receipt = (load_collection_environment(collection_progress.current,data_root,profile=profile)
             if collection_progress else load_environment_config(config_path,data_root,profile=profile,
-                rebind_official_paths=grasp))
+                rebind_official_paths=target_only))
     os.environ['SIMPLE_DATA_DIR'] = str(data_root)
     rendered = args.render_mode == 'isaac'
     deferred = args.render_mode == 'mujoco_deferred'
@@ -1025,7 +1044,7 @@ def run(args):
         live_status_transport='localhost HTTP; periodic disk status only while paused')
     if collection_progress:
         result['mobile_collection_progress'] = collection_progress.receipt()
-        for name in (('pico_grasp_collection_plan.py','pico_grasp_collection_progress.py') if grasp else ('pico_mobile_collection_plan.py','pico_mobile_collection_progress.py')):
+        for name in (f'pico_{collection_prefix}_collection_plan.py',f'pico_{collection_prefix}_collection_progress.py'):
             result['source_code_sha256_at_session_start'][name] = file_sha256(Path(__file__).with_name(name))
     write_json(output/'result.json', result)
     env = ui = receiver = video_bridge = render_profiler = preview_worker = mobile_control = None
@@ -1060,7 +1079,7 @@ def run(args):
         'path':None,'uuid':None,'discarded':False,'error':None}
     operator_message = '请戴好头显、站直并校准，再开始下一条录制。'
     reference = PicoSonicReference(resources, args.human_info)
-    if mobile or grasp:
+    if mobile or target_only:
         from pico_mobile_control import (MobilePlannerControl, CONTRACT as MOBILE_CONTROL_CONTRACT,
             CONTINUOUS_CONTRACT)
         if mobile_continuous:
@@ -1084,6 +1103,11 @@ def run(args):
             from pico_grasp_collection_plan import SOURCE_TASK_ID
             result.update(source_official_task_id=SOURCE_TASK_ID,evidence_object_roles=['target'])
             for name in ('pico_grasp_task.py','pico_grasp_control.py','pico_grasp_quality.py'):
+                result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
+        if xmove_pick:
+            from pico_xmove_pick_collection_plan import SOURCE_TASK_ID
+            result.update(source_official_task_id=SOURCE_TASK_ID,evidence_object_roles=['target'])
+            for name in ('pico_xmove_pick_task.py','pico_xmove_pick_quality.py','start_pico_xmove_pick.sh'):
                 result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
         for name in ('pico_mobile_control.py','pico_locomotion_reference.py',
                 'sonic_locomotion_planner.py','pico_mobile_quality.py','pico_mobile_vr_reference.py',
@@ -1109,6 +1133,11 @@ def run(args):
             physics_model_sha256=prepared_deferred.model_sha256 if deferred else None)
         # Config identity changes with each initialization, unlike fixed encoder identities.
         metadata['environment_config_source'] = copy.deepcopy(environment_receipt)
+        if xmove_pick:
+            metadata.update(evidence_object_roles=['target'],
+                quality_geometry_mode='xmove_pick_native_height_no_container_geometry',
+                native_baseline_target_z_m=float(raw.task._init_target_height),
+                xmove_pick_adaptation=copy.deepcopy(raw.task.frame_receipt))
         if grasp:
             metadata.update(evidence_object_roles=['target'],
                 quality_geometry_mode='grasp_native_height_no_container_geometry',
@@ -1205,7 +1234,13 @@ def run(args):
             sync_mujoco_observations=True, pd_profile='official_v1_1_ankle_pitch_1_5')
         config = SimLoopConfig().load_wbc_yaml()
         config.update(ENV_NAME='simple', SIMULATE_DT=.005, ENABLE_ELASTIC_BAND=False)
-        if grasp:
+        if xmove_pick:
+            from pico_xmove_pick_task import make_xmove_pick_task
+            from simple.envs.sonic_loco_manip import SonicLocoManipEnv
+            task = make_xmove_pick_task(config,adapted_config=environment_state)
+            env = SonicLocoManipEnv(task=task,sonic_config=config,
+                sim_mode='mujoco',headless=True,dr_level=0,sync_mujoco_observations=True)
+        elif grasp:
             from pico_grasp_task import make_grasp_task, install_frame_adapter
             from simple.envs.sonic_loco_manip import SonicLocoManipEnv
             task = make_grasp_task(config,adapted_config=environment_state)
@@ -1223,7 +1258,11 @@ def run(args):
             result['grasp_adapter_identity'] = adapter_identity()
             result['actual_task_source_sha256'] = result['grasp_adapter_identity']['official_task_source_sha256']
             result['actual_native_success_criteria'] = .9
-        if mobile:
+        if xmove_pick:
+            from pico_xmove_pick_task import adapter_identity
+            result['xmove_pick_adapter_identity'] = adapter_identity()
+            result['actual_task_source_sha256'] = result['xmove_pick_adapter_identity']['official_task_source_sha256']
+        if mobile or xmove_pick:
             result['actual_native_success_criteria'] = float(raw.task.success_criteria)
         if environment_state:
             result['saved_scene_manager_binding'] = bind_saved_scene_manager(raw.task,environment_state)
@@ -1249,7 +1288,10 @@ def run(args):
         write_json(output/'environment_config.json',renderer_environment_config)
         if environment_state:
             actual_environment = renderer_environment_config
-            if grasp:
+            if xmove_pick:
+                from pico_xmove_pick_task import xmove_pick_environment_binding_receipt
+                result['environment_config_binding'] = xmove_pick_environment_binding_receipt(environment_state,actual_environment)
+            elif grasp:
                 from pico_grasp_task import grasp_environment_binding_receipt
                 result['environment_config_binding'] = grasp_environment_binding_receipt(environment_state,actual_environment)
             else:
@@ -1298,7 +1340,7 @@ def run(args):
         mujoco.mj_saveModel(model,str(output/'physics_model.mjb'))
         result['physics_model_sha256'] = file_sha256(output/'physics_model.mjb')
         cache = prepared_geometry_cache = None
-        if not grasp:
+        if not target_only:
             cache = build_container_geometry_cache(model,data,container_body=raw.mujoco.mj_objects['container'].id,
                 target_body=raw.mujoco.mj_objects['target'].id)
             prepared_geometry_cache = prepare_quality_geometry(cache,output,geometry_cache_index)
@@ -1327,9 +1369,12 @@ def run(args):
                     substep_costs.add('force_evidence_publish',measured)
             if active_local is not None and substeps % 4 == 0:
                 sample_started = time.perf_counter()
-                if grasp:
-                    from pico_grasp_quality import sample_grasp_solved_quality
-                    row = sample_grasp_solved_quality(model,data,completed_steps=active_local+1,
+                if target_only:
+                    if xmove_pick:
+                        from pico_xmove_pick_quality import sample_xmove_pick_solved_quality as sample_target_quality
+                    else:
+                        from pico_grasp_quality import sample_grasp_solved_quality as sample_target_quality
+                    row = sample_target_quality(model,data,completed_steps=active_local+1,
                         target_body=raw.mujoco.mj_objects['target'].id,
                         solver_stage='post_mj_step_before_observation_refresh')
                 else:
@@ -1338,7 +1383,7 @@ def run(args):
                         container_body=raw.mujoco.mj_objects['container'].id,
                         solver_stage='post_mj_step_before_observation_refresh')
                 row['live_contacts_support_sampling_wall_s'] = time.perf_counter()-sample_started
-                if mobile or grasp:
+                if mobile or target_only:
                     row['actual_root_xyz_m'] = root_pose(model,data)[:3].tolist()
                     if pending_mobile_quality_row is not None:
                         raise RuntimeError('Unpublished Mobile quality row from previous control step')
@@ -1365,7 +1410,7 @@ def run(args):
             result['initial_physical_state'], result['post_warmup_physical_state'])
         def configure_evidence():
             nonlocal evidence_session,control_trace
-            if not (deferred and (mobile or grasp)):
+            if not (deferred and (mobile or target_only)):
                 return
             from pico_async_evidence import DeferredEvidenceSession
             if control_trace is not None:
@@ -1612,7 +1657,8 @@ def run(args):
             obs, _ = env.reset(seed=args.seed,options=reset_options)
             renderer_environment_config = copy.deepcopy(raw.task.state_dict())
             if environment_state:
-                binding = (grasp_environment_binding_receipt(environment_state,raw.task.state_dict()) if grasp
+                binding = (xmove_pick_environment_binding_receipt(environment_state,raw.task.state_dict()) if xmove_pick
+                    else grasp_environment_binding_receipt(environment_state,raw.task.state_dict()) if grasp
                     else environment_binding_receipt(environment_state,raw.task.state_dict()))
                 result.setdefault('reset_environment_bindings',[]).append(binding)
                 if not binding['matched']:
@@ -1650,7 +1696,7 @@ def run(args):
             write_json(output/'result.json',result)
             reset_readiness = require_standing_warmup(reset_before, reset_after)
             result['resets'][-1]['standing_warmup_readiness'] = reset_readiness
-            if not grasp:
+            if not target_only:
                 cache = build_container_geometry_cache(model,data,container_body=raw.mujoco.mj_objects['container'].id,
                     target_body=raw.mujoco.mj_objects['target'].id)
                 geometry_cache_index += 1
@@ -2128,7 +2174,7 @@ def run(args):
                     if pending_mobile_quality_row is not None:
                         publish_started = tick_costs.start()
                         pending_mobile_quality_row['official_task_success'] = bool(terminated)
-                        if grasp:
+                        if target_only:
                             pending_mobile_quality_row.update(native_task_reward=float(reward),
                                 native_baseline_target_z_m=float(raw.task._init_target_height))
                         write_json_line(quality_stream,pending_mobile_quality_row)
@@ -2254,7 +2300,7 @@ def run(args):
                     last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
                 'task_id':task_id,'collection_task_profile':profile,'mobile_mode':mobile_mode,
-                'mobile_control_policy':mobile_policy if mobile or grasp else None,
+                'mobile_control_policy':mobile_policy if mobile or target_only else None,
                 'mobile_planner':mobile_control.status() if mobile_control else None,
                 'mobile_stopped_for_mode_transition':mobile_stopped.ready if mobile else None,
                 'operator_message':operator_message,'last_episode':history_status,
@@ -2345,7 +2391,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     runtime=Path('/home/zxc/CVPR_Evaluation_runtime')
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--task',choices=('handover','mobile_pp','grasp'),default='handover')
+    parser.add_argument('--task',choices=('handover','mobile_pp','grasp','xmove_pick'),default='handover')
     parser.add_argument('--mobile-control-policy',choices=('continuous_vr_mode1','locked_upper_mode0'),
         default='continuous_vr_mode1',help='Mobile default: live arms and joystick legs, no B switch')
     parser.add_argument('--planner-model',type=Path,help='Pinned official planner for Mobile P&P only')
@@ -2365,6 +2411,8 @@ def main():
     parser.add_argument('--mobile-collection-progress',type=Path,help='Durable progress for this collection round')
     parser.add_argument('--grasp-collection-plan',type=Path,help='Frozen native Grasp TRAIN100 initialization manifest')
     parser.add_argument('--grasp-collection-progress',type=Path,help='Grasp-only durable official100 progress')
+    parser.add_argument('--xmove-pick-collection-plan',type=Path,help='Frozen XMovePick official TRAIN99 initialization manifest')
+    parser.add_argument('--xmove-pick-collection-progress',type=Path,help='XMovePick-only durable official99 progress')
     parser.add_argument('--pico-ip',default='172.16.20.83',help='Expected headset peer for video bridge')
     parser.add_argument('--seed',type=int,default=20261025)
     parser.add_argument('--port',type=int,default=43100)

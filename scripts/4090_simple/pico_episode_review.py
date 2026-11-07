@@ -863,6 +863,14 @@ def complete_geometry(directory, job):
         return {"status":"not_required","selection_policy":"native_only",
             "task_identity_validation":identity,
             "reason":"Original Grasp native success is captured on the explicit SONIC adaptation; no container or extra geometry success gate"}
+    from pico_xmove_pick_quality import TASK_ID as XMOVE_PICK_TASK_ID, validate_xmove_pick_task_identity
+    if metadata.get("task_id") == XMOVE_PICK_TASK_ID:
+        identity = validate_xmove_pick_task_identity(metadata)
+        if not identity["passed"]:
+            raise ValueError("XMovePick native identity invalid: " + "; ".join(identity["errors"]))
+        return {"status":"not_required","selection_policy":"native_only",
+            "task_identity_validation":identity,
+            "reason":"Original XMovePick native success is captured on its explicit SONIC adapter; no container or extra geometry success gate"}
     if outcome.get("geometry_pending") is not True:
         return  # Compatible older completed geometry is rechecked by History.
     from pico_simple_teleop import complete_quality_geometry
@@ -956,10 +964,13 @@ def _worker_main(queue, *, once=False, idle_timeout=300.):
         from pico_episode_history import EpisodeHistory
         from pico_simple_teleop import complete_quality_geometry as _prewarmed
         from pico_mobile_quality import GATE_VERSION as mobile_selection_gate
+        from pico_xmove_pick_quality import GATE_VERSION as xmove_pick_selection_gate
         policy.update(mobile_selection_gate_version=mobile_selection_gate,
+            xmove_pick_selection_gate_version=xmove_pick_selection_gate,
             review_code_sha256=_sha(Path(__file__)),
             history_code_sha256=_sha(Path(__file__).with_name("pico_episode_history.py")),
-            mobile_quality_code_sha256=_sha(Path(__file__).with_name("pico_mobile_quality.py")))
+            mobile_quality_code_sha256=_sha(Path(__file__).with_name("pico_mobile_quality.py")),
+            xmove_pick_quality_code_sha256=_sha(Path(__file__).with_name("pico_xmove_pick_quality.py")))
         queue._recover()
         queue._discover_orphans()
         with queue._locked():

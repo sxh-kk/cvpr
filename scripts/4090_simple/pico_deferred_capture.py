@@ -24,26 +24,34 @@ CONTRACT = "cvpr-live-pico-deferred-physical-capture-v1"
 GRASP_CONTRACT = "cvpr-live-pico-grasp-deferred-physical-capture-v1"
 GRASP_TASK_ID = "cvpr/G1SonicTabletopGraspPico-v0"
 GRASP_SOURCE_TASK_ID = "simple/G1WholebodyTabletopGraspMP-v0"
+XMOVE_PICK_CONTRACT = "cvpr-live-pico-xmove-pick-deferred-physical-capture-v1"
+XMOVE_PICK_TASK_ID = "cvpr/G1SonicXMovePickPico-v0"
+XMOVE_PICK_SOURCE_TASK_ID = "simple/G1WholebodyXMovePickTeleop-v0"
 PENDING = "raw_physics_capture_completed_pending_rtx"
 
 
 def evidence_profile(metadata):
     """Choose explicit object roles without changing the legacy v1 schema.
 
-    Only the independent SONIC Grasp adapter has target-only evidence. Unknown
-    tasks cannot opt into that contract merely by omitting a container binding.
+    The independent SONIC Grasp and XMovePick adapters have separate target-only
+    contracts. Unknown tasks cannot opt into them by omitting a container binding.
     All actors remain in the complete integration state, including distractors.
     """
-    if metadata.get("task_id") == GRASP_TASK_ID:
-        if (metadata.get("source_official_task_id") != GRASP_SOURCE_TASK_ID
+    target_only = {
+        GRASP_TASK_ID: (GRASP_SOURCE_TASK_ID, GRASP_CONTRACT, "Grasp"),
+        XMOVE_PICK_TASK_ID: (XMOVE_PICK_SOURCE_TASK_ID, XMOVE_PICK_CONTRACT, "XMovePick"),
+    }.get(metadata.get("task_id"))
+    if target_only is not None:
+        source, contract, label = target_only
+        if (metadata.get("source_official_task_id") != source
                 or metadata.get("evidence_object_roles") != ["target"]):
-            raise ValueError("Grasp requires its explicit official source and target-only role identity")
+            raise ValueError(label + " requires its explicit official source and target-only role identity")
         bindings = metadata.get("object_body_names", metadata.get("mujoco_object_body_names", {}))
         if not isinstance(bindings, dict) or set(bindings) != {"target"}:
-            raise ValueError("Grasp object bindings must contain only the actual target")
-        return GRASP_CONTRACT, ("target",)
+            raise ValueError(label + " object bindings must contain only the actual target")
+        return contract, ("target",)
     if metadata.get("evidence_object_roles") not in (None, ["target", "container"]):
-        raise ValueError("Target-only evidence is reserved for the explicit SONIC Grasp adapter")
+        raise ValueError("Target-only evidence is reserved for explicit SONIC task adapters")
     return CONTRACT, ("target", "container")
 
 
@@ -412,7 +420,7 @@ class DeferredStateCapture:
                     "saved_as_training_rgb": False, "pixels_saved": False,
                     "pixel_sha256": hashlib.sha256(pixels.tobytes()).hexdigest(),
                     "width": pixels.shape[1], "height": pixels.shape[0], "channels": 3, "dtype": "uint8"}
-            if self.contract == GRASP_CONTRACT and set(objects) != set(self.roles):
+            if self.contract in (GRASP_CONTRACT, XMOVE_PICK_CONTRACT) and set(objects) != set(self.roles):
                 raise ValueError("Measured objects must match the explicit evidence roles exactly")
             _validate_event(event, k, self.names, self.warmup_ticks, self.start_time, self.roles)
             self._verifier.check(event, state)

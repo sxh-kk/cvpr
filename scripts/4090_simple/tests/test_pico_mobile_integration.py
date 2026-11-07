@@ -161,7 +161,7 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
             model=SimpleNamespace(joint=joint), data=SimpleNamespace(time=0., joint=joint), BODY_JOINT_NAMES=["b" + str(i) for i in range(29)],
             physical_snapshot=lambda *_: {"body_q29": [0.] * 29}, root_pose=lambda *_: root.copy(),
             mobile_mode="navigation", mobile_tick=0, mobile_control=mobile, reference=reference,
-            grasp=False, tick_costs=entry.OperationCosts(), substep_costs=None,
+            grasp=False, target_only=False, xmove_pick=False, tick_costs=entry.OperationCosts(), substep_costs=None,
             mobile_continuous=False, mobile_policy="locked_upper_mode0", mobile_vr=None,
             mobile_follow_source_timestamp=None,
             mobile_preparation_wall=None,
@@ -613,6 +613,22 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(recorded[-1]["sim_time_s"], .04)
         self.assertEqual(recorded[-1]["contacts"], sample_rows[-1]["contacts"])
         self.assertEqual(recorded[-1]["original_live_support"], sample_rows[-1]["original_live_support"])
+        self.assertIsNone(namespace["pending_mobile_quality_row"])
+
+    def test_xmove_pick_native_result_keeps_same_step_reward_baseline_and_flag(self):
+        namespace = self.namespace()
+        buffer = io.StringIO()
+        namespace.update(target_only=True, xmove_pick=True, mobile=False,
+            pending_mobile_quality_row={"completed_steps": 51, "sim_time_s": 1.02},
+            quality_stream=buffer,
+            raw=SimpleNamespace(task=SimpleNamespace(_init_target_height=.45)),
+            env=SimpleNamespace(step=lambda command: ({}, .91, True, False, {})))
+        execute(step_and_native_block(), namespace)
+        row = json.loads(buffer.getvalue())
+        self.assertTrue(row["official_task_success"])
+        self.assertEqual(row["native_task_reward"], .91)
+        self.assertEqual(row["native_baseline_target_z_m"], .45)
+        self.assertEqual(row["completed_steps"], 51)
         self.assertIsNone(namespace["pending_mobile_quality_row"])
 
 

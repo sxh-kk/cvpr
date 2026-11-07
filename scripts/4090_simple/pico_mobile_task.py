@@ -15,6 +15,7 @@ PROFILES = {
     'handover': (HANDOVER_TASK, 'g1_wholebody_handover_teleop'),
     'mobile_pp': (MOBILE_TASK, 'g1_wholebody_locomotion_pick_between_tables_teleop'),
     'grasp': ('cvpr/G1SonicTabletopGraspPico-v0', 'g1_wholebody_tabletop_grasp_mp'),
+    'xmove_pick': ('cvpr/G1SonicXMovePickPico-v0', 'g1_wholebody_xmove_pick_teleop'),
 }
 
 

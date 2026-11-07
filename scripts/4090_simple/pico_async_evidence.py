@@ -91,6 +91,8 @@ class _EvidenceHandler:
             "file_identity": list(self.prepared._stat),
             "state_spec": self.prepared.spec, "state_width": self.prepared.verifier.width,
             "joint_names": self.prepared.names,
+            "physical_capture_contract": self.prepared.verifier.contract,
+            "evidence_object_roles": list(self.prepared.verifier.roles),
             "object_body_names": {role: self.prepared.model.body(body).name
                 for role, body in self.prepared.verifier.objects.items()},
             "model_loaded_from_authenticated_bytes": True,

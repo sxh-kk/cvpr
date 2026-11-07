@@ -181,7 +181,7 @@ def quality_geometry_outcome(directory, outcome):
 def _physical_precheck(directory, outcome, metadata):
     """Check raw recording integrity plus the explicitly dispatched task policy.
 
-    Mobile and SONIC Grasp select captured native success from their bound original task;
+    Mobile, SONIC Grasp and XMovePick select captured native success from their bound original task;
     Handover retains its existing physical/geometry gates. Neither trusts an
     outcome summary boolean or relabels technical failure as official failure.
     """
@@ -189,7 +189,11 @@ def _physical_precheck(directory, outcome, metadata):
     mobile = metadata.get("task_id") == MOBILE_TASK_ID
     from pico_grasp_quality import GRASP_TASK_ID
     grasp = metadata.get("task_id") == GRASP_TASK_ID
-    native_only = mobile or grasp
+    from pico_xmove_pick_quality import TASK_ID as XMOVE_PICK_TASK_ID
+    xmove_pick = metadata.get("task_id") == XMOVE_PICK_TASK_ID
+    target_only = grasp or xmove_pick
+    task_label = "Grasp" if grasp else "XMovePick"
+    native_only = mobile or target_only
     technical = []
     native_identity = None
     if mobile:
@@ -211,6 +215,11 @@ def _physical_precheck(directory, outcome, metadata):
     elif grasp:
         from pico_grasp_quality import validate_grasp_task_identity
         native_identity = validate_grasp_task_identity(metadata)
+        technical.extend(native_identity["errors"])
+        reasons.extend(technical)
+    elif xmove_pick:
+        from pico_xmove_pick_quality import validate_xmove_pick_task_identity
+        native_identity = validate_xmove_pick_task_identity(metadata)
         technical.extend(native_identity["errors"])
         reasons.extend(technical)
     if os.path.lexists(directory / "operator_discard.json"):
@@ -241,6 +250,8 @@ def _physical_precheck(directory, outcome, metadata):
             from pico_mobile_quality import evaluate_mobile_capture as evaluate_capture
         elif grasp:
             from pico_grasp_quality import evaluate_grasp_capture as evaluate_capture
+        elif xmove_pick:
+            from pico_xmove_pick_quality import evaluate_xmove_pick_capture as evaluate_capture
         else:
             raise ValueError("缺少或不支持的任务身份，不能套用交接验收：" + str(task_id))
         deferred = (directory / "deferred_capture").exists()
@@ -249,27 +260,28 @@ def _physical_precheck(directory, outcome, metadata):
             raise ValueError("capture目录不能是符号链接")
         capture = _json(capture_dir / "capture.json")
         expected = "raw_physics_capture_completed_pending_rtx" if deferred else "raw_capture_completed_pending_independent_audit"
-        if grasp:
+        if target_only:
             if not deferred:
-                raise ValueError("Grasp selection requires its target-only full-state deferred capture")
-            from pico_deferred_capture import GRASP_CONTRACT, evidence_object_roles, _validate_header
-            if (capture.get("contract") != GRASP_CONTRACT or type(capture.get("version")) is not int
+                raise ValueError(task_label + " selection requires its target-only full-state deferred capture")
+            from pico_deferred_capture import GRASP_CONTRACT, XMOVE_PICK_CONTRACT, evidence_object_roles, _validate_header
+            expected_contract = GRASP_CONTRACT if grasp else XMOVE_PICK_CONTRACT
+            if (capture.get("contract") != expected_contract or type(capture.get("version")) is not int
                     or capture["version"] != 1
                     or capture.get("metadata") != metadata or evidence_object_roles(metadata) != ("target",)
                     or capture.get("state_spec_name") != "mjSTATE_INTEGRATION"
                     or capture.get("states_dtype") != "float64"):
-                raise ValueError("Grasp target-only capture contract or original metadata identity differs")
+                raise ValueError(task_label + " target-only capture contract or original metadata identity differs")
             if any(type(capture.get(key)) is not int or capture[key] != value for key, value in
                    (("physics_hz", 200), ("decoder_hz", 50), ("command_rate_hz", 30))):
-                raise ValueError("Grasp capture must retain exact 200Hz physics/50Hz decoder/30Hz command clocks")
+                raise ValueError(task_label + " capture must retain exact 200Hz physics/50Hz decoder/30Hz command clocks")
             _validate_header(capture.get("joint_names", []),capture.get("warmup_ticks"),capture.get("start_time"))
             if (type(capture.get("warmup_seconds")) not in (int, float)
                     or capture["warmup_seconds"] != capture["warmup_ticks"] / 50
                     or any(capture.get(key) is not False for key in
                            ("accepted_new_dataset", "eligible_for_packing", "rtx_ready", "training_rgb_acquired"))):
-                raise ValueError("Grasp raw capture warmup or pending-RTX identity differs")
+                raise ValueError(task_label + " raw capture warmup or pending-RTX identity differs")
             if type(capture.get("command_event_count")) is not int or capture["command_event_count"] < 1:
-                raise ValueError("Grasp completed recording has no actual command observations")
+                raise ValueError(task_label + " completed recording has no actual command observations")
         if (capture.get("status") != expected or capture.get("failure") is not None
                 or capture.get("accepted_new_dataset") is not False):
             raise ValueError("capture未完整结束或存在写入失败")
@@ -283,11 +295,11 @@ def _physical_precheck(directory, outcome, metadata):
             states = np.load(capture_dir / "states.npy", mmap_mode="r", allow_pickle=False)
             if states.shape != (capture["event_count"], capture["state_width"]) or not np.isfinite(states).all():
                 raise ValueError("完整物理状态矩阵缺帧或非有限")
-            if grasp:
+            if target_only:
                 import mujoco
                 if (states.dtype != np.dtype(np.float64)
                         or capture.get("state_spec") != int(mujoco.mjtState.mjSTATE_INTEGRATION)):
-                    raise ValueError("Grasp requires lossless float64 complete mjSTATE_INTEGRATION")
+                    raise ValueError(task_label + " requires lossless float64 complete mjSTATE_INTEGRATION")
         else:
             receipt_path = capture_dir / "async_capture.json"
             receipt = _json(receipt_path)
@@ -318,14 +330,14 @@ def _physical_precheck(directory, outcome, metadata):
                         or not image.resolve().is_relative_to(capture_dir.resolve())
                         or _sha(image) != event["rgb"]["file_sha256"]):
                     raise ValueError("RGB图像缺失、路径越界或SHA不一致")
-        if grasp and any(set(event.get("objects", {})) != {"target"} for event in events):
-            raise ValueError("Grasp events must retain exactly the real target role, without a fabricated container")
-        if grasp:
+        if target_only and any(set(event.get("objects", {})) != {"target"} for event in events):
+            raise ValueError(task_label + " events must retain exactly the real target role, without a fabricated container")
+        if target_only:
             from pico_deferred_capture import _validate_event
             for index, event in enumerate(events):
                 _validate_event(event,index,capture["joint_names"],capture["warmup_ticks"],capture["start_time"],("target",))
                 if hashlib.sha256(np.ascontiguousarray(states[index]).tobytes()).hexdigest() != event.get("integration_state_sha256"):
-                    raise ValueError("Grasp original full integration row SHA differs")
+                    raise ValueError(task_label + " original full integration row SHA differs")
         initial = np.asarray(events[0]["objects"]["target"]["pose7"][:3], dtype=float)
         if not native_only and "initial_target_z_m" not in metadata:
             raise ValueError("缺少绑定的初始物体高度元数据")
@@ -336,8 +348,8 @@ def _physical_precheck(directory, outcome, metadata):
         quality_path = directory / ("raw_quality_samples.jsonl" if native_only and os.path.lexists(
             directory / "raw_quality_samples.jsonl") else "quality_samples.jsonl")
         qualities = _json(quality_path, lines=True)
-        if grasp and quality_path.name != "raw_quality_samples.jsonl":
-            raise ValueError("Grasp requires original target-only raw solved/native samples")
+        if target_only and quality_path.name != "raw_quality_samples.jsonl":
+            raise ValueError(task_label + " requires original target-only raw solved/native samples")
         if native_only:
             raw_digest = _sha(quality_path)
             prior_record_path = directory / "collection_record.json"
@@ -447,9 +459,12 @@ def _physical_precheck(directory, outcome, metadata):
         reasons.append("记录完整性验收失败：" + str(error))
         technical.append(reasons[-1])
     if native_only:
-        quality_name = "pico_grasp_quality.py" if grasp else "pico_mobile_quality.py"
+        quality_name = ("pico_grasp_quality.py" if grasp else
+                        "pico_xmove_pick_quality.py" if xmove_pick else "pico_mobile_quality.py")
         if grasp:
             from pico_grasp_quality import GATE_VERSION
+        elif xmove_pick:
+            from pico_xmove_pick_quality import GATE_VERSION
         else:
             from pico_mobile_quality import GATE_VERSION
         report.update(selection_policy="native_only", technical_errors=list(dict.fromkeys(technical)),
@@ -460,7 +475,7 @@ def _physical_precheck(directory, outcome, metadata):
         if technical:
             report.setdefault("official_task_success_observed", None)
             report.setdefault("native_success_evidence_complete", False)
-            if grasp:
+            if target_only:
                 report["native_success_evidence_complete"] = False
             report.update(selection_status="technical_evidence_incomplete", eligible_physics=False,
                           official_task_success=None)

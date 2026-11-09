@@ -27,19 +27,23 @@ GRASP_SOURCE_TASK_ID = "simple/G1WholebodyTabletopGraspMP-v0"
 XMOVE_PICK_CONTRACT = "cvpr-live-pico-xmove-pick-deferred-physical-capture-v1"
 XMOVE_PICK_TASK_ID = "cvpr/G1SonicXMovePickPico-v0"
 XMOVE_PICK_SOURCE_TASK_ID = "simple/G1WholebodyXMovePickTeleop-v0"
+BEND_PICK_CONTRACT = "cvpr-live-pico-bend-pick-deferred-physical-capture-v1"
+BEND_PICK_TASK_ID = "cvpr/G1SonicBendPickPico-v0"
+BEND_PICK_SOURCE_TASK_ID = "simple/G1WholebodyBendPickMP-v0"
 PENDING = "raw_physics_capture_completed_pending_rtx"
 
 
 def evidence_profile(metadata):
     """Choose explicit object roles without changing the legacy v1 schema.
 
-    The independent SONIC Grasp and XMovePick adapters have separate target-only
+    The independent SONIC Grasp, XMovePick and BendPick adapters have target-only
     contracts. Unknown tasks cannot opt into them by omitting a container binding.
     All actors remain in the complete integration state, including distractors.
     """
     target_only = {
         GRASP_TASK_ID: (GRASP_SOURCE_TASK_ID, GRASP_CONTRACT, "Grasp"),
         XMOVE_PICK_TASK_ID: (XMOVE_PICK_SOURCE_TASK_ID, XMOVE_PICK_CONTRACT, "XMovePick"),
+        BEND_PICK_TASK_ID: (BEND_PICK_SOURCE_TASK_ID, BEND_PICK_CONTRACT, "BendPick"),
     }.get(metadata.get("task_id"))
     if target_only is not None:
         source, contract, label = target_only
@@ -420,7 +424,7 @@ class DeferredStateCapture:
                     "saved_as_training_rgb": False, "pixels_saved": False,
                     "pixel_sha256": hashlib.sha256(pixels.tobytes()).hexdigest(),
                     "width": pixels.shape[1], "height": pixels.shape[0], "channels": 3, "dtype": "uint8"}
-            if self.contract in (GRASP_CONTRACT, XMOVE_PICK_CONTRACT) and set(objects) != set(self.roles):
+            if self.contract in (GRASP_CONTRACT, XMOVE_PICK_CONTRACT, BEND_PICK_CONTRACT) and set(objects) != set(self.roles):
                 raise ValueError("Measured objects must match the explicit evidence roles exactly")
             _validate_event(event, k, self.names, self.warmup_ticks, self.start_time, self.roles)
             self._verifier.check(event, state)

@@ -225,3 +225,7 @@ Level 0为3/10、Level 1为4/10、Level 2为3/10，合计10/30原生成功，技
 ## PICO XMovePick走近抓取采集
 
 独立XMovePick入口现支持连续双臂VR＋摇杆行走、官方99份TRAIN初始化与target-only原生成功复核。实际布置恢复、源材质缺失限制、操作及启动验收见[采集说明](docs/PICO_XMOVE_PICK_COLLECTION.md)。Grasp、Handover与Mobile数据和进度独立。
+
+## PICO BendPick原地弯腰抓取
+
+BendPick使用独立官方100初始化、AMO世界适配和现有全身SMPL mode2。先以仅跟随禁录制模式验证腰髋膝响应和低桌可达，再开放正式采集；启动和限制见[采集说明](docs/PICO_BEND_PICK_COLLECTION.md)。原任务原生成功判据与既有四任务保持独立。

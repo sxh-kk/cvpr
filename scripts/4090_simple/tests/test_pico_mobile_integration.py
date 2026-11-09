@@ -161,7 +161,7 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
             model=SimpleNamespace(joint=joint), data=SimpleNamespace(time=0., joint=joint), BODY_JOINT_NAMES=["b" + str(i) for i in range(29)],
             physical_snapshot=lambda *_: {"body_q29": [0.] * 29}, root_pose=lambda *_: root.copy(),
             mobile_mode="navigation", mobile_tick=0, mobile_control=mobile, reference=reference,
-            grasp=False, target_only=False, xmove_pick=False, bend_pick=False,
+            grasp=False, target_only=False, xmove_pick=False, bend_pick=False, xmove_bend_pick=False, joystick_task=True,
             mode1_task=False, tick_costs=entry.OperationCosts(), substep_costs=None,
             mobile_continuous=False, mobile_policy="locked_upper_mode0", mobile_vr=None,
             mobile_follow_source_timestamp=None,
@@ -275,6 +275,7 @@ class CollectorMobileIntegrationTests(unittest.TestCase):
         namespace["mobile_continuous"] = False
         self.assertEqual(namespace["operator_buttons"]({"B": True}, {}), ["toggle_navigation"])
         namespace["mobile"] = False
+        namespace["joystick_task"] = False
         self.assertEqual(namespace["operator_buttons"]({"B": True}, {}), [])
 
     def test_continuous_follow_prepares_while_paused_then_requires_fresh_neutral_packet(self):

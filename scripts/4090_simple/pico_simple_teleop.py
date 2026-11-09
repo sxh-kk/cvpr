@@ -156,7 +156,8 @@ EPISODE_SESSION_FIELDS = (
     'mobile_planner_model_sha256','actual_task_source_sha256',
     'actual_native_success_criteria','mobile_cold_start_profile','evidence_writer_protocol',
     'source_official_task_id','grasp_adapter_identity','xmove_pick_adapter_identity','bend_pick_adapter_identity',
-    'bend_pick_encoder_mode','bend_pick_control_policy','operator_test_only','evidence_object_roles')
+    'bend_pick_encoder_mode','bend_pick_control_policy','xmove_bend_pick_adapter_identity',
+    'xmove_bend_pick_control_policy','xmove_bend_pick_encoder_modes','operator_test_only','evidence_object_roles')
 
 
 def episode_session_identity(session_result):
@@ -285,8 +286,10 @@ def load_environment_config(path, data_root, *, profile='handover', rebind_offic
                     if '://' in item:
                         raise ValueError('Remote resource in environment config: '+label)
                     official_prefixes = ('/home/wenke/SIMPLE/data/',)
-                    if profile == 'xmove_pick':
+                    if profile in ('xmove_pick','xmove_bend_pick'):
                         official_prefixes += ('/home/songlin/workspace/projects/SIMPLE/data/',)
+                    if profile == 'xmove_bend_pick':
+                        official_prefixes += ('/home/wsco/NewDisk/SIMPLE/data/',)
                     source_prefix = next((prefix for prefix in official_prefixes if item.startswith(prefix)),None)
                     if rebind_official_paths and source_prefix:
                         relocated = str(data_root/item.removeprefix(source_prefix))
@@ -322,6 +325,9 @@ def load_environment_config(path, data_root, *, profile='handover', rebind_offic
     if profile == 'bend_pick':
         from pico_bend_pick_task import adapt_official_config
         state,receipt['bend_pick_frame_adaptation'] = adapt_official_config(state)
+    if profile == 'xmove_bend_pick':
+        from pico_xmove_bend_pick_task import adapt_official_config
+        state,receipt['xmove_bend_pick_adaptation'] = adapt_official_config(state)
     return state,receipt
 
 
@@ -707,13 +713,15 @@ def prepare_deferred_cache(prepare_function, output, index, *, model, objects, j
     grasp = task_id == 'cvpr/G1SonicTabletopGraspPico-v0'
     xmove_pick = task_id == 'cvpr/G1SonicXMovePickPico-v0'
     bend_pick = task_id == 'cvpr/G1SonicBendPickPico-v0'
-    roles = ('target',) if grasp or xmove_pick or bend_pick else ('target','container')
+    xmove_bend_pick = task_id == 'cvpr/G1SonicXMoveBendPickPico-v0'
+    roles = ('target',) if grasp or xmove_pick or bend_pick or xmove_bend_pick else ('target','container')
     bindings = {role:model.body(objects[role].id).name for role in roles}
     metadata = {'object_body_names':bindings}
-    if grasp or xmove_pick or bend_pick:
+    if grasp or xmove_pick or bend_pick or xmove_bend_pick:
         metadata.update(task_id=task_id,evidence_object_roles=list(roles),
             source_official_task_id=('simple/G1WholebodyTabletopGraspMP-v0' if grasp
                 else 'simple/G1WholebodyBendPickMP-v0' if bend_pick
+                else 'simple/G1WholebodyXMoveBendPickTeleop-v0' if xmove_bend_pick
                 else 'simple/G1WholebodyXMovePickTeleop-v0'))
     started = time.perf_counter()
     prepared = prepare_function(directory,model=model,joint_names=list(joint_names),
@@ -986,12 +994,18 @@ def run(args):
     grasp = profile == 'grasp'
     xmove_pick = profile == 'xmove_pick'
     bend_pick = profile == 'bend_pick'
+    xmove_bend_pick = profile == 'xmove_bend_pick'
+    joystick_task = mobile or xmove_bend_pick
     mode1_task = grasp or xmove_pick
-    target_only = mode1_task or bend_pick
+    target_only = mode1_task or bend_pick or xmove_bend_pick
     object_roles = ('target',) if target_only else ('target','container')
     mobile_policy = getattr(args,'mobile_control_policy','continuous_vr_mode1')
     if mode1_task and mobile_policy != 'continuous_vr_mode1':
         raise ValueError('Target-only tasks require their explicit live-VR mode1 control policy')
+    if xmove_bend_pick and mobile_policy != 'locked_upper_mode0':
+        raise ValueError('XMoveBendPick requires joystick mode0 navigation and full-body mode2 manipulation')
+    if not xmove_bend_pick and (getattr(args,'xmove_bend_pick_collection_plan',None) or getattr(args,'xmove_bend_pick_collection_progress',None)):
+        raise ValueError('XMoveBendPick initialization options cannot be used by another task')
     if not grasp and (getattr(args,'grasp_collection_plan',None) or getattr(args,'grasp_collection_progress',None)):
         raise ValueError('Grasp initialization options cannot be used by another task')
     if not xmove_pick and (getattr(args,'xmove_pick_collection_plan',None) or getattr(args,'xmove_pick_collection_progress',None)):
@@ -1001,13 +1015,16 @@ def run(args):
     if not mobile and (getattr(args,'mobile_collection_plan',None) or getattr(args,'mobile_collection_progress',None) or getattr(args,'mobile_cold_start',None)):
         raise ValueError('Mobile initialization options cannot be used by another task')
     mobile_continuous = mode1_task or (mobile and mobile_policy == 'continuous_vr_mode1')
-    collection_prefix = 'bend_pick' if bend_pick else 'xmove_pick' if xmove_pick else 'grasp' if grasp else 'mobile'
+    collection_prefix = 'xmove_bend_pick' if xmove_bend_pick else 'bend_pick' if bend_pick else 'xmove_pick' if xmove_pick else 'grasp' if grasp else 'mobile'
     collection_plan = getattr(args,collection_prefix+'_collection_plan',None)
     collection_progress = None
     if collection_plan:
         if not (mobile or target_only) or args.environment_config or args.pico_replay:
             raise ValueError('Official initialization collection requires an explicit live task and no fixed config/replay')
-        if bend_pick:
+        if xmove_bend_pick:
+            from pico_xmove_bend_pick_collection_plan import load_plan
+            from pico_xmove_bend_pick_collection_progress import CollectionProgress
+        elif bend_pick:
             from pico_bend_pick_collection_plan import load_plan
             from pico_bend_pick_collection_progress import CollectionProgress
         elif xmove_pick:
@@ -1020,7 +1037,7 @@ def run(args):
             from pico_mobile_collection_plan import load_plan
             from pico_mobile_collection_progress import CollectionProgress
         rows = load_plan(collection_plan)
-        progress_path = getattr(args,collection_prefix+'_collection_progress',None) or output.parent/('official100_progress.json' if grasp or bend_pick else 'official99_progress.json')
+        progress_path = getattr(args,collection_prefix+'_collection_progress',None) or output.parent/('official100_progress.json' if grasp or bend_pick or xmove_bend_pick else 'official99_progress.json')
         collection_progress = CollectionProgress(rows,progress_path)
         if collection_progress.current is None:
             collection_progress.close()
@@ -1093,7 +1110,7 @@ def run(args):
         'path':None,'uuid':None,'discarded':False,'error':None}
     operator_message = '请戴好头显、站直并校准，再开始下一条录制。'
     reference = PicoSonicReference(resources, args.human_info)
-    if mobile or mode1_task:
+    if joystick_task or mode1_task:
         from pico_mobile_control import (MobilePlannerControl, CONTRACT as MOBILE_CONTROL_CONTRACT,
             CONTINUOUS_CONTRACT)
         if mobile_continuous:
@@ -1102,7 +1119,7 @@ def run(args):
             MOBILE_CONTROL_CONTRACT = CONTINUOUS_CONTRACT
         from sonic_locomotion_planner import MODEL_SHA256
         if not getattr(args,'planner_model',None):
-            raise ValueError('Mobile P&P requires the explicit pinned planner model')
+            raise ValueError('Joystick collection requires the explicit pinned planner model')
         if grasp:
             from pico_grasp_control import GraspStandingControl, CONTRACT as GRASP_CONTROL_CONTRACT
             mobile_control = GraspStandingControl(args.planner_model)
@@ -1127,6 +1144,13 @@ def run(args):
                 'sonic_locomotion_planner.py','pico_mobile_quality.py','pico_mobile_vr_reference.py',
                 'handover_sonic_teleop_reference.py','start_pico_mobile_pp.sh'):
             result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
+    if xmove_bend_pick:
+        from pico_xmove_bend_pick_collection_plan import SOURCE_TASK_ID
+        result.update(source_official_task_id=SOURCE_TASK_ID,evidence_object_roles=['target'],
+            xmove_bend_pick_control_policy='joystick_mode0_full_body_mode2',
+            xmove_bend_pick_encoder_modes=[0,2])
+        for name in ('pico_xmove_bend_pick_task.py','pico_xmove_bend_pick_quality.py','start_pico_xmove_bend_pick.sh'):
+            result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
     if bend_pick:
         from pico_bend_pick_collection_plan import SOURCE_TASK_ID
         result.update(source_official_task_id=SOURCE_TASK_ID,evidence_object_roles=['target'],
@@ -1134,7 +1158,7 @@ def run(args):
         for name in ('pico_bend_pick_task.py','pico_bend_pick_quality.py','start_pico_bend_pick.sh'):
             result['source_code_sha256_at_session_start'][name]=file_sha256(Path(__file__).with_name(name))
     def operator_buttons(buttons, previous):
-        return collection_buttons(buttons,previous,mobile=mobile and not mobile_continuous)
+        return collection_buttons(buttons,previous,mobile=joystick_task and not mobile_continuous)
     pairing = {'body_token_version':'body_token_v1_1','compatibility_verified':True,
         'decoder_sha256':'34bae8570d4a4421a5391a5c2befd745d4a02d182ec539e5f9da44c091c67509',
         'evidence':{'scope':'Only new tokens generated here by fixed matching official encoder, not old dataset tokens',
@@ -1158,6 +1182,11 @@ def run(args):
                 quality_geometry_mode='bend_pick_native_height_no_container_geometry',
                 native_baseline_target_z_m=float(raw.task._init_target_height),
                 bend_pick_frame_adaptation=copy.deepcopy(environment_receipt['bend_pick_frame_adaptation']))
+        if xmove_bend_pick:
+            metadata.update(evidence_object_roles=['target'],
+                quality_geometry_mode='xmove_bend_pick_native_height_no_container_geometry',
+                native_baseline_target_z_m=float(raw.task._init_target_height),
+                xmove_bend_pick_adaptation=copy.deepcopy(raw.task.frame_receipt))
         if xmove_pick:
             metadata.update(evidence_object_roles=['target'],
                 quality_geometry_mode='xmove_pick_native_height_no_container_geometry',
@@ -1266,6 +1295,12 @@ def run(args):
             env = SonicLocoManipEnv(task=task,sonic_config=config,
                 sim_mode='mujoco',headless=True,dr_level=0,sync_mujoco_observations=True)
             install_frame_adapter(env)
+        elif xmove_bend_pick:
+            from pico_xmove_bend_pick_task import make_xmove_bend_pick_task
+            from simple.envs.sonic_loco_manip import SonicLocoManipEnv
+            task = make_xmove_bend_pick_task(config,adapted_config=environment_state)
+            env = SonicLocoManipEnv(task=task,sonic_config=config,
+                sim_mode='mujoco',headless=True,dr_level=0,sync_mujoco_observations=True)
         elif xmove_pick:
             from pico_xmove_pick_task import make_xmove_pick_task
             from simple.envs.sonic_loco_manip import SonicLocoManipEnv
@@ -1299,7 +1334,11 @@ def run(args):
             from pico_xmove_pick_task import adapter_identity
             result['xmove_pick_adapter_identity'] = adapter_identity()
             result['actual_task_source_sha256'] = result['xmove_pick_adapter_identity']['official_task_source_sha256']
-        if mobile or xmove_pick:
+        if xmove_bend_pick:
+            from pico_xmove_bend_pick_task import adapter_identity
+            result['xmove_bend_pick_adapter_identity'] = adapter_identity()
+            result['actual_task_source_sha256'] = result['xmove_bend_pick_adapter_identity']['official_task_source_sha256']
+        if mobile or xmove_pick or xmove_bend_pick:
             result['actual_native_success_criteria'] = float(raw.task.success_criteria)
         if environment_state:
             result['saved_scene_manager_binding'] = bind_saved_scene_manager(raw.task,environment_state)
@@ -1328,6 +1367,9 @@ def run(args):
             if bend_pick:
                 from pico_bend_pick_task import bend_pick_environment_binding_receipt
                 result['environment_config_binding'] = bend_pick_environment_binding_receipt(environment_state,actual_environment)
+            elif xmove_bend_pick:
+                from pico_xmove_bend_pick_task import xmove_bend_pick_environment_binding_receipt
+                result['environment_config_binding'] = xmove_bend_pick_environment_binding_receipt(environment_state,actual_environment)
             elif xmove_pick:
                 from pico_xmove_pick_task import xmove_pick_environment_binding_receipt
                 result['environment_config_binding'] = xmove_pick_environment_binding_receipt(environment_state,actual_environment)
@@ -1412,6 +1454,8 @@ def run(args):
                 if target_only:
                     if bend_pick:
                         from pico_bend_pick_quality import sample_bend_pick_solved_quality as sample_target_quality
+                    elif xmove_bend_pick:
+                        from pico_xmove_bend_pick_quality import sample_xmove_bend_pick_solved_quality as sample_target_quality
                     elif xmove_pick:
                         from pico_xmove_pick_quality import sample_xmove_pick_solved_quality as sample_target_quality
                     else:
@@ -1699,7 +1743,8 @@ def run(args):
             obs, _ = env.reset(seed=args.seed,options=reset_options)
             renderer_environment_config = copy.deepcopy(raw.task.state_dict())
             if environment_state:
-                binding = (bend_pick_environment_binding_receipt(environment_state,raw.task.state_dict()) if bend_pick
+                binding = (xmove_bend_pick_environment_binding_receipt(environment_state,raw.task.state_dict()) if xmove_bend_pick
+                    else bend_pick_environment_binding_receipt(environment_state,raw.task.state_dict()) if bend_pick
                     else xmove_pick_environment_binding_receipt(environment_state,raw.task.state_dict()) if xmove_pick
                     else grasp_environment_binding_receipt(environment_state,raw.task.state_dict()) if grasp
                     else environment_binding_receipt(environment_state,raw.task.state_dict()))
@@ -1873,7 +1918,7 @@ def run(args):
                         if mobile_continuous:
                             operator_message='连续控制无需B切换：双臂始终跟随，左杆前进、右杆转向。'
                             continue
-                        if not mobile or not following or not quality['valid']:
+                        if not joystick_task or not following or not quality['valid']:
                             raise ValueError('移动模式需要有效追踪、标定并开始跟随')
                         if not mobile_stopped.ready or (episode and episode.status != 'recording'):
                             operator_message='请松开摇杆并连续站稳半秒后再按B；当前录制继续。'
@@ -1917,7 +1962,8 @@ def run(args):
                             mobile_mode = 'pose'
                             mobile_preparation = None
                             mobile_entry_smpl = None
-                            operator_message='已恢复手臂操作，可以放入第二张桌子的容器。'
+                            operator_message=('已切到全身弯腰跟随；摇杆暂停，原地屈膝弯腰抓起饼干盒。' if xmove_bend_pick
+                                else '已恢复手臂操作，可以放入第二张桌子的容器。')
                         else:
                             operator_message='移动模式正在准备，请等候；也可以按Y暂停。'
                             continue
@@ -2250,7 +2296,7 @@ def run(args):
                     finite = all(np.isfinite(x).all() for x in (data.qpos,data.qvel,data.qacc,data.ctrl))
                     pelvis=model.body('pelvis').id
                     tilt=float(np.degrees(np.arccos(np.clip(data.xmat[pelvis].reshape(3,3)[2,2],-1,1))))
-                    if mobile:
+                    if joystick_task:
                         mobile_stopped.observe(global_tick,frame,actual_root_velocity(model,data),
                             tilt_deg=tilt,tracking_valid=quality['valid'])
                     if not finite or data.xpos[pelvis,2] < .35 or tilt > 75 or truncated:
@@ -2347,10 +2393,10 @@ def run(args):
                     last_preview_time = preview_time
             ui.update({'status':'following' if following else 'paused','source_kind':result['source_kind'],
                 'task_id':task_id,'collection_task_profile':profile,'mobile_mode':mobile_mode,
-                'mobile_control_policy':mobile_policy if mobile or mode1_task else 'full_body_smpl_mode2' if bend_pick else None,
+                'mobile_control_policy':mobile_policy if joystick_task or mode1_task else 'full_body_smpl_mode2' if bend_pick else None,
                 'operator_test_only':bool(getattr(args,'operator_test_only',False)),
                 'mobile_planner':mobile_control.status() if mobile_control else None,
-                'mobile_stopped_for_mode_transition':mobile_stopped.ready if mobile else None,
+                'mobile_stopped_for_mode_transition':mobile_stopped.ready if joystick_task else None,
                 'operator_message':operator_message,'last_episode':history_status,
                 'background_review':review_status,
                 'mobile_collection_progress':collection_progress.receipt() if collection_progress else None,
@@ -2439,7 +2485,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     runtime=Path('/home/zxc/CVPR_Evaluation_runtime')
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--task',choices=('handover','mobile_pp','grasp','xmove_pick','bend_pick'),default='handover')
+    parser.add_argument('--task',choices=('handover','mobile_pp','grasp','xmove_pick','bend_pick','xmove_bend_pick'),default='handover')
     parser.add_argument('--mobile-control-policy',choices=('continuous_vr_mode1','locked_upper_mode0'),
         default='continuous_vr_mode1',help='Mobile default: live arms and joystick legs, no B switch')
     parser.add_argument('--planner-model',type=Path,help='Pinned official planner for Mobile P&P only')
@@ -2464,6 +2510,8 @@ def main():
     parser.add_argument('--xmove-pick-collection-progress',type=Path,help='XMovePick-only durable official99 progress')
     parser.add_argument('--bend-pick-collection-plan',type=Path,help='Frozen BendPick official TRAIN100 initialization manifest')
     parser.add_argument('--bend-pick-collection-progress',type=Path,help='BendPick-only durable official100 progress')
+    parser.add_argument('--xmove-bend-pick-collection-plan',type=Path,help='Frozen XMoveBendPick official TRAIN100 manifest')
+    parser.add_argument('--xmove-bend-pick-collection-progress',type=Path,help='XMoveBendPick-only durable official100 progress')
     parser.add_argument('--pico-ip',default='172.16.20.83',help='Expected headset peer for video bridge')
     parser.add_argument('--seed',type=int,default=20261025)
     parser.add_argument('--port',type=int,default=43100)

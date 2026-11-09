@@ -181,7 +181,7 @@ def quality_geometry_outcome(directory, outcome):
 def _physical_precheck(directory, outcome, metadata):
     """Check raw recording integrity plus the explicitly dispatched task policy.
 
-    Mobile, SONIC Grasp, XMovePick and BendPick select captured native success from their bound original task;
+    Mobile and explicit SONIC pick adapters select captured native success from their bound original task;
     Handover retains its existing physical/geometry gates. Neither trusts an
     outcome summary boolean or relabels technical failure as official failure.
     """
@@ -193,8 +193,11 @@ def _physical_precheck(directory, outcome, metadata):
     xmove_pick = metadata.get("task_id") == XMOVE_PICK_TASK_ID
     from pico_bend_pick_quality import TASK_ID as BEND_PICK_TASK_ID
     bend_pick = metadata.get("task_id") == BEND_PICK_TASK_ID
-    target_only = grasp or xmove_pick or bend_pick
-    task_label = "Grasp" if grasp else "XMovePick" if xmove_pick else "BendPick"
+    from pico_xmove_bend_pick_quality import TASK_ID as XMOVE_BEND_PICK_TASK_ID
+    xmove_bend_pick = metadata.get("task_id") == XMOVE_BEND_PICK_TASK_ID
+    target_only = grasp or xmove_pick or bend_pick or xmove_bend_pick
+    task_label = ("Grasp" if grasp else "XMovePick" if xmove_pick else
+                  "BendPick" if bend_pick else "XMoveBendPick")
     native_only = mobile or target_only
     technical = []
     native_identity = None
@@ -229,6 +232,11 @@ def _physical_precheck(directory, outcome, metadata):
         native_identity = validate_bend_pick_task_identity(metadata)
         technical.extend(native_identity["errors"])
         reasons.extend(technical)
+    elif xmove_bend_pick:
+        from pico_xmove_bend_pick_quality import validate_xmove_bend_pick_task_identity
+        native_identity = validate_xmove_bend_pick_task_identity(metadata)
+        technical.extend(native_identity["errors"])
+        reasons.extend(technical)
     if os.path.lexists(directory / "operator_discard.json"):
         reasons.append("操作员已标记丢弃此记录")
     if "physical_gate_error" in outcome:
@@ -261,6 +269,8 @@ def _physical_precheck(directory, outcome, metadata):
             from pico_xmove_pick_quality import evaluate_xmove_pick_capture as evaluate_capture
         elif bend_pick:
             from pico_bend_pick_quality import evaluate_bend_pick_capture as evaluate_capture
+        elif xmove_bend_pick:
+            from pico_xmove_bend_pick_quality import evaluate_xmove_bend_pick_capture as evaluate_capture
         else:
             raise ValueError("缺少或不支持的任务身份，不能套用交接验收：" + str(task_id))
         deferred = (directory / "deferred_capture").exists()
@@ -272,8 +282,8 @@ def _physical_precheck(directory, outcome, metadata):
         if target_only:
             if not deferred:
                 raise ValueError(task_label + " selection requires its target-only full-state deferred capture")
-            from pico_deferred_capture import GRASP_CONTRACT, XMOVE_PICK_CONTRACT, BEND_PICK_CONTRACT, evidence_object_roles, _validate_header
-            expected_contract = GRASP_CONTRACT if grasp else XMOVE_PICK_CONTRACT if xmove_pick else BEND_PICK_CONTRACT
+            from pico_deferred_capture import evidence_profile, evidence_object_roles, _validate_header
+            expected_contract = evidence_profile(metadata)[0]
             if (capture.get("contract") != expected_contract or type(capture.get("version")) is not int
                     or capture["version"] != 1
                     or capture.get("metadata") != metadata or evidence_object_roles(metadata) != ("target",)
@@ -470,13 +480,16 @@ def _physical_precheck(directory, outcome, metadata):
     if native_only:
         quality_name = ("pico_grasp_quality.py" if grasp else
                         "pico_xmove_pick_quality.py" if xmove_pick else
-                        "pico_bend_pick_quality.py" if bend_pick else "pico_mobile_quality.py")
+                        "pico_bend_pick_quality.py" if bend_pick else
+                        "pico_xmove_bend_pick_quality.py" if xmove_bend_pick else "pico_mobile_quality.py")
         if grasp:
             from pico_grasp_quality import GATE_VERSION
         elif xmove_pick:
             from pico_xmove_pick_quality import GATE_VERSION
         elif bend_pick:
             from pico_bend_pick_quality import GATE_VERSION
+        elif xmove_bend_pick:
+            from pico_xmove_bend_pick_quality import GATE_VERSION
         else:
             from pico_mobile_quality import GATE_VERSION
         report.update(selection_policy="native_only", technical_errors=list(dict.fromkeys(technical)),

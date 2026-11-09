@@ -229,3 +229,7 @@ Level 0为3/10、Level 1为4/10、Level 2为3/10，合计10/30原生成功，技
 ## PICO BendPick原地弯腰抓取
 
 BendPick使用独立官方100初始化、AMO世界适配和现有全身SMPL mode2。先以仅跟随禁录制模式验证腰髋膝响应和低桌可达，再开放正式采集；启动和限制见[采集说明](docs/PICO_BEND_PICK_COLLECTION.md)。原任务原生成功判据与既有四任务保持独立。
+
+### PICO XMoveBendPick 摇杆走近后弯腰抓取
+
+新增独立官方TRAIN100初始化采集入口 `scripts/4090_simple/start_pico_xmove_bend_pick.sh`。按B切换既有摇杆mode0导航与全身mode2弯腰跟随，移动阶段保持上身，停稳并恢复入场人体姿态后再切回弯腰；完整录制覆盖走近和抓取。原生任务判据、原始状态证据和后续RTX独立验收保留，既有任务默认控制不变。操作与限制见 [PICO XMoveBendPick](docs/PICO_XMOVE_BEND_PICK_COLLECTION.md)。

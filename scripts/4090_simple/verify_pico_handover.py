@@ -9,6 +9,7 @@ import argparse
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -39,7 +40,7 @@ def production_protocol(task_id):
     protocol = task_protocol(task_id)
     kind = protocol['kind']
     return {**protocol,
-        'production_contract':GRASP_CONTRACT if protocol['grasp'] else MOBILE_CONTRACT if protocol['mobile'] else CONTRACT,
+        'production_contract':'cvpr-pico-pick-production-verification-v1' if protocol['pick'] else GRASP_CONTRACT if protocol['grasp'] else MOBILE_CONTRACT if protocol['mobile'] else CONTRACT,
         'relocation_contract':f'cvpr-pico-{kind}-dino-host-relocation-v1',
         'transfer_contract':f'cvpr-pico-{kind}-a100-byte-transfer-v1',
         'byte_contract':f'cvpr-pico-{kind}-a100-byte-verification-v1'}
@@ -110,7 +111,7 @@ def inspect_pack(pack, *, expected_episodes=None):
     for relative,digest in payload.items():
         require(identity(owned(pack,relative))['sha256']==digest,'Packed bytes changed: '+relative)
     require(all(name in payload for name in SOURCE_FILES),'Missing inherited checkpoint contract files')
-    if protocol['grasp']:
+    if protocol['target_only']:
         info=read(owned(pack,'train/meta/info.json'))
         target=info.get('features',{}).get('observation.object_poses',{})
         names=['target.'+name for name in ('pos_x','pos_y','pos_z','quat_w','quat_x','quat_y','quat_z')]
@@ -193,14 +194,14 @@ def inspect_pack(pack, *, expected_episodes=None):
                         and isinstance(source.get('filename'),str) and copy.get('filename')==source['filename'],
                         'Native-task historical implementation role differs')
                 shared_original_evidence(pack,payload,admission,copy,source.get('path'),source.get('sha256'),'capture implementation')
-        if protocol['grasp']:
-            from pack_pico_handover import grasp_batch_sources
-            batch=grasp_batch_sources(admission)
+        if protocol['grasp'] or protocol['pick']:
+            from pack_pico_handover import grasp_batch_sources, pick_batch_sources
+            batch=pick_batch_sources(admission) if protocol['pick'] else grasp_batch_sources(admission)
             if metadata.get('render_mode')=='mujoco_deferred':
                 completion=read(owned(pack,evidence.get('rtx_completion.json')))
                 require((completion.get('batch_execution') is None)==(batch is None),
                         'Grasp batch admission and original renderer producer differ')
-            archived_batch=entry.get('grasp_batch_execution_files')
+            archived_batch=entry.get('pick_batch_execution_files' if protocol['pick'] else 'grasp_batch_execution_files')
             if batch is None:
                 require(archived_batch is None,'Single-episode Grasp producer cannot claim batch evidence')
             else:
@@ -234,6 +235,15 @@ def inspect_pack(pack, *, expected_episodes=None):
                 and video.get('frames')==episode['length'] and video.get('fps')==30
                 and video.get('pixels_exact') is True,
                 'Parquet/video SHA binding differs')
+        if protocol['pick']:
+            completion=read(owned(pack,evidence['rtx_completion.json']))
+            producers=completion.get('producer_source_sha256',{})
+            archived=entry.get('pick_renderer_source_files')
+            require(isinstance(producers,dict) and producers and isinstance(archived,dict)
+                and set(archived)==set(producers),'Portable pick renderer implementation closure differs')
+            for original,digest in producers.items():
+                shared_original_evidence(pack,payload,admission,archived[original],original,digest,'pick renderer source')
+            verify_pick_storage_video(pack,payload,entry,evidence,video)
     require(ready.get('total_frames')==sum(e['length'] for e in episodes)
             and ready.get('train_windows')==sum(len(e['eligible_current_rows']) for e in episodes),
             'Total PICO frame/window count differs')
@@ -249,6 +259,33 @@ def inspect_pack(pack, *, expected_episodes=None):
         require(selection.get('task_id')==protocol['task_id'],'Native-task selected task identity differs')
     require(not (pack/'val').exists() and not (pack/'test').exists(),'Human release is train-only')
     return pack,ready,episodes,{e['episode_index']:e for e in entries}
+
+
+def verify_pick_storage_video(pack,payload,entry,evidence,video):
+    """Independently re-create every original PNG byte from portable lossless video."""
+    import av
+    from PIL import Image
+    archive=entry.get('rgb_storage_archive')
+    require(isinstance(archive,dict) and set(archive)=={'rgb_storage.json','rgb_storage_complete.json'},
+        'Pick exact-PNG storage receipts missing')
+    for record in archive.values():
+        require(isinstance(record,dict) and payload.get(record.get('path'))==record.get('sha256'),
+            'Unbound portable pick storage receipt')
+        owned(pack,record['path'])
+    events=jsonl(owned(pack,evidence['capture/events.jsonl'])); count=0;raw_digest=hashlib.sha256()
+    with av.open(str(owned(pack,video['path']))) as stream:
+        require(stream.streams.video[0].average_rate==30,'Portable pick master rate differs')
+        for frame in stream.decode(video=0):
+            require(count<len(events),'Extra portable pick frame');event=events[count];pixels=frame.to_ndarray(format='rgb24')
+            require(frame.pts is not None and abs(float(frame.pts*frame.time_base)-count/30)<1e-7,'Portable master PTS mismatch')
+            require(hashlib.sha256(pixels.tobytes()).hexdigest()==event['rgb']['pixel_sha256'],'Portable pixels changed')
+            b=io.BytesIO();Image.fromarray(pixels).save(b,format='PNG',compress_level=3)
+            require(hashlib.sha256(b.getvalue()).hexdigest()==event['rgb']['file_sha256'],
+                'Portable master cannot reproduce the exact archived PNG byte sequence')
+            raw_digest.update(pixels.tobytes());count+=1
+    require(count==len(events)==video['frames'] and raw_digest.hexdigest()==video['raw_rgb_sha256']==video['decoded_rgb_sha256'],
+        'Portable pick video count/pixel digest differs')
+    return {'all_original_png_bytes_reproducible':True,'frames':count}
 
 
 def validate_labels(raw, length):
@@ -267,7 +304,8 @@ def validate_labels(raw, length):
 
 
 def validate_object_observations(raw,length,task_id):
-    if task_id==GRASP_TASK_ID:
+    from pack_pico_handover import task_protocol
+    if task_protocol(task_id)['target_only']:
         target=np.asarray(raw.get('observation.object_poses'),dtype=np.float64)
         require(target.shape==(length,7) and np.isfinite(target).all(),
                 'Grasp actual target-only object pose rows differ')

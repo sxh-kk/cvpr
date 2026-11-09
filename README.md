@@ -235,3 +235,5 @@ BendPick使用独立官方100初始化、AMO世界适配和现有全身SMPL mode
 ### PICO XMoveBendPick 摇杆走近后弯腰抓取
 
 新增独立官方TRAIN100初始化采集入口 `scripts/4090_simple/start_pico_xmove_bend_pick.sh`。按B切换既有摇杆mode0导航与全身mode2弯腰跟随，移动阶段保持上身，停稳并恢复入场人体姿态后再切回弯腰；完整录制覆盖走近和抓取。原生任务判据、原始状态证据和后续RTX独立验收保留，既有任务默认控制不变。操作与限制见 [PICO XMoveBendPick](docs/PICO_XMOVE_BEND_PICK_COLLECTION.md)。
+
+这三个Pick任务本轮采用独立299条清单（99／100／100），分块RTX、精确RGB无损归档及训练准入流程见[Pick数据处理说明](scripts/4090_simple/README_pico_pick_processing.md)。004保留待补采，先导结果不代表全量交付。

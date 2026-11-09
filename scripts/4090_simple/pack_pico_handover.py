@@ -13,6 +13,9 @@ from pathlib import Path
 import shutil
 import uuid
 
+import os
+import io
+import hashlib
 import numpy as np
 
 import pack_handover_quality100 as legacy
@@ -31,6 +34,10 @@ GRASP_TASK_ID = "cvpr/G1SonicTabletopGraspPico-v0"
 GRASP_CONTRACT = "cvpr-pico-grasp-lerobot-pack-v1"
 GRASP_SELECTION_CONTRACT = "cvpr-pico-grasp-admissions-selection-v1"
 GRASP_ADMISSION_CONTRACT = "cvpr-live-pico-grasp-independent-admission-v1"
+PICK_TASK_IDS = frozenset(("cvpr/G1SonicXMovePickPico-v0", "cvpr/G1SonicBendPickPico-v0", "cvpr/G1SonicXMoveBendPickPico-v0"))
+PICK_IMMUTABLE_LEDGERS = frozenset(('commands.jsonl', 'applied_force_samples.jsonl',
+    'raw_quality_samples.jsonl', 'deferred_capture/events.jsonl',
+    'capture/events.jsonl', 'rtx_frame_bindings.jsonl'))
 SOURCE_FILES = ("source_initialization_receipt.json", "source_run_config.json",
                 "source_dataset_statistics.json", "source_state_info.json")
 AUDITOR_FILES = frozenset(("audit_pico_teleop_episode.py", "pico_live_input.py",
@@ -62,7 +69,7 @@ require, sha = legacy.require, legacy.sha
 
 def task_protocol(task_id):
     """Explicit task envelopes; old Handover artifacts keep their contracts."""
-    require(task_id in (HANDOVER_TASK_ID, MOBILE_TASK_ID, GRASP_TASK_ID), "Unsupported live-PICO task identity")
+    require(task_id in {HANDOVER_TASK_ID, MOBILE_TASK_ID, GRASP_TASK_ID, *PICK_TASK_IDS}, "Unsupported live-PICO task identity")
     mobile = task_id == MOBILE_TASK_ID
     grasp = task_id == GRASP_TASK_ID
     protocol = {"task_id": task_id, "mobile": mobile, "grasp": grasp,
@@ -79,6 +86,16 @@ def task_protocol(task_id):
         protocol.update(pack_contract=GRASP_CONTRACT, selection_contract=GRASP_SELECTION_CONTRACT,
             admission_contract=GRASP_ADMISSION_CONTRACT, auditor_files=GRASP_AUDITOR_FILES,
             base_checks=GRASP_BASE_CHECKS)
+    if task_id in PICK_TASK_IDS:
+        from pico_pick_audit import BASE_CHECKS as pick_checks, AUDITOR_FILES as pick_files
+        protocol.update(native=True, pick=True, kind="pick", reference_key="pick_reference_audit",
+            evidence_prefix="pick", object_roles=("target",), pack_contract="cvpr-pico-pick-lerobot-pack-v1",
+            selection_contract="cvpr-pico-pick-admissions-selection-v1",
+            admission_contract="cvpr-live-pico-pick-independent-admission-v1",
+            auditor_files=pick_files, base_checks=pick_checks)
+    else:
+        protocol['pick'] = False
+    protocol['target_only'] = grasp or protocol['pick']
     return protocol
 
 
@@ -137,6 +154,7 @@ class Bindings:
     """Check every authority byte once; refuse changes before publication."""
     def __init__(self):
         self.files = {}
+        self.virtual_pngs = {}
 
     @staticmethod
     def stat(path):
@@ -145,6 +163,17 @@ class Bindings:
 
     def verify(self, path, expected):
         path = Path(path)
+        if not path.exists() and path.suffix.lower() == '.png':
+            from pico_pick_rgb_storage import verify_missing_png
+            require(path.is_absolute() and valid_sha(expected) and verify_missing_png(path, expected),
+                    'Compacted original PNG cannot be reproduced exactly: '+str(path))
+            episode = path.parent.parent.parent
+            for filename in ('capture/rgb_storage.json','capture/rgb_storage_complete.json','capture/rgb_master.mp4'):
+                authority = episode/filename
+                previous = self.files.get(authority.resolve(strict=True))
+                self.verify(authority, previous[0] if previous else sha(authority))
+            self.virtual_pngs[path] = expected
+            return path
         require(path.is_absolute() and path.is_file() and not path.is_symlink()
                 and valid_sha(expected), "Missing/unsafe SHA-bound evidence: " + str(path))
         path = path.resolve(strict=True)
@@ -161,6 +190,14 @@ class Bindings:
         require(isinstance(values, dict) and values, "Missing independent evidence bindings")
         for path, expected in values.items():
             self.verify(path, expected)
+
+    def acknowledge_immutable_link(self, path, expected, before, links_before):
+        """Only an observed extra hardlink may update cached ctime; bytes remain pinned."""
+        path=Path(path).resolve(strict=True);current=self.stat(path)
+        require(self.files.get(path)==(expected,before) and current[:4]==before[:4]
+            and path.stat().st_nlink==links_before+1 and sha(path)==expected,
+            'Immutable raw hardlink changed more than link metadata: '+str(path))
+        self.files[path]=(expected,current)
 
     def unchanged(self):
         for path, (_, before) in self.files.items():
@@ -246,6 +283,8 @@ def load_selection(selection, bindings):
         bindings.verify_all(audit.get("bindings"))
         if protocol["grasp"]:
             grasp_batch_sources(audit)
+        if protocol["pick"]:
+            pick_batch_sources(audit)
         authorities = audit.get("auditor_source_sha256")
         bindings.verify_all(authorities)
         require({Path(p).name for p in authorities} == protocol["auditor_files"],
@@ -321,7 +360,14 @@ def load_selection(selection, bindings):
                     and abs(event["actual_elapsed_s"]-tick/50) < 1e-9
                     and abs(event["sim_time_s"]-(start+tick/50)) < 1e-8,
                     "Actual PICO capture clock is not the dense ceil50Hz/native30Hz grid")
-            image = legacy.owned(directory/"capture", event["rgb"]["path"])
+            relative_image = Path(event['rgb']['path'])
+            require(not relative_image.is_absolute() and '..' not in relative_image.parts, 'Unsafe RTX PNG relative path')
+            image = directory/'capture'/relative_image
+            if image.exists():
+                image = legacy.owned(directory/'capture',event['rgb']['path'])
+            else:
+                require(protocol['pick'], 'Only explicit pick storage can resolve compacted PNGs')
+                bindings.verify(image,event['rgb']['file_sha256'])
             require(audit["bindings"].get(str(image)) == event["rgb"]["file_sha256"],
                     "RTX PNG is not bound by independent admission")
         eligible, histories = legacy.eligible_currents(events)
@@ -333,23 +379,39 @@ def load_selection(selection, bindings):
     return path, items
 
 
-def _copy(source, destination, expected=None):
+def _copy(source, destination, expected=None, *, immutable_hardlink=False):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
+    if immutable_hardlink and Path(source).stat().st_dev == destination.parent.stat().st_dev:
+        os.link(source, destination)
+    else:
+        shutil.copyfile(source, destination)
     require(sha(destination) == (expected or sha(source)), "Copied evidence bytes changed")
 
 
-def _shared_copy(source, staging, relative, expected):
+def immutable_evidence_link(protocol, relative, enabled):
+    """Share only explicitly named, sealed data; mutable records remain copies."""
+    return bool(enabled and (Path(relative).name in ('model.mjb', 'states.npy') or
+        (protocol['pick'] and relative in PICK_IMMUTABLE_LEDGERS)))
+
+
+def _shared_copy(source, staging, relative, expected, *, immutable_hardlink=False, link_changes=None):
     destination = staging/relative
     if destination.exists():
         require(not destination.is_symlink() and sha(destination) == expected,
                 "Shared original Mobile evidence changed")
     else:
-        _copy(source, destination, expected)
+        require(not immutable_hardlink or isinstance(link_changes, list),
+                'An immutable shared link requires an observed-link acknowledgement')
+        source = Path(source)
+        before, links_before = Bindings.stat(source), source.stat().st_nlink
+        _copy(source, destination, expected, immutable_hardlink=immutable_hardlink)
+        if immutable_hardlink and source.stat().st_dev == destination.stat().st_dev \
+                and source.stat().st_ino == destination.stat().st_ino:
+            link_changes.append((str(source), expected, before, links_before))
     return {"original_path":str(source), "path":str(relative), "sha256":expected}
 
 
-def copy_evidence(item, staging):
+def copy_evidence(item, staging, *, link_immutable_raw=False):
     directory = item["directory"]
     prefix = staging/"accepted_evidence"/item["identity"]
     destination = prefix/"admission.json"
@@ -360,8 +422,11 @@ def copy_evidence(item, staging):
     if item["protocol"]["native"]:
         reference = item["audit"][item["protocol"]["reference_key"]]
         trace = reference["control_trace"]
+        link_trace = link_immutable_raw and item['protocol']['pick']
         trace_file = _shared_copy(trace["path"], staging,
-            Path("accepted_evidence/session_traces")/(trace["sha256"]+".jsonl"), trace["sha256"])
+            Path("accepted_evidence/session_traces")/(trace["sha256"]+".jsonl"), trace["sha256"],
+            immutable_hardlink=link_trace,
+            link_changes=item.setdefault('immutable_link_changes', []) if link_trace else None)
         copied_shared_sources.add(trace["path"])
         historical = reference["historical_sources"]
         manifest = _shared_copy(historical["manifest_path"], staging,
@@ -374,14 +439,22 @@ def copy_evidence(item, staging):
                 Path("accepted_evidence/historical_sources")/source["sha256"]/source["filename"], source["sha256"])})
             copied_shared_sources.add(source["path"])
         historical_files = {"manifest":manifest, "files":sources}
-    if item["protocol"]["grasp"]:
-        batch = grasp_batch_sources(item["audit"])
+    if item["protocol"]["grasp"] or item["protocol"]["pick"]:
+        batch = pick_batch_sources(item["audit"]) if item["protocol"]["pick"] else grasp_batch_sources(item["audit"])
         if batch is not None:
             batch_files = {}
             for role, source in batch.items():
                 batch_files[role] = _shared_copy(source["path"], staging,
-                    Path("accepted_evidence/grasp_batch")/source["sha256"]/source["filename"], source["sha256"])
+                    Path("accepted_evidence/pick_batch" if item["protocol"]["pick"] else "accepted_evidence/grasp_batch")/source["sha256"]/source["filename"], source["sha256"])
                 copied_shared_sources.add(source["path"])
+    if item['protocol']['pick']:
+        completion=read(directory/'rtx_completion.json');producers=completion.get('producer_source_sha256')
+        require(isinstance(producers,dict) and producers,'Missing exact pick renderer source closure')
+        item['pick_renderer_source_files']={}
+        for original,expected in producers.items():
+            require(item['audit']['bindings'].get(original)==expected,'Renderer dependency was not independently bound')
+            archived=_shared_copy(original,staging,Path('accepted_evidence/pick_renderer_sources')/expected/Path(original).name,expected)
+            item['pick_renderer_source_files'][original]=archived;copied_shared_sources.add(original)
     sources = dict(item["audit"]["bindings"])
     sources[str(directory/"collection_record.json")] = sha(directory/"collection_record.json")
     for original, expected in sorted(sources.items()):
@@ -393,17 +466,74 @@ def copy_evidence(item, staging):
                 continue  # Lossless MP4 holds every original RGB byte.
             relative = str(path.relative_to(directory))
             target = prefix/"run"/relative
-            _copy(path, target, expected)
+            immutable=immutable_evidence_link(item['protocol'], relative, link_immutable_raw)
+            before,links_before=Bindings.stat(path),path.stat().st_nlink
+            _copy(path,target,expected,immutable_hardlink=immutable)
+            if immutable and target.stat().st_ino==path.stat().st_ino and target.stat().st_dev==path.stat().st_dev:
+                item.setdefault('immutable_link_changes',[]).append((str(path),expected,before,links_before))
             evidence[relative] = str(target.relative_to(staging))
         else:
             if trace_file is None or original != trace_file["original_path"]:
                 external[original] = expected  # Model/resource authorities are not duplicated weights.
+    if item['protocol']['pick']:
+        for name in ('rgb_storage.json','rgb_storage_complete.json'):
+            path=directory/'capture'/name
+            target=prefix/'run'/'capture'/name
+            _copy(path,target,sha(path)); item.setdefault('rgb_storage_archive',{})[name]={'path':str(target.relative_to(staging)),'sha256':sha(path)}
     authorities = {}
     for original, expected in item["audit"]["auditor_source_sha256"].items():
         target = prefix/"auditor_source"/Path(original).name
         _copy(original, target, expected)
         authorities[original] = {"path": str(target.relative_to(staging)), "sha256": expected}
     return str(destination.relative_to(staging)), evidence, external, authorities, trace_file, historical_files, batch_files
+
+
+def pick_batch_sources(audit):
+    batch=audit.get('deferred_rtx_bridge',{}).get('batch_execution')
+    require(isinstance(batch,dict) and batch.get('contract')=='cvpr-pico-pick-deferred-rtx-batch-v1'
+        and batch.get('uuid')==audit.get('human_demo_uuid') and batch.get('completed_report_binds_this_receipt') is True,
+        'Pick batch must be independently bound to this UUID')
+    roles={'batch_code':('batch_code_path','batch_code_sha256','render_deferred_pick_batch.py'),
+        'original_renderer_code':('original_renderer_code_path','original_renderer_code_sha256','render_deferred_pico.py'),
+        'report':('report_path','report_sha256','report.json'),
+        'frozen_manifest':('frozen_manifest_path','frozen_manifest_sha256','frozen_manifest.json'),
+        'process_exit':('process_exit_path','process_exit_sha256','process_exit.json'),
+        'parentdriver':('parentdriver_path','parentdriver_sha256','run_pick_rtx.py')}
+    sources={}
+    for role,(pathkey,shakey,filename) in roles.items():
+        if role in ('process_exit','parentdriver') and pathkey not in batch:continue
+        path,digest=batch.get(pathkey),batch.get(shakey)
+        require(isinstance(path,str) and Path(path).is_absolute() and valid_sha(digest)
+            and audit.get('bindings',{}).get(path)==digest,'Unbound pick batch '+role)
+        sources[role]={'path':path,'sha256':digest,'filename':filename}
+    require(('parentdriver' in sources)==('process_exit' in sources),'Pick driver and observed exit must be paired')
+    return sources
+
+
+def encode_pick_master(item, output):
+    from pico_pick_rgb_storage import verify_compacted_episode
+    import av
+    from PIL import Image
+    verify_compacted_episode(item['directory'])
+    master=item['capture']/'rgb_master.mp4'; events=item['events'];before=hashlib.sha256();count=0
+    with av.open(str(master)) as stream:
+        require(stream.streams.video[0].average_rate==30,'Pick master video must be30Hz')
+        for frame in stream.decode(video=0):
+            require(count<len(events),'Extra pick master frame');event=events[count];pixels=frame.to_ndarray(format='rgb24')
+            require(frame.pts is not None and abs(float(frame.pts*frame.time_base)-count/30)<1e-7,'Pick master PTS mismatch')
+            require(hashlib.sha256(pixels.tobytes()).hexdigest()==event['rgb']['pixel_sha256'],'Pick master pixels changed')
+            buffer=io.BytesIO();Image.fromarray(pixels).save(buffer,format='PNG',compress_level=3)
+            require(hashlib.sha256(buffer.getvalue()).hexdigest()==event['rgb']['file_sha256'],'Pick master cannot reproduce original PNG bytes')
+            before.update(pixels.tobytes());count+=1
+    require(count==len(events),'Missing pick master frame')
+    expected=sha(master);master_before,links_before=Bindings.stat(master),master.stat().st_nlink
+    _copy(master,output,expected,immutable_hardlink=True)
+    if master.stat().st_ino==output.stat().st_ino and master.stat().st_dev==output.stat().st_dev:
+        item.setdefault('immutable_link_changes',[]).append((str(master),expected,master_before,links_before))
+    rgb=events[0]['rgb'];digest=before.hexdigest()
+    return {'frames':count,'shape':[rgb['height'],rgb['width'],3],'fps':30,'codec':'libx264rgb','crf':0,
+        'raw_rgb_sha256':digest,'decoded_rgb_sha256':digest,'pixels_exact':True,'sha256':sha(output),
+        'storage_representation':'original_resolution_lossless_rgb_master_with_exact_png_reproduction'}
 
 
 def verify_raw_values(table, events, state_names, hand_names):
@@ -430,7 +560,7 @@ def verify_raw_values(table, events, state_names, hand_names):
                     "Uncontrolled padding gained supervision")
 
 
-def pack(template, selection, output):
+def pack(template, selection, output, *, link_immutable_raw=False):
     """Create one new variable-size train-only pack; leave every input intact."""
     import pyarrow.parquet as pq
     template = Path(template).resolve(strict=True)
@@ -477,12 +607,14 @@ def pack(template, selection, output):
             legacy.check_parquet_roundtrip(table, reread)
             verify_raw_values(reread, events, identity["state_joint_names"], identity["hand_joint_names"])
             video_path = staging/f"train/videos/chunk-000/{legacy.VIDEO_KEY}/episode_{index:06d}.mp4"
-            video = legacy.encode_pngs(item["capture"], events, video_path)
+            video = encode_pick_master(item, video_path) if protocol["pick"] else legacy.encode_pngs(item["capture"], events, video_path)
             video["path"] = str(video_path.relative_to(staging))
             if shape is None:
                 shape = video["shape"]
             require(shape == video["shape"], "One pack requires consistent actual camera dimensions")
-            admission, evidence, external, authorities, trace_file, historical_files, batch_files = copy_evidence(item, staging)
+            admission, evidence, external, authorities, trace_file, historical_files, batch_files = copy_evidence(item, staging, link_immutable_raw=link_immutable_raw)
+            for linked,expected,before,links_before in item.get('immutable_link_changes',[]):
+                bindings.acknowledge_immutable_link(linked,expected,before,links_before)
             source = {"source_kind":"live_pico_human", "source_namespace":"live_pico_human",
                 "human_demo_uuid":identity_uuid, "source_session":item["source_session"]}
             episode = {"episode_index":index, "candidate_id":identity_uuid, "human_demo_uuid":identity_uuid,
@@ -502,7 +634,9 @@ def pack(template, selection, output):
                 "parquet_path":str(parquet.relative_to(staging)), "parquet_sha256":sha(parquet),
                 "video":video, "evidence_files":evidence, "external_authority_bindings":external,
                 "auditor_source_files":authorities,
-                **({"grasp_batch_execution_files":batch_files} if batch_files is not None else {}),
+                **({"rgb_storage_archive":item["rgb_storage_archive"]} if protocol["pick"] else {}),
+                **({"pick_renderer_source_files":item["pick_renderer_source_files"]} if protocol["pick"] else {}),
+                **({("pick_batch_execution_files" if protocol["pick"] else "grasp_batch_execution_files"):batch_files} if batch_files is not None else {}),
                 **({protocol["evidence_prefix"]+"_control_trace_file":trace_file,
                     protocol["evidence_prefix"]+"_historical_source_files":historical_files} if trace_file is not None else {})})
             offset += len(events)
@@ -563,8 +697,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("template", "selection", "output"):
         parser.add_argument("--"+name, type=Path, required=True)
+    parser.add_argument("--link-immutable-raw",action="store_true",help="Hardlink frozen MJB/states and pick sealed ledgers/control traces on the same filesystem; all bytes still verified")
     args = parser.parse_args()
-    result = pack(args.template, args.selection, args.output)
+    result = pack(args.template, args.selection, args.output, link_immutable_raw=args.link_immutable_raw)
     print(json.dumps({key:result[key] for key in ("contract", "status", "train_episodes", "total_frames", "train_windows", "final_ready")}))
 
 

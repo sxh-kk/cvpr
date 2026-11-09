@@ -27,6 +27,10 @@ MOBILE_TASK_ID = "simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
 MOBILE_CONTRACT = "cvpr-pico-mobile-pp-lerobot-pack-v1"
 MOBILE_SELECTION_CONTRACT = "cvpr-pico-mobile-pp-admissions-selection-v1"
 MOBILE_ADMISSION_CONTRACT = "cvpr-live-pico-mobile-pp-independent-admission-v1"
+GRASP_TASK_ID = "cvpr/G1SonicTabletopGraspPico-v0"
+GRASP_CONTRACT = "cvpr-pico-grasp-lerobot-pack-v1"
+GRASP_SELECTION_CONTRACT = "cvpr-pico-grasp-admissions-selection-v1"
+GRASP_ADMISSION_CONTRACT = "cvpr-live-pico-grasp-independent-admission-v1"
 SOURCE_FILES = ("source_initialization_receipt.json", "source_run_config.json",
                 "source_dataset_statistics.json", "source_state_info.json")
 AUDITOR_FILES = frozenset(("audit_pico_teleop_episode.py", "pico_live_input.py",
@@ -40,28 +44,50 @@ MOBILE_AUDITOR_FILES = frozenset(("audit_pico_teleop_episode.py", "pico_live_inp
     "handover_sonic_teleop_reference.py", "handover_contact_quality.py"))
 MOBILE_BASE_CHECKS = (BASE_CHECKS - {"independent_physical_handover_gate"}) | {
     "independent_native_mobile_task_success", "independent_mobile_continuous_reference"}
+GRASP_AUDITOR_FILES = MOBILE_AUDITOR_FILES | {
+    "pico_grasp_audit.py", "pico_grasp_quality.py", "pico_grasp_control.py"}
+GRASP_BASE_CHECKS = (BASE_CHECKS - {"independent_physical_handover_gate"}) | {
+    "independent_native_grasp_task_success", "independent_grasp_continuous_reference",
+    "independent_grasp_supervised_success_coverage"}
+GRASP_BATCH_ROLES = {
+    "batch_code": ("batch_code_path", "batch_code_sha256", "render_deferred_pico_batch.py"),
+    "report": ("report_path", "report_sha256", "report.json"),
+    "frozen_manifest": ("frozen_manifest_path", "frozen_manifest_sha256", "frozen_manifest.json")}
+GRASP_BATCH_OPTIONAL_ROLES = {
+    "recovery_receipt": ("recovery_receipt_path", "recovery_receipt_sha256", "recovery_receipt.json"),
+    "process_exit": ("process_exit_path", "process_exit_sha256", "process_exit.json"),
+    "parentdriver": ("parentdriver_path", "parentdriver_sha256", "process_grasp_dataset.py")}
 require, sha = legacy.require, legacy.sha
 
 
 def task_protocol(task_id):
     """Explicit task envelopes; old Handover artifacts keep their contracts."""
-    require(task_id in (HANDOVER_TASK_ID, MOBILE_TASK_ID), "Unsupported live-PICO task identity")
+    require(task_id in (HANDOVER_TASK_ID, MOBILE_TASK_ID, GRASP_TASK_ID), "Unsupported live-PICO task identity")
     mobile = task_id == MOBILE_TASK_ID
-    return {"task_id": task_id, "mobile": mobile,
+    grasp = task_id == GRASP_TASK_ID
+    protocol = {"task_id": task_id, "mobile": mobile, "grasp": grasp,
+        "native": mobile or grasp, "kind": "mobile-pp" if mobile else "grasp" if grasp else "handover",
+        "reference_key": "grasp_reference_audit" if grasp else "mobile_reference_audit",
+        "evidence_prefix": "grasp" if grasp else "mobile",
+        "object_roles": ("target",) if grasp else ("container", "target"),
         "pack_contract": MOBILE_CONTRACT if mobile else CONTRACT,
         "selection_contract": MOBILE_SELECTION_CONTRACT if mobile else SELECTION_CONTRACT,
         "admission_contract": MOBILE_ADMISSION_CONTRACT if mobile else ADMISSION_CONTRACT,
         "auditor_files": MOBILE_AUDITOR_FILES if mobile else AUDITOR_FILES,
         "base_checks": MOBILE_BASE_CHECKS if mobile else BASE_CHECKS}
+    if grasp:
+        protocol.update(pack_contract=GRASP_CONTRACT, selection_contract=GRASP_SELECTION_CONTRACT,
+            admission_contract=GRASP_ADMISSION_CONTRACT, auditor_files=GRASP_AUDITOR_FILES,
+            base_checks=GRASP_BASE_CHECKS)
+    return protocol
 
 
 def artifact_protocol(value, role):
     """Missing task IDs remain compatible only for the original Handover schema."""
-    mobile_contract = {"pack": MOBILE_CONTRACT, "selection": MOBILE_SELECTION_CONTRACT}[role]
     task = value.get("task_id", HANDOVER_TASK_ID)
     protocol = task_protocol(task)
     require(value.get("contract") == protocol[role + "_contract"]
-            and (value.get("contract") != mobile_contract or value.get("task_id") == MOBILE_TASK_ID),
+            and (not protocol["native"] or value.get("task_id") == protocol["task_id"]),
             "Task identity and " + role + " contract differ")
     return protocol
 
@@ -81,6 +107,30 @@ def jsonl(path):
 
 def valid_sha(value):
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def grasp_batch_sources(audit):
+    """Optional only for original single-episode RTX producers such as126."""
+    batch = audit.get("deferred_rtx_bridge", {}).get("batch_execution")
+    if batch is None:
+        return None
+    require(isinstance(batch, dict)
+            and batch.get("contract") == "cvpr-pico-grasp-deferred-rtx-batch-v1"
+            and batch.get("uuid") == audit.get("human_demo_uuid")
+            and batch.get("completed_report_binds_this_receipt") is True,
+            "Grasp batch producer identity is missing or incomplete")
+    sources = {}
+    for role, (path_key, sha_key, filename) in {**GRASP_BATCH_ROLES, **GRASP_BATCH_OPTIONAL_ROLES}.items():
+        if role in GRASP_BATCH_OPTIONAL_ROLES and path_key not in batch and sha_key not in batch:
+            continue
+        path, expected = batch.get(path_key), batch.get(sha_key)
+        require(isinstance(path, str) and Path(path).is_absolute() and valid_sha(expected)
+                and audit.get("bindings", {}).get(path) == expected,
+                "Grasp batch " + role + " is not independently SHA-bound")
+        sources[role] = {"path": path, "sha256": expected, "filename": filename}
+    require("parentdriver" not in sources or "process_exit" in sources,
+            "Grasp batch parentdriver must retain its actual process exit evidence")
+    return sources
 
 
 class Bindings:
@@ -164,21 +214,22 @@ def load_selection(selection, bindings):
                 and audit.get("ckpt_feature_pack_ready") is False and audit.get("errors") == []
                 and audit.get("human_demo_uuid") == identity,
                 "Only an independently admitted actual live-PICO episode may be packaged")
-        if protocol["mobile"]:
-            require(audit.get("task_id") == MOBILE_TASK_ID and audit.get("selection_policy") == "native_only"
+        if protocol["native"]:
+            label = "Grasp" if protocol["grasp"] else "Mobile"
+            require(audit.get("task_id") == protocol["task_id"] and audit.get("selection_policy") == "native_only"
                     and audit.get("technical_blocked") is False,
-                    "Mobile audit must bind its explicit native-only task identity without technical blockers")
-            trace = audit.get("mobile_reference_audit", {}).get("control_trace", {})
+                    label + " audit must bind its explicit native-only task identity without technical blockers")
+            trace = audit.get(protocol["reference_key"], {}).get("control_trace", {})
             require(isinstance(trace, dict) and isinstance(trace.get("path"), str)
                     and valid_sha(trace.get("sha256"))
                     and audit.get("bindings", {}).get(trace["path"]) == trace["sha256"],
-                    "Mobile audit must bind its original shared session control trace")
-            historical = audit.get("mobile_reference_audit", {}).get("historical_sources", {})
+                    label + " audit must bind its original shared session control trace")
+            historical = audit.get(protocol["reference_key"], {}).get("historical_sources", {})
             require(isinstance(historical, dict) and isinstance(historical.get("manifest_path"), str)
                     and valid_sha(historical.get("manifest_sha256"))
                     and audit.get("bindings", {}).get(historical["manifest_path"]) == historical["manifest_sha256"]
                     and isinstance(historical.get("files"), list) and historical["files"],
-                    "Mobile audit must bind its capture-session source snapshots and manifest")
+                    label + " audit must bind its capture-session source snapshots and manifest")
             for source in historical["files"]:
                 require(isinstance(source, dict) and isinstance(source.get("path"), str)
                         and isinstance(source.get("filename"), str)
@@ -186,13 +237,15 @@ def load_selection(selection, bindings):
                         and source["filename"] not in ("", ".", "..")
                         and valid_sha(source.get("sha256"))
                         and audit.get("bindings", {}).get(source["path"]) == source["sha256"],
-                        "Mobile original capture implementation is missing or not SHA-bound")
+                        label + " original capture implementation is missing or not SHA-bound")
         try:
             stamp = datetime.fromisoformat(audit["generated_utc"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Missing independent audit generation time") from error
         require(stamp.tzinfo is not None, "Audit generation time must be timezone-aware")
         bindings.verify_all(audit.get("bindings"))
+        if protocol["grasp"]:
+            grasp_batch_sources(audit)
         authorities = audit.get("auditor_source_sha256")
         bindings.verify_all(authorities)
         require({Path(p).name for p in authorities} == protocol["auditor_files"],
@@ -208,7 +261,7 @@ def load_selection(selection, bindings):
             return owned
 
         metadata, outcome = read(bound("metadata.json")), read(bound("episode.json"))
-        quality_name = "raw_quality_samples.jsonl" if protocol["mobile"] else "quality_samples.jsonl"
+        quality_name = "raw_quality_samples.jsonl" if protocol["native"] else "quality_samples.jsonl"
         for name in ("commands.jsonl", quality_name, "applied_force_samples.jsonl"):
             bound(name)
         require(metadata.get("source_kind") == "live_pico_human"
@@ -230,7 +283,12 @@ def load_selection(selection, bindings):
                          "deferred_capture/capture.json", "deferred_capture/events.jsonl",
                          "deferred_capture/states.npy", "deferred_capture/model.mjb"):
                 bound(name)
-        if not protocol["mobile"] and metadata.get("quality_geometry_mode") == "deferred_geometry_with_original_solved_support":
+            if protocol["grasp"]:
+                completion = read(directory/"rtx_completion.json")
+                batch = grasp_batch_sources(audit)
+                require((completion.get("batch_execution") is None) == (batch is None),
+                        "Grasp batch admission and original renderer producer differ")
+        if not protocol["native"] and metadata.get("quality_geometry_mode") == "deferred_geometry_with_original_solved_support":
             required.add("original_solved_support_and_deferred_geometry")
         if metadata.get("capture_start_protocol") is not None:
             required.add("independent_frozen_first_capture_boundary")
@@ -244,8 +302,8 @@ def load_selection(selection, bindings):
                 and manifest.get("source_kind") == "live_pico_human"
                 and manifest.get("human_demo_uuid") == identity
                 and manifest.get("warmup_seconds") == 1., "Require complete actual RTX with one real second warmup")
-        if protocol["mobile"]:
-            require(manifest.get("task_id") == MOBILE_TASK_ID, "Mobile RTX must retain its actual task identity")
+        if protocol["native"]:
+            require(manifest.get("task_id") == protocol["task_id"], "Native-task RTX must retain its actual task identity")
         events_path = bound("capture/events.jsonl")
         require(manifest.get("events_sha256") == sha(events_path), "Capture event SHA differs")
         events = jsonl(events_path)
@@ -297,14 +355,15 @@ def copy_evidence(item, staging):
     destination = prefix/"admission.json"
     _copy(item["admission"], destination, item["admission_sha256"])
     evidence, external = {}, {}
-    trace_file = historical_files = None
+    trace_file = historical_files = batch_files = None
     copied_shared_sources = set()
-    if item["protocol"]["mobile"]:
-        trace = item["audit"]["mobile_reference_audit"]["control_trace"]
+    if item["protocol"]["native"]:
+        reference = item["audit"][item["protocol"]["reference_key"]]
+        trace = reference["control_trace"]
         trace_file = _shared_copy(trace["path"], staging,
             Path("accepted_evidence/session_traces")/(trace["sha256"]+".jsonl"), trace["sha256"])
         copied_shared_sources.add(trace["path"])
-        historical = item["audit"]["mobile_reference_audit"]["historical_sources"]
+        historical = reference["historical_sources"]
         manifest = _shared_copy(historical["manifest_path"], staging,
             Path("accepted_evidence/historical_sources")/historical["manifest_sha256"]/"manifest.json",
             historical["manifest_sha256"])
@@ -315,6 +374,14 @@ def copy_evidence(item, staging):
                 Path("accepted_evidence/historical_sources")/source["sha256"]/source["filename"], source["sha256"])})
             copied_shared_sources.add(source["path"])
         historical_files = {"manifest":manifest, "files":sources}
+    if item["protocol"]["grasp"]:
+        batch = grasp_batch_sources(item["audit"])
+        if batch is not None:
+            batch_files = {}
+            for role, source in batch.items():
+                batch_files[role] = _shared_copy(source["path"], staging,
+                    Path("accepted_evidence/grasp_batch")/source["sha256"]/source["filename"], source["sha256"])
+                copied_shared_sources.add(source["path"])
     sources = dict(item["audit"]["bindings"])
     sources[str(directory/"collection_record.json")] = sha(directory/"collection_record.json")
     for original, expected in sorted(sources.items()):
@@ -336,7 +403,7 @@ def copy_evidence(item, staging):
         target = prefix/"auditor_source"/Path(original).name
         _copy(original, target, expected)
         authorities[original] = {"path": str(target.relative_to(staging)), "sha256": expected}
-    return str(destination.relative_to(staging)), evidence, external, authorities, trace_file, historical_files
+    return str(destination.relative_to(staging)), evidence, external, authorities, trace_file, historical_files, batch_files
 
 
 def verify_raw_values(table, events, state_names, hand_names):
@@ -394,7 +461,7 @@ def pack(template, selection, output):
         for index, item in enumerate(items):
             events = item["events"]; identity_uuid = item["identity"]
             values = legacy.episode_values(events, index, offset,
-                identity["state_joint_names"], identity["hand_joint_names"])
+                identity["state_joint_names"], identity["hand_joint_names"], object_roles=protocol["object_roles"])
             task = tasks.setdefault(item["instruction"], len(tasks))
             # This integer is a reader compatibility identifier. UUID and its
             # namespace, rather than this index, define human source lineage.
@@ -415,12 +482,12 @@ def pack(template, selection, output):
             if shape is None:
                 shape = video["shape"]
             require(shape == video["shape"], "One pack requires consistent actual camera dimensions")
-            admission, evidence, external, authorities, trace_file, historical_files = copy_evidence(item, staging)
+            admission, evidence, external, authorities, trace_file, historical_files, batch_files = copy_evidence(item, staging)
             source = {"source_kind":"live_pico_human", "source_namespace":"live_pico_human",
                 "human_demo_uuid":identity_uuid, "source_session":item["source_session"]}
             episode = {"episode_index":index, "candidate_id":identity_uuid, "human_demo_uuid":identity_uuid,
                 "task_id":protocol["task_id"],
-                **({"selection_policy":"native_only"} if protocol["mobile"] else {}),
+                **({"selection_policy":"native_only"} if protocol["native"] else {}),
                 "tasks":[item["instruction"]], "instruction":item["instruction"], "length":len(events),
                 "frames":len(events), "source_kind":"live_pico_human", "source_session":item["source_session"],
                 "source_episode_index":source_id, "source_dataset_key":"live_pico_human",
@@ -435,8 +502,9 @@ def pack(template, selection, output):
                 "parquet_path":str(parquet.relative_to(staging)), "parquet_sha256":sha(parquet),
                 "video":video, "evidence_files":evidence, "external_authority_bindings":external,
                 "auditor_source_files":authorities,
-                **({"mobile_control_trace_file":trace_file,
-                    "mobile_historical_source_files":historical_files} if trace_file is not None else {})})
+                **({"grasp_batch_execution_files":batch_files} if batch_files is not None else {}),
+                **({protocol["evidence_prefix"]+"_control_trace_file":trace_file,
+                    protocol["evidence_prefix"]+"_historical_source_files":historical_files} if trace_file is not None else {})})
             offset += len(events)
         meta = staging/"train/meta"
         info = {"codebase_version":"v2.0", "robot_type":"g1_sonic", "fps":30,
@@ -445,7 +513,8 @@ def pack(template, selection, output):
             "splits":{"train":f"0:{len(episodes)}"},
             "data_path":"data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
             "video_path":"videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-            "features":legacy.features(identity["state_joint_names"], identity["hand_joint_names"], shape),
+            "features":legacy.features(identity["state_joint_names"], identity["hand_joint_names"], shape,
+                object_roles=protocol["object_roles"]),
             "warmup_label_policy":"First30 actual RGB/state remain history; NaN labels/all-false action mask",
             "normalization":{"refitted":False,"inherited_statistics_sha256":identity["statistics"]["sha256"]}}
         legacy.write(meta/"info.json", info)
@@ -462,7 +531,7 @@ def pack(template, selection, output):
             _collection(item["directory"], item["identity"], item["outcome"])
         bindings.unchanged()
         report = {"contract":protocol["pack_contract"], "task_id":protocol["task_id"],
-            **({"selection_policy":"native_only"} if protocol["mobile"] else {}),
+            **({"selection_policy":"native_only"} if protocol["native"] else {}),
             "status":"cpu_lossless_pico_pack_complete_dino_and_production_reader_pending",
             "created_utc":datetime.now(timezone.utc).isoformat(), "source_kind":"live_pico_human",
             "train_payload_packed":True, "final_ready":False, "accepted_new_dataset":False,

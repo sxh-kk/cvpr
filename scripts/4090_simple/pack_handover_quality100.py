@@ -221,7 +221,7 @@ def eligible_currents(events):
     return accepted, {str(c): bycurrent[c] for c in accepted}
 
 
-def episode_values(events, episode, offset, state_names, hand_names):
+def episode_values(events, episode, offset, state_names, hand_names, *, object_roles=("container", "target")):
     """No warmup command is invented; unavailable targets remain NaN."""
     n = len(events); values = {"observation.state": [], "observation.joint_velocities": [],
         "observation.base_pose": [], "observation.base_vel": [], "observation.object_poses": [],
@@ -235,8 +235,8 @@ def episode_values(events, episode, offset, state_names, hand_names):
         values["observation.joint_velocities"].append(vector(event["physical_joint_qvel43"], 43, "joint velocities")[permutation])
         values["observation.base_pose"].append(vector(event["root_pose7"], 7, "root pose"))
         values["observation.base_vel"].append(vector(event["root_qvel6"], 6, "root velocity"))
-        values["observation.object_poses"].append(np.r_[vector(event["objects"]["container"]["pose7"], 7, "container"),
-                                                         vector(event["objects"]["target"]["pose7"], 7, "target")])
+        values["observation.object_poses"].append(np.concatenate([
+            vector(event["objects"][role]["pose7"], 7, role) for role in object_roles]))
         valid = event["action_valid"]
         require(type(valid) is bool and valid is (index >= 30), "Only the first30 real warmup rows may lack labels")
         if valid:
@@ -299,12 +299,12 @@ def encode_pngs(capture, events, output):
             "sha256": sha(output)}
 
 
-def features(state_names, hand_names, shape):
+def features(state_names, hand_names, shape, *, object_roles=("container", "target")):
     def feature(width, names=None, dtype="float32"):
         return {"dtype": dtype, "shape": [width], "names": names}
     result = {"observation.state": feature(43, state_names), "observation.joint_velocities": feature(43, state_names, "float64"),
         "observation.base_pose": feature(7, dtype="float64"), "observation.base_vel": feature(6, dtype="float64"),
-        "observation.object_poses": feature(14, [f"{r}.{k}" for r in ("container", "target") for k in ("pos_x", "pos_y", "pos_z", "quat_w", "quat_x", "quat_y", "quat_z")], "float64"),
+        "observation.object_poses": feature(7 * len(object_roles), [f"{r}.{k}" for r in object_roles for k in ("pos_x", "pos_y", "pos_z", "quat_w", "quat_x", "quat_y", "quat_z")], "float64"),
         "action": feature(14, hand_names), "action.body_token_v1_1": feature(64), "action.neck": feature(2, ["neck_yaw", "neck_pitch"]),
         "action_mask": feature(80, dtype="bool"), "action_valid": feature(1, dtype="bool"), "phase": feature(1, dtype="string"),
         "task_description": feature(1, dtype="string"), "next.done": feature(1, dtype="bool"), "timestamp": feature(1)}

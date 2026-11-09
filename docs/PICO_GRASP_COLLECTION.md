@@ -45,6 +45,45 @@ Grasp没有container，使用独立target-only证据合同
 EGL画面仅作操作反馈，训练RGB待后续按完整状态零物理步RTX获取。
 原始采集通过不代表训练包、DINO或A100上传完成。
 
+## 固定100条的本地补图与训练准入
+
+2026-11-07完成126次尝试后，使用补采126替代缺少桌面起抓过程的旧007，
+冻结100个真人UUID，一一覆盖官方TRAIN初始化0–99。旧007原件继续留档，
+不纳入此100条；042作为恢复示范保留，其真实预备段视觉历史不会被改写成动作标签。
+固定范围位于本轮`processing_20261107_001/FROZEN100.json`。
+
+用户授权补图和本机训练准入后，先正常退出无活动录制的采集器，再执行：
+
+```bash
+source /home/zxc/CVPR_Evaluation_runtime/local.env.sh
+/home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python \
+  scripts/4090_simple/process_grasp_dataset.py \
+  --plan /home/zxc/CVPR_Evaluation_runtime/pico_grasp_official_20261102/round_001/processing_20261107_001/PROCESSING_PLAN.json
+```
+
+该入口仅处理冻结清单，先后进行以下阶段；任一技术异常保留原件和失败产物并停止，
+不补换候选或覆盖残缺补图，也不上传或启动训练：
+
+1. 使用[批补图入口](../scripts/4090_simple/README_deferred_pico_batch.md)，
+   同一Isaac实例逐条恢复原始场景和完整积分状态，生成真实RTX图像；
+   原单条渲染器字节不变，包装器身份及每条场景/状态/RGB桥明确留档。
+2. `pico_grasp_audit.py`做独立target-only审核：同包mode1身体与手指、站姿规划参考、
+   冻结起录边界、原30/50/200Hz数据、完整状态与PNG/像素SHA、零外力及历史采集源码。
+   原生任务判据仍为真实样本任一成功；另检查成功不是仅出现在无动作标签的预备段，
+   不增加持稳、接触、容器或几何抬升门槛。
+3. 独立Grasp合同的无损LeRobot转换保留实际64维token与14维手指指令，
+   target姿态仅7维，不伪造container。状态/动作按继承协议供45/80维reader读取，
+   末两维动作监督关闭；每条开头30行只作真实历史，动作NaN且mask全false。
+4. 实际提取256x320 clean DINO、CLS加4 registers、原30Hz、float32存储、bf16计算；
+   沿用已验收38k模板统计，不重新拟合。
+5. 用真实CPU Dataset/collator逐条首/中/末查询完整动作未来及6帧DINO历史，
+   独立生成`PICO_DATASET_READY.json`。GPU隐藏、未构建策略、未开始训练。
+
+当前全量结果以独立发布目录
+`/home/zxc/CVPR_Evaluation_runtime/pico_grasp100_20261107_human01/PROCESSING_STATUS.json`
+与最终就绪收据为准。首条126已完成177帧RTX、11项独立准入及真实打包/DINO/生产读取试处理；
+这份单条试验不能替代全100条验收，亦不代表A100远端就绪。
+
 ## 使用
 
 先为本轮准备独立资源根和冻结计划，再启动：

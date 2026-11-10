@@ -20,8 +20,16 @@ CONTRACT = 'cvpr-pico-handover-a100-byte-transfer-v1'
 BYTE_CONTRACT = 'cvpr-pico-handover-a100-byte-verification-v1'
 MOBILE_CONTRACT = 'cvpr-pico-mobile-pp-a100-byte-transfer-v1'
 MOBILE_BYTE_CONTRACT = 'cvpr-pico-mobile-pp-a100-byte-verification-v1'
+PICK_CONTRACT = 'cvpr-pico-pick-a100-byte-transfer-v1'
+PICK_BYTE_CONTRACT = 'cvpr-pico-pick-a100-byte-verification-v1'
 HANDOVER_TASK_ID = 'simple/G1WholebodyHandoverTeleop-v0'
 MOBILE_TASK_ID = 'simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0'
+PICK_TASK_PREFIXES = {
+    'cvpr/G1SonicXMovePickPico-v0': 'pico_xmove_pick_',
+    'cvpr/G1SonicBendPickPico-v0': 'pico_bend_pick_',
+    'cvpr/G1SonicXMoveBendPickPico-v0': 'pico_xmove_bend_pick_',
+}
+PICK_TASK_IDS = frozenset(PICK_TASK_PREFIXES)
 TASK_PROFILES = {
     HANDOVER_TASK_ID: {
         'ready_contract': 'cvpr-pico-handover-production-verification-v1',
@@ -36,6 +44,12 @@ TASK_PROFILES = {
         'remote_prefix': 'pico_mobile_pp_',
     },
 }
+TASK_PROFILES.update({task_id: {
+    'ready_contract': 'cvpr-pico-pick-production-verification-v1',
+    'pack_contract': 'cvpr-pico-pick-lerobot-pack-v1',
+    'transfer_contract': PICK_CONTRACT, 'byte_contract': PICK_BYTE_CONTRACT,
+    'remote_prefix': prefix,
+} for task_id, prefix in PICK_TASK_PREFIXES.items()})
 MANIFEST_NAME = 'A100_TRANSFER_MANIFEST.json'
 BYTE_NAME = 'A100_BYTE_VERIFICATION.json'
 REMOTE_BASE = PurePosixPath('/gaozt-test1/datasets/SIMPLE_sonic_v1_1')
@@ -52,7 +66,7 @@ def remote_target(value, *, task_id=None):
     require(path.is_absolute() and '..' not in path.parts and path.parent==REMOTE_BASE
             and any(profile and re.fullmatch(re.escape(profile['remote_prefix'])+
                 r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}',path.name) for profile in profiles),
-            'Use a fresh task-matched pico_handover_<release> or pico_mobile_pp_<release> target under '+str(REMOTE_BASE))
+            'Use a fresh task-matched PICO release directory directly under '+str(REMOTE_BASE))
     return path
 
 
@@ -68,7 +82,18 @@ def task_profile(ready):
     return task_id, profile
 
 
-def inventory(root,remote):
+def remote_rsync_executable(value):
+    """Accept a literal executable path, never a remote shell command."""
+    require(isinstance(value,str) and (value=='rsync' or
+        (value==str(PurePosixPath(value)) and PurePosixPath(value).is_absolute() and PurePosixPath(value).name and
+         '..' not in PurePosixPath(value).parts and value==value.strip() and
+         re.fullmatch(r'/[A-Za-z0-9_./ +@=-]+',value))),
+        'Remote rsync must be rsync or a literal absolute executable path')
+    return value
+
+
+def inventory(root,remote,*,remote_rsync_path='rsync'):
+    remote_rsync_path = remote_rsync_executable(remote_rsync_path)
     root = Path(root)
     require(not root.is_symlink(),'Release root cannot be a symlink')
     root = root.resolve(strict=True)
@@ -95,6 +120,7 @@ def inventory(root,remote):
     files[verifier.READY_NAME] = identity(ready_path)
     return {'contract':profile['transfer_contract'],'task_id':task_id,'local_root':str(root),'remote_root':str(remote),
         'created_utc':datetime.now(timezone.utc).isoformat(),'files':files,
+        'remote_rsync_path':remote_rsync_path,
         'data_directories':['packed','dino'],'root_files':[verifier.READY_NAME],
         'total_bytes':sum(value['size_bytes'] for value in files.values()),
         'train_episodes':ready['train_episodes'],'train_windows':ready['train_windows'],
@@ -104,7 +130,7 @@ def inventory(root,remote):
 
 
 REMOTE_COMMON = r'''
-import hashlib,json,os,pathlib,sys
+import hashlib,json,os,pathlib,re,sys
 value=json.load(sys.stdin);root=pathlib.Path(value['remote_root'])
 def require(v,m):
  if not v:raise ValueError(m)
@@ -125,13 +151,26 @@ def owned(relative):
 require(root.is_absolute() and '..' not in root.parts and not root.is_symlink(),'Independent absolute target required')
 for p in root.parents:require(not p.is_symlink(),'Target ancestor is a symlink')
 profiles={
- 'cvpr-pico-handover-a100-byte-transfer-v1':('simple/G1WholebodyHandoverTeleop-v0','pico_handover_','cvpr-pico-handover-a100-byte-verification-v1'),
- 'cvpr-pico-mobile-pp-a100-byte-transfer-v1':('simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0','pico_mobile_pp_','cvpr-pico-mobile-pp-a100-byte-verification-v1')}
-require(value.get('contract') in profiles and value['remote_production_ready'] is False,'Invalid transfer contract')
-task_id,prefix,byte_contract=profiles[value['contract']]
-require(value.get('task_id',task_id if task_id=='simple/G1WholebodyHandoverTeleop-v0' else None)==task_id,'Task identity differs from transfer contract')
-if root.parent==pathlib.Path('/gaozt-test1/datasets/SIMPLE_sonic_v1_1'):
- require(root.name.startswith(prefix),'Remote task namespace differs')
+ 'simple/G1WholebodyHandoverTeleop-v0':('cvpr-pico-handover-a100-byte-transfer-v1','pico_handover_','cvpr-pico-handover-a100-byte-verification-v1'),
+ 'simple/G1WholebodyLocomotionPickBetweenTablesTeleop-v0':('cvpr-pico-mobile-pp-a100-byte-transfer-v1','pico_mobile_pp_','cvpr-pico-mobile-pp-a100-byte-verification-v1'),
+ 'cvpr/G1SonicXMovePickPico-v0':('cvpr-pico-pick-a100-byte-transfer-v1','pico_xmove_pick_','cvpr-pico-pick-a100-byte-verification-v1'),
+ 'cvpr/G1SonicBendPickPico-v0':('cvpr-pico-pick-a100-byte-transfer-v1','pico_bend_pick_','cvpr-pico-pick-a100-byte-verification-v1'),
+ 'cvpr/G1SonicXMoveBendPickPico-v0':('cvpr-pico-pick-a100-byte-transfer-v1','pico_xmove_bend_pick_','cvpr-pico-pick-a100-byte-verification-v1')}
+task_id=value.get('task_id')
+if task_id is None and value.get('contract')=='cvpr-pico-handover-a100-byte-transfer-v1':
+ task_id='simple/G1WholebodyHandoverTeleop-v0'
+require(isinstance(task_id,str) and task_id in profiles,'Explicit supported task identity required')
+transfer_contract,prefix,byte_contract=profiles[task_id]
+require(value.get('contract')==transfer_contract and value.get('remote_production_ready') is False,'Task identity differs from transfer contract')
+require(root.parent==pathlib.Path('/gaozt-test1/datasets/SIMPLE_sonic_v1_1') and
+ re.fullmatch(re.escape(prefix)+r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}',root.name),'Remote task namespace differs')
+require(value.get('data_directories')==['packed','dino'] and value.get('root_files')==['PICO_DATASET_READY.json'],
+ 'Transfer payload scope differs')
+require(isinstance(value.get('files'),dict) and 'PICO_DATASET_READY.json' in value['files'] and
+ all(isinstance(name,str) and pathlib.Path(name).parts and
+  (name=='PICO_DATASET_READY.json' or pathlib.Path(name).parts[0] in ('packed','dino')) for name in value['files']),
+ 'Transfer inventory scope differs')
+for relative in value['files']:owned(relative)
 '''
 
 REMOTE_PREPARE = REMOTE_COMMON + r'''
@@ -188,9 +227,9 @@ def remote_python(host,python,code,value):
     subprocess.run([*SSH,host,command],input=json.dumps(value,allow_nan=False),text=True,check=True)
 
 
-def transfer(root,remote,*,host='115.191.40.142',remote_python_path=REMOTE_PYTHON):
+def transfer(root,remote,*,host='115.191.40.142',remote_python_path=REMOTE_PYTHON,remote_rsync_path='rsync'):
     root = Path(root); remote = remote_target(remote)
-    proposed = inventory(root,remote)
+    proposed = inventory(root,remote,remote_rsync_path=remote_rsync_path)
     root = Path(proposed['local_root'])
     manifest_path = root/MANIFEST_NAME
     require(not manifest_path.is_symlink(),'Transfer manifest cannot be an alias')
@@ -203,7 +242,10 @@ def transfer(root,remote,*,host='115.191.40.142',remote_python_path=REMOTE_PYTHO
         with manifest_path.open('x') as stream:json.dump(value,stream,ensure_ascii=False,indent=2);stream.write('\n')
     remote_python(host,remote_python_path,REMOTE_PREPARE,value)
     transport = shlex.join(SSH)
-    common = ['rsync','-a','--checksum','--protect-args','--info=stats2','-e',transport]
+    # Preserve only hardlinks already inside each copied tree; sources stay
+    # read-only and every destination path still receives its own SHA check.
+    common = ['rsync','-a','-H','-z','--compress-level=1','--checksum','--protect-args','--info=stats2',
+        '--rsync-path='+shlex.join([value['remote_rsync_path']]),'-e',transport]
     for directory in value['data_directories']:
         subprocess.run([*common,str(root/directory)+'/',f'{host}:{remote/directory}/'],check=True)
     for name in value['root_files']:
@@ -233,8 +275,10 @@ def main():
     parser.add_argument('--remote-root',type=PurePosixPath,required=True)
     parser.add_argument('--host',default='115.191.40.142')
     parser.add_argument('--remote-python',default=REMOTE_PYTHON)
+    parser.add_argument('--remote-rsync',default='rsync',help='Literal remote rsync executable path (or rsync from PATH)')
     args = parser.parse_args()
-    print(json.dumps(transfer(args.local_root,args.remote_root,host=args.host,remote_python_path=args.remote_python),indent=2))
+    print(json.dumps(transfer(args.local_root,args.remote_root,host=args.host,remote_python_path=args.remote_python,
+        remote_rsync_path=args.remote_rsync),indent=2))
 
 
 if __name__=='__main__':

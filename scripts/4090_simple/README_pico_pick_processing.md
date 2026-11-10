@@ -92,3 +92,20 @@ XMovePick 的预期条数为99，另两任务各100。最终验证检查portable
 2026-11-09 本轮先导仅覆盖 BendPick 007、011：分别224、176帧，共400帧，RTX场景绑定、独立准入、全帧无损master及PNG精确重建已通过，原始物理数据未修改。实测输出阶段约9.6–10.7帧/秒，不含启动开销，不能据此宣称全299条或另外两任务已经通过GPU验收。
 
 两条先导随后完成真实LeRobot读取、clean DINO和独立生产读取：400帧、282个训练窗口、6次实际CPU生产查询均通过，见 `PILOT_FULL_CHAIN_RESULT.json` 及 `pilot_release/PICO_DATASET_READY.json`。该结果仅覆盖两条先导，全299条仍以各任务的最终成功收据为准。运行环境缺包或PNG编码版本不同必须解决实际问题，不能放宽SHA门槛。
+
+## 已授权的服务器交付
+
+2026-11-10 用户另行授权将本次299条上传到既有 `/gaozt-test1/datasets/SIMPLE_sonic_v1_1/`。本地处理计划中的禁止自动上传标记作为历史记录保留；上传使用独立授权清单，不改本地 `packed/`、`dino/` 或原验收收据。三个任务分别使用新目录 `pico_xmove_pick_20261110_human99_01`、`pico_bend_pick_20261110_human100_01`、`pico_xmove_bend_pick_20261110_human100_01`，不得合并成其他任务或覆盖旧数据。
+
+上传入口 `upload_pico_handover.py` 现支持三种显式Pick task_id，虽然共享Pick传输合同，仍必须匹配各自命名前缀和数量。本次服务器没有系统rsync，使用独立部署的包装器：
+
+```bash
+"$PICK_PACK_PY" scripts/4090_simple/upload_pico_handover.py \
+  --local-root "$PICK_LOCAL_RELEASE" --remote-root "$PICK_REMOTE_RELEASE" \
+  --host 115.191.40.142 \
+  --remote-rsync /gaozt-test1/datasets/SIMPLE_sonic_v1_1/.pipeline/pico_pick299_upload_20261110_001/bin/rsync
+```
+
+传输使用低级别压缩并保留已有树内硬链接，所有目标仍逐路径验证SHA和纳秒mtime。只允许完全相同manifest的未完成上传续传；未知目录、已迁移DINO或已通过远端验收的目录不会被再次同步。上传清单绑定实际rsync执行路径，不能悄悄换路由。
+
+字节上传不代表训练就绪。后续在各任务独立 `tools/` 部署已冻结的 `97598aa9` 生产源码和服务器可用配置副本，执行DINO路径迁移，保留 `dino.before-remote-relocation` 原副本，再通过 `verify_pico_handover.py --a100 --expected-episodes N` 的实际服务器CPU读取验收。所有验收隐藏CUDA并使用低优先级单CPU，不启动训练。004原件仍留待补采，不计入这次299条。

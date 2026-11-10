@@ -76,13 +76,15 @@ class UploadPicoTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'aliases'):upload.inventory(self.root,self.remote)
 
     def execute(self,code,value,check=True):
+        # Run the exact remote guards against an isolated local BASE.
+        code = code.replace(str(upload.REMOTE_BASE),self.tmp.name)
         return subprocess.run([sys.executable,'-B','-c',code],input=json.dumps(value),
             text=True,capture_output=True,check=check)
 
     def test_actual_remote_cpu_scripts_preserve_sha_and_restore_nanosecond_mtime(self):
         fixture(self.root)
         value = upload.inventory(self.root,self.remote)
-        target = Path(self.tmp.name)/'remote';value['remote_root'] = str(target)
+        target = Path(self.tmp.name)/'pico_handover_remote';value['remote_root'] = str(target)
         self.execute(upload.REMOTE_PREPARE,value)
         for relative,wanted in value['files'].items():
             path = target/relative;path.parent.mkdir(parents=True,exist_ok=True)
@@ -106,7 +108,7 @@ class UploadPicoTests(unittest.TestCase):
     def test_remote_prepare_does_not_reuse_other_directory_or_completed_release(self):
         fixture(self.root)
         value = upload.inventory(self.root,self.remote)
-        target = Path(self.tmp.name)/'remote';target.mkdir();(target/'existing-training.txt').write_text('untouched')
+        target = Path(self.tmp.name)/'pico_handover_remote';target.mkdir();(target/'existing-training.txt').write_text('untouched')
         value['remote_root'] = str(target)
         self.assertNotEqual(self.execute(upload.REMOTE_PREPARE,value,check=False).returncode,0)
         self.assertEqual((target/'existing-training.txt').read_text(),'untouched')
@@ -154,7 +156,7 @@ class UploadPicoTests(unittest.TestCase):
     def test_mobile_remote_scripts_verify_actual_bytes_and_do_not_promote_readiness(self):
         fixture(self.root,task_id=upload.MOBILE_TASK_ID)
         value = upload.inventory(self.root,'/gaozt-test1/datasets/SIMPLE_sonic_v1_1/pico_mobile_pp_unit_test')
-        target = Path(self.tmp.name)/'mobile_remote';value['remote_root'] = str(target)
+        target = Path(self.tmp.name)/'pico_mobile_pp_remote';value['remote_root'] = str(target)
         self.execute(upload.REMOTE_PREPARE,value)
         for relative in value['files']:
             path = target/relative;path.parent.mkdir(parents=True,exist_ok=True)

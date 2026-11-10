@@ -29,7 +29,7 @@ import time
 
 from download_egoexo4d_hm import filter_s3_files
 
-DEFAULT_OUTPUT_DIR = Path("/gaozt-test1/datasets/EgoExo-4D-HM")
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("CVPR_DATA_ROOT") or Path.home() / "sigma0" / "data").expanduser() / "EgoExo-4D-HM"
 PARTS = ("HM", "metadata", "takes", "take_trajectory", "take_vrs_noimagestream", "captures")
 STATE_NAMES = {"R": "运行", "S": "等待", "D": "等待 I/O", "T": "暂停", "t": "暂停", "Z": "已退出"}
 

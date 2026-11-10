@@ -13,7 +13,8 @@ Examples:
     python download_egoexo4d_hm.py --aws-profile egoexo --resume --exclude-bucket ego4d-indiana
     python download_egoexo4d_hm.py --aws-profile egoexo --resume --auto-route --probe-interval 120
 
-Outputs under --output-dir (default: /gaozt-test1/datasets/EgoExo-4D-HM):
+Outputs under --output-dir (default: ~/sigma0/data/EgoExo-4D-HM, or
+$CVPR_DATA_ROOT/EgoExo-4D-HM):
     EgoExo4D-HM/<take>/points_triangulated_world_results_merged.npz
     EgoExo4D/takes/<take>/frame_aligned_videos/<ego RGB>.mp4
     EgoExo4D/takes/<take>/... (MPS trajectory and noimagestreams VRS)
@@ -47,6 +48,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 import fcntl
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import sys
@@ -56,7 +58,7 @@ import zipfile
 
 HM_REPO = "Ego-Exo4D-HM/npz-datasets"
 HM_FILE = "points_triangulated_world_results_merged.npz"
-DEFAULT_OUTPUT_DIR = Path("/gaozt-test1/datasets/EgoExo-4D-HM")
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("CVPR_DATA_ROOT") or Path.home() / "sigma0" / "data").expanduser() / "EgoExo-4D-HM"
 S3_BASE = "s3://ego4d-consortium-sharing/egoexo-public"
 RAW_PARTS = ("takes", "take_trajectory", "take_vrs_noimagestream", "captures")
 HM_FIELDS = {"trans", "root_orient", "pose_body", "betas_per_frame", "valid", "joints3d"}

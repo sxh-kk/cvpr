@@ -1,146 +1,206 @@
-# cvpr
+# Σ₀: From Human Interaction and Motion to Humanoid Loco-Manipulation
 
-MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert同步官方Ψ₀工程。
+**English** | [简体中文](README.zh-CN.md)
 
-A100任务适配见[Handover50条、38k三专家初始化后微调20k步及损失/ETA记录](docs/A100_SIMPLE_TASK50_FINETUNE.md)。
-原任务2345步故障后，用户接受重算；融合AdamW同梯度验证及新八卡第2、20步检查已通过，
-当前独立重跑已保存20步恢复快照，新增每1k恢复点并保留所有4k正式点，完整训练和物理效果仍待验收。
-2026-10-22已导出任务6000步完整联合权重，在本机SONIC v1.1上完成五条Handover原VAL场景的16秒物理闭环：
-1/5触发现有接触成功标志、0次跌倒，尚未确认完整释放；控制档案与cold start边界及视频索引见
-[本次测评记录](docs/A100_SIMPLE_TASK50_FINETUNE.md#任务6000步导出与本机handover物理测评)。
-后续来源审计、抓取失败定位、同钟教师重放及100条新采集的实际进度见
-[Handover数据质量与重新采集](docs/HANDOVER_QUALITY100.md)。
-扩充原始动作来源、连续场景随机化及在线动作适配的新一轮重采入口见
-[随机化100条采集与严格准入](scripts/4090_simple/README_handover_random100.md)；候选和开发试采不等于验收完成。
+## Abstract
 
-| 模块 | 当前用途 | 说明 |
+Humanoid loco-manipulation requires a robot to preserve a hand-object interaction while adapting its whole-body motion across varying initial states. Collecting synchronized whole-body teleoperation demonstrations is costly, yet egocentric videos offer scalable supervision at different action granularities: fine-grained wrist and fingertip trajectories capture object interaction, whereas sparse skeletal motion describes whole-body coordination. This supervision--execution asymmetry motivates learning the two priors separately and coupling them during robot control. We present Σ₀, a vision-language-action framework that learns an interaction prior through hand-action prediction and a coordination prior by jointly reconstructing observed skeletal motion and forecasting its future evolution. During robot-supervised post-training, the policy integrates both priors through proprioception-conditioned serial cross-attention, directly predicting robot-native body and hand actions without retargeting human motion. Across six SIMPLE tasks, Σ₀ achieves 92.8% success, surpassing the strongest baseline by 8.1 percentage points. With 10 demonstrations per task, Σ₀ achieves 83.3% success, whereas the variant without human-prior pretraining achieves 75.0% with 100 demonstrations per task. These results support data-efficient humanoid control from complementary human priors.
+
+## Installation
+
+## Configuration
+
+Default paths and training settings are provided in these files:
+
+| Component | Configuration |
+| --- | --- |
+| MotionExpert | [Pretraining YAML](MotionExpert/configs/smplh_k12_psi0_pretrain.yaml) |
+| DINO feature extraction | [Encoder configuration](pipeline/configs/dino.json) |
+| Dual-source training | [Paths and initialization](configs/unifolm.env.sh) |
+
+Data, models and outputs default to `~/sigma0/data`, `~/sigma0/models` and `~/sigma0/runs`. Edit the configurations to use your own storage. The joint training launcher loads `configs/unifolm.env.sh` automatically.
+
+## Pretrained Weights
+
+| Model | Source | Use |
 | --- | --- | --- |
-| MotionExpert | 5Hz历史5帧＋当前帧，预测未来5帧；一步完整11个hidden作为运动先验，可反传 | [接口与训练](MotionExpert/README.md) |
-| ImageProcess | 统一RGB几何，支持共享窗口增强与显式分支颜色策略 | [配置与接口](ImageProcess/README.md) |
-| pipeline | 从SMPL-H归档和MCAP／MP4提取原生30Hz DINO | [格式与命令](pipeline/README.md) |
-| VLMExpert | Ψ₀／Qwen工程，上游 `cda3fdf`；新增可联合训练 VLM＋Motion 的双来源 action expert | [接口与上游说明](VLMExpert/README.md) |
+| EgoDex390K VLM | [Ψ₀ pretrained backbone](https://huggingface.co/USC-PSI-Lab/psi-model/tree/main/psi0/pre.fast.2605160748.ckpt.ego390k) | Available VLM initialization for dual-source training |
+| DINOv2 ViT-L/14 with registers | [DINOv2 model](https://huggingface.co/facebook/dinov2-with-registers-large/tree/e4c89a4e05589de9b3e188688a303d0f3c04d0f3) | Frozen visual encoder for MotionExpert and UnifoLM |
+| MotionExpert | Output of [Motion pretraining](#motionexpert) | `final.ckpt`; joint training selects EMA weights by default |
 
-VLMExpert于2026-10-18替换为官方Psi0 `main` 的固定快照，恢复官方训练、推理、SONIC与基线代码。
-此前GLOBAL token／WBT定制保留在Git历史中。
-使用独立Python 3.11环境；源码版本、依赖和权重排除记录见 [上游快照](docs/psi0_upstream.json)，
-安装与本仓库的展开依赖约定见 [迁移说明](docs/MIGRATION.md#vlmexpert-环境与路径)。
+Download the upstream VLM backbone and the DINO encoder to the default model directories:
 
-本地 `dual_source_v1` 支持联合训练 VLM、MotionExpert 与新 action expert，读取 VLM 最后一层与完整11个 motion hidden，
-各 block 串行执行 action self-attention、VLM cross-attention、Motion cross-attention、FFN；
-由 `p_V/p_M/action time` 融合调制。训练与采样需提供真实历史 DINO `[B,6,5,1024]`，
-当前帧与 VLM 对齐；不会从单帧输入伪造历史。旧 `psi0_joint` 路径保留，新旧 head checkpoint 不兼容。
-UnifoLM 配方解冻两套 expert，DINO 保持冻结；VLM 使用官方分组学习率，Motion 使用独立学习率。
-UnifoLM 放在 `/gaozt-test1/datasets/UnifoLM`，原生30Hz DINO 提取与历史6帧读取已接通，
-缓存和 Ψ₀ 共用 `shared_image_profile=256x320`；数据准备命令见 [UnifoLM 数据链路](VLMExpert/README.md#unifolm-下载dino-提取与读取)。
-当前 UnifoLM 配方显式使用 `motion_image_policy="vlm_color_clean_motion"`：VLM 当前帧单独做 Ψ₀ 随机颜色增强，
-Motion 历史6帧保持 clean，复用现有 DINO 缓存；两路仍同源、同时间、同几何 profile，不启用随机裁切。
-验证／`no_aug`／推理均保持 clean；通用 `shared_rgb` 在线同步增强模式继续保留。此项调整不启动训练或重做缓存。
-Python接口、数据与服务接线边界见 [双来源说明](VLMExpert/README.md#本仓库扩展双来源-action-expert)。
+```bash
+python VLMExpert/scripts/data/download.py \
+  --repo-id USC-PSI-Lab/psi-model \
+  --remote-dir psi0/pre.fast.2605160748.ckpt.ego390k \
+  --local-dir "$HOME/sigma0/models/egodex-vlm" \
+  --repo-type model
 
-UnifoLM 训练集 DINO 已完成八卡提取及最终完整性检查：7,244个 episode、5,416,386帧，
-可读取5,199,066个完整历史窗口。初始化固定本地 Qwen3-VL 实测权重身份与 Motion 第100轮 EMA，
-保留完整11个 motion hidden 及 mean pooling；独立 Python3.11／Torch2.7 环境已与当前工程对齐。
-真实完整模型已通过单卡 batch1／16、双卡每卡 batch1 的前后向与连续更新、保存恢复及冷加载检查，
-结果见 [完整模型验收记录](docs/unifolm_full_model_validation.json)。
-新增 [八卡每卡 batch16 验收](docs/unifolm_8gpu_batch16_validation.json) 连续8次更新通过，
-累积2步、有效batch256，每步八卡完整模型哈希一致；峰值allocated／reserved为63.15／65.95 GiB。
-配置与显存范围见 [UnifoLM 联合训练配方](VLMExpert/README.md#unifolm-联合训练配方)。
-Motion后训练LR建议维持 `1e-5`，重点对照WholeBodyWAM、λ₀与WB-WAM的运动先验训练方式；
-新head和VLM继续使用Ψ₀分组LR。2026-10-19已按用户授权启动八卡正式UnifoLM后训练：
-每卡16、累积2步、全局256、40k更新（约1.97遍窗口）、1000步warmup及cosine。
-当前进程、实际配置和日志见 [运行状态](/gaozt-test1/datasets/UnifoLM/.pipeline/current_unifolm_training.json)。
-首次20-batch验证和初始连续更新曾通过，见 [历史启动检查记录](docs/unifolm_training_start.json)；
-该任务随后在735次更新后由rank5原生CUDA断言退出，尚未生成正式checkpoint。
-重启修复包括安全的spawn数据worker、生产一致的确定性验收、全卡更新前数值保护和早期保存；
-保留原VLM prefix tokens，按原Ψ₀策略冻结未参与该loss的末端norm。
-新验收和实际重启状态见 [重启记录](docs/unifolm_assert_repair_validation.json)，实时PID／日志以外部状态文件为准。
-修订任务已于2026-10-19 05:56 UTC重启，首轮验证和第100步完整保存通过，保存后继续更新通过；
-新optimizer布局的两卡B16冷恢复与继续更新也已验收，原生断言仍未独立复现，不能视作长跑问题已消除。
-W&B使用离线本地记录；此前短时验收不代表长期收敛或正式吞吐验收。
+python scripts/download_dino.py
+```
 
-UnifoLM 提速代码已合入当前仓库，续训只启用同步调试关闭、跳过不用的VLM词表输出、
-CPU诊断输入／指标同步优化，AdamW保持 `foreach=False`；完整tokens、pooling、state接法和分组LR不变。
-第14000步已保留恢复快照；八卡连续更新健康检查及确定性单步完整模型一致性对照通过，
-新run已从该步恢复模型／优化器／scheduler／RNG并继续40k日程。
-正式恢复后的53次真实数据更新短测约3.89秒／步，loss及五组梯度正常；长跑状态以外部实时记录为准。
-map-style恢复在采样前跳过已完成微批，loss曲线以校验过的1–14000步历史接续新run。
-[入口与边界](VLMExpert/README.md#unifolm-提速与断点恢复)、
-[八卡冷恢复与提速验收记录](docs/unifolm_speedup_resume_validation.json)。
+The VLM downloader places the selected model directly in `egodex-vlm/`, including its configuration, tokenizer and weights. The DINO downloader reads its model and version from the [encoder configuration](pipeline/configs/dino.json); use `--output` to choose another model directory.
 
-该提速任务在北京时间2026-10-20 12:06、完成15108次更新后，再次由rank5原生CUDA断言退出；
-尚未定位失败算子，不能将此前短测通过视作根因修复。可恢复点仍为受保护的14000步，需重算1108次更新。
-本轮恢复使用同步CUDA报错、全程tmpfs双窗口CPU batch/RNG快照，并按用户要求每1000步完整保存；
-模型、完整tokens／pooling、batch与分组学习率保持原配置。
-原因证据、恢复措施和验收边界见 [断言与恢复分析](docs/unifolm_assert_recovery_analysis.md)，
-实际启动及进度以外部运行状态为准。
-八卡恢复已于北京时间12:47启动，12:58初期检查完成14054次更新，loss与五组梯度有限，
-真实双窗口CPU快照及每100步绘图监控均已接回；详见 [恢复验收记录](docs/unifolm_assert_recovery_validation.json)。
+For VLM pretraining from scratch, see [EgoDex](https://github.com/apple/ml-egodex), [Qwen3-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) and the [upstream pretraining instructions](https://github.com/physical-superintelligence-lab/Psi0/tree/cda3fdfafe47cb6fa75400d013de1bd36e3cea05#pre-train-vlm). Additional [Ψ₀ checkpoints](https://huggingface.co/USC-PSI-Lab/psi-model) are upstream models; Σ₀ result checkpoints are not linked in this repository.
 
-训练 loss 可由独立 CPU 观察进程按每100次优化器更新聚合并持续刷新 PNG／SVG／CSV，
-入口与状态文件见 [Loss 持续绘图](VLMExpert/README.md#loss-每100步持续绘图)；不改动训练进程或日志写入。
+## Data Preparation
 
-当前修订目标为 `/gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality`。
-v4继承双来源最终FK拟合验收，新增HM原始Aria质量／跟踪中断、EgoSuite相机物理连续性mask，
-并在5Hz增量中检查全部中间30Hz点及边。原SMPL-H参数、双手21点、world观测、地面、RGB、分割均保留。
-旧归档、缓存、统计和checkpoint保留追溯；原生30Hz DINO按相同字节复用，无需重新提取。
+| Data | Purpose | Source / preparation |
+| --- | --- | --- |
+| EgoSuite / EgoStandard | Human motion source data | [Official bucket](https://huggingface.co/buckets/LightwheelAI/EgoStandard), [downloader](datasets/download_egosuite.py) |
+| Ego-Exo4D-HM | Human motion and camera source data | [HM dataset](https://huggingface.co/datasets/Ego-Exo4D-HM/npz-datasets), [downloader](datasets/download_egoexo4d_hm.py) |
+| EgoDex | Human hand-action pretraining | [Dataset and preparation](https://github.com/apple/ml-egodex) |
+| UnifoLM SONIC | Robot-supervised joint training | [Fixed data revision](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/e78fb93cc28912a3031a10b8656d32d7f0a2b867/sonic), [preparation script](VLMExpert/scripts/data/prepare_unifolm.py) |
+| SIMPLE | Task demonstrations and evaluation initial states | [Training data](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main/simple), [evaluation data](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main/simple-eval) |
 
-MotionExpert输出245维运动，另有18维相机轨迹。训练用5Hz／11帧，历史6帧的最后一帧与Ψ₀当前帧一致。
-DINO使用冻结的 `dinov2-with-registers-large`，每帧CLS＋4 register，即5×1024，按episode用mmap读取。
-预训练与Robust的最终RGB为H256×W480，后训练为H256×W320；两路遵循同一几何profile，各自做编码器归一化，增强按显式策略执行。
+### Motion pretraining data
 
-模型已去掉可学习GLOBAL token。`forward_features()` 在 `t=1` 完整Gaussian上前向一次，返回
-`one_step_hidden [B,11,768]` 和严格的 `one_step_global = one_step_hidden.mean(1) [B,768]`。
-下游使用完整 `one_step_hidden`；`one_step_global` 保留为可选摘要及既有冻结读出的接口。
-保留autograd，未来标签可用性不影响部署输入。self-attention Q/K/V全归一化，cross context独立归一化。
-架构为 `e7_smplh12_hands21_meanpool_qkvnorm_v2`，旧GLOBAL／旧注意力checkpoint拒绝直接恢复；
-旧第60轮热启动配置已移除，当前配置从头建立新任务。
+Download the source data:
 
-固定窗口缓存位于 `training_cache/smplh245_5hz_w11_camera-quality-v4`，
-新全train统计为 `statistics/smplh_k12_5hz_joint_camera-quality-v4.pt`，均在MixEgoMotion根目录。
-仅独立证明计算完全不变的episode可复用旧shard；受影响episode重建，重新打包验收、统计及GPU验证。
-已通过的FK数值验收不重复执行。正式训练就绪绑定新统计、缓存、当前架构和GPU实现身份。
+```bash
+python datasets/download_egosuite.py run \
+  --output-dir "$HOME/sigma0/data/EgoSuite"
 
-异常保护检查逐样本加权flow loss、每层token RMS及unscale后／clip前梯度；DDP统一判决，更新前停止。
-未加权分组MSE单独检查NaN/Inf并记录，不与实际加权loss共用幅值门限。
-异常时保存各卡batch、mask、来源、RNG与中间量，不额外保存大型checkpoint，正常步不写诊断文件。
-新任务为8卡、每卡256、每卡24workers、LR1e-4、BF16、200轮（10轮warmup）、每20轮保存。
-单机正式启动显式启用NCCL P2P／共享内存，不使用 `--ddp-socket`；指标每10步合并同步，
-保留完整epoch均值和每步异常保护。普通AdamW与其余训练参数保持不变。
-归档与训练路径验收已完成，WD对照在第30轮结束，20／100轮冻结先验验证已完成。
-2026-10-17按用户最新安排，从原正式任务第100轮checkpoint完整恢复，目标累计200轮；
-保留优化器、EMA和原200轮学习率日程，八卡每卡256／24workers，其余参数不变。
-独立GPU诊断入口为 `python -m MotionExpert.probe_prior`，只拟合小读出头，按EgoSuite／HM分别报告；
-具体命令、采样与解释边界见 [冻结运动先验验证](MotionExpert/README.md#冻结运动先验验证)。
-支持在已验收20／100轮job上只读复用样本和基线，仅新增第160轮提取、读出及配对比较；
-冻结先验的train／val指标与全量test动作指标分别报告，原20／100轮结果保留。
-完整hidden另用 `MotionExpert.probe_tokens` 和 `MotionExpert.token_probe_fit` 对比历史6／未来5／全部11与DINO，
-四组读出头各290,886参数，保留时间与输入有效mask；不在读取前求均值或降维。
-协议与限速命令见 [完整token等参数读出对照](MotionExpert/README.md#完整token等参数读出对照)。
-第100轮四组、三个读出seed的GPU对照已完成；完整11个hidden相对DINO的腕位移误差在EgoSuite／HM
-分别降低约11.8%／7.0%。11与未来5的差异较小，不能据此证明历史重建损失必要或真实下游收益。
-配置、手动命令、数据政策和异常诊断见 [MotionExpert README](MotionExpert/README.md)。
-修复流程状态位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_repair.json`。
-当前训练PID、日志和启动配置位于 `/gaozt-test1/datasets/MixEgoMotion/.pipeline/current_motionexpert_training.json`。
-`MotionExpert/watch_loss.py` 每完成1轮，独立更新训练目录 `plots/loss_curve.png`，
-展示从第1轮到当前完整轮次的训练均值与已有验证loss，同时保存CSV。
-绘图只读取TensorBoard，不占训练GPU；[运行方式](MotionExpert/README.md#每轮更新loss曲线)。
+python datasets/download_egoexo4d_hm.py \
+  --output-dir "$HOME/sigma0/data/EgoExo-4D-HM"
+```
 
-环境迁移见 [MIGRATION.md](docs/MIGRATION.md)。数据、权重、缓存、checkpoint和环境不随Git分发。
-将UnifoLM第20000步联合模型迁移到4090、在该机独立运行模型与SIMPLE的需求、环境配置顺序及验收边界，
-见 [4090独立测评交接](docs/4090_SIMPLE_HANDOFF.md)。该文档可直接交给4090端Codex执行环境准备；权重与大仿真资源另行传输。
-4090本机的两套Conda环境约束、外部资源路径和无权重冒烟命令见
-[环境工具](scripts/4090_simple/README.md)；实际阶段结果见 [4090环境记录](docs/4090_SIMPLE_ENVIRONMENT.md)。
-A100等待20k完整保存后的保护／导出、4090 SSH拉取及SHA核验见[资源交接](docs/4090_SIMPLE_TRANSFER.md)。
-资源到达后的严格GPU模型、真实历史／DINO、本机HTTP与SIMPLE闭环实际边界见
-[4090 GPU验收记录](docs/4090_SIMPLE_GPU_ACCEPTANCE.md)。
-用户后续授权的最新完整28k权重迁移、SONIC v1.1重编码与独立CarryBox适配见
-[4090本地任务适配](docs/4090_SIMPLE_CARRYBOX_FINETUNE.md)；适配结果与原20k基线分别记录。
+The HM downloader uses configured AWS credentials for the associated videos and camera resources. Dataset selection and download options are listed by each script's `--help`.
 
-[4090独立举箱保持任务与真实v1.1数据](docs/4090_SIMPLE_LIFTBOX_FINETUNE.md)：原CarryBox标准保留，真实成功示范验收后再适配。
-该记录区分Action-only诊断、按A100实际配方更新VLM/Motion/Action的联合适配，以及SONIC v1.1量化接口的独立物理对照；
-下载、两步更新、离线误差下降与真实举箱成功分别验收，不将安装或训练进程完成等同于测评通过。
-第三方代码沿用各目录原许可与版权。
+MotionExpert reads a prepared SMPL-H archive with dataset splits and body-model resources. The complete conversion from raw sources to a trainable archive is not included. See [pipeline](pipeline/README.md#数据格式) for the expected layout.
 
-按抬升、交接与放置失败改进TRAIN数据的关键转换采样、独立补采及生产索引对接，见[失败阶段数据增强](docs/HANDOVER_FAILURE_GUIDED_DATA_V2.md)。原数据和既有训练保持不变，新版本实际状态以各审核收据为准。
+With a compatible archive available, extract DINO features from its source camera videos:
 
-PICO 4 双手柄与脚踝定位器通过本机 SONIC v1.1 操控 SIMPLE G1，并同步录制真实图像、状态和控制指令，见[PICO 仿真遥操作采集](docs/PICO_SIMPLE_TELEOP.md)。保存后独立验收，不将连接正常或原始录制完成当作成功训练示范。
+```bash
+ARCHIVE_ROOT="$HOME/sigma0/data/MixEgoMotion/smplh-parameters-v4-camera-quality"
+VISION_ROOT="$ARCHIVE_ROOT/vision_profiles/psi0_256x480_v1_30hz"
+
+python -m egomotion_pipeline.cli extract-smplh-features \
+  --dataset "$ARCHIVE_ROOT" \
+  --output "$VISION_ROOT" \
+  --config pipeline/configs/dino.json
+```
+
+Then build the window cache and normalization statistics using the [MotionExpert preparation steps](MotionExpert/README.md#数据与缓存). The output paths match the default pretraining YAML. Image and motion conventions are documented in [data protocols](docs/protocols/README.md).
+
+### UnifoLM data and features
+
+The preparation script downloads the pinned SONIC data and preserves the official train/validation packs and shared statistics. Extract DINO features for both packs:
+
+```bash
+python VLMExpert/scripts/data/prepare_unifolm.py \
+  --root "$HOME/sigma0/data/UnifoLM"
+
+for PACK in unifolm_sonic_lerobot_train unifolm_sonic_lerobot_val; do
+  python VLMExpert/scripts/data/extract_unifolm_dino.py \
+    --dataset-root "$HOME/sigma0/data/UnifoLM/$PACK" \
+    --output "$HOME/sigma0/data/UnifoLM/dino/256x320/$PACK" \
+    --model-path "$HOME/sigma0/models/dinov2-with-registers-large" \
+    --shared-image-profile 256x320 --device cuda:0 \
+    --batch-size 32 --workers 4 \
+    --inference-precision bf16 --storage-dtype float16
+done
+```
+
+The cache stores all native 30 Hz frames. Training selects six real observations at 5 Hz, ending at the VLM image timestamp. See [VLM Expert](VLMExpert/README.md#unifolm-feature-cache) for cache loading and alignment.
+
+### SIMPLE task data
+
+Download an upstream demonstration pack and its evaluation initial states. This example selects Handover; change `TASK` to select another published task:
+
+```bash
+TASK=G1WholebodyHandoverTeleop-v0
+SIMPLE_ROOT="$HOME/sigma0/data/SIMPLE"
+
+hf download USC-PSI-Lab/psi-data \
+  "simple/$TASK.zip" "simple-eval/$TASK.zip" \
+  --repo-type dataset --local-dir "$SIMPLE_ROOT"
+
+unzip "$SIMPLE_ROOT/simple/$TASK.zip" -d "$SIMPLE_ROOT/simple"
+unzip "$SIMPLE_ROOT/simple-eval/$TASK.zip" -d "$SIMPLE_ROOT/simple-eval"
+```
+
+These task packs retain their upstream action and controller conventions. Use a task adapter compatible with the selected data; the dual-source policy interface is documented in [SIMPLE tools](scripts/4090_simple/README.md) and the [control interface](scripts/4090_simple/CONTROL.md).
+
+## Training
+
+### MotionExpert
+
+After preparing the archive, features, window cache and statistics:
+
+```bash
+python -m MotionExpert.train --from-scratch
+```
+
+| Setting | Default |
+| --- | --- |
+| GPU workers / batch size per GPU | 8 / 256 |
+| Epochs / warmup epochs | 200 / 10 |
+| Learning rate / precision | `1e-4` / BF16 mixed |
+| Motion rate / window | 5 Hz / 6 observed + 5 future frames |
+
+Adjust `--devices`, `--batch-size` and `--num-workers` for available resources. Resume a run with its saved configuration:
+
+```bash
+MOTION_RUN="$HOME/sigma0/runs/motion/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch"
+
+python -m MotionExpert.train --resume "$MOTION_RUN/last.ckpt"
+```
+
+### Dual-source action expert
+
+The launcher initializes a new action expert from the downloaded EgoDex VLM and the MotionExpert training output, and jointly updates both priors on UnifoLM:
+
+```bash
+bash VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh
+```
+
+| Setting | Default |
+| --- | --- |
+| GPU workers / batch size per GPU / accumulation | 1 / 16 / 2 |
+| Optimizer updates / warmup updates | 40,000 / 1,000 |
+| Action-expert learning rate / precision / seed | `1e-4` / BF16 / 292285 |
+| Action chunk / action width / state width | 30 / 80 / 45 |
+
+Set `NPROC_PER_NODE`, `BATCH_SIZE`, `GRAD_ACCUM_STEPS` and `MAX_STEPS` to adjust the run. Paths and initial weights are configured in `configs/unifolm.env.sh`. The [VLM Expert guide](VLMExpert/README.md#joint-training) lists parameter-group learning rates, continuation and task-adaptation options. Other launchers are indexed in [training scripts](VLMExpert/scripts/train/README.md); baseline methods are described in [baselines](VLMExpert/baselines/README.md).
+
+## Evaluation
+
+### Motion forecasting
+
+Evaluate motion prediction on 16 validation windows:
+
+```bash
+MOTION_RUN="$HOME/sigma0/runs/motion/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch"
+
+python -m MotionExpert.evaluate \
+  --checkpoint "$MOTION_RUN/final.ckpt" \
+  --config MotionExpert/configs/smplh_k12_psi0_pretrain.yaml \
+  --split val --max-samples 16 \
+  --output "$HOME/sigma0/runs/evaluation/motion-val.json"
+```
+
+Increase the positive `--max-samples` value for a larger selection, or change `--split` and `--checkpoint`. This command reports motion metrics such as position and rotation error. The [MotionExpert API](MotionExpert/README.md#一步hidden与在线共享图像) also provides prediction and feature extraction.
+
+### SIMPLE policy evaluation
+
+Use the dual-source [serving and closed-loop evaluation tools](scripts/4090_simple/README.md). They require a trained run directory, [SIMPLE scene assets](https://github.com/physical-superintelligence-lab/SIMPLE), [SONIC 1.1 resources](https://github.com/physical-superintelligence-lab/GR00T-WholeBodyControl) and matching controller compatibility metadata. Choose the task, checkpoint, episode count and seed in the evaluation command.
+
+The exact per-result checkpoints, 10/100-demonstration subsets and evaluation settings for the success rates reported in the abstract are not specified in the released configurations.
+
+For demonstration recording, see [PICO teleoperation](docs/teleoperation.md).
+
+## Code Structure
+
+| Component | Description |
+| --- | --- |
+| [MotionExpert](MotionExpert/README.md) | Human motion prior, forecasting and feature extraction |
+| [ImageProcess](ImageProcess/README.md) | Shared image geometry and augmentation |
+| [pipeline](pipeline/README.md) | DINO extraction from prepared motion archives |
+| [VLM Expert](VLMExpert/README.md) | VLM backbone and dual-source action expert |
+| [SIMPLE tools](scripts/4090_simple/README.md) | Policy serving, closed-loop evaluation and demonstration collection |
+
+## Acknowledgements
+
+This project builds on [Ψ₀](https://github.com/physical-superintelligence-lab/Psi0). See [third-party code](docs/dependencies/README.md) for sources and licenses.

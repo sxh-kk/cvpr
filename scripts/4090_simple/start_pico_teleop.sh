@@ -2,8 +2,8 @@
 # Use the independent conda simulation environment; no model/training service.
 set -euo pipefail
 task_repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-task_runtime="${CVPR_SIMPLE_RUNTIME:-/home/zxc/CVPR_Evaluation_runtime}"
-task_python="${PICO_SIM_PYTHON:-/home/zxc/miniconda3/envs/cvpr-simple-sim310/bin/python}"
+task_runtime="${CVPR_SIMPLE_RUNTIME:-${HOME}/sigma0/runtime}"
+task_python="${PICO_SIM_PYTHON:-$(command -v python3 || true)}"
 if [[ ! -f "$task_runtime/local.env.sh" || ! -x "$task_python" ]]; then
   echo 'Missing local runtime configuration or conda simulation Python.' >&2
   exit 1

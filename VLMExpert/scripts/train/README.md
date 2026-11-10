@@ -1,102 +1,46 @@
-# Training container
+# Training launchers
 
-The training environment (`.venv-psi`) is baked into a container image, so jobs
-start without reading a 9GB venv off BeeGFS. **The image holds dependencies
-only** — your source stays in your own checkout, bind-mounted at `/workspace/psi0`
-at runtime. One image serves every user.
+Data, weights and the full workflow are described in the [project README](../../../README.md). The [VLM Expert README](../../README.md) documents model inputs, image alignment and the dual-source API.
 
-The base is a plain CUDA image (`nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04`),
-not NGC PyTorch: NGC's bundled python and torch are shadowed completely by
-`.venv-psi`, so the `psi` group installs its own torch 2.7 + `nvidia-*` wheels
-and NGC's copies were dead weight. CUDA 12.9 and not 13.x because `pyproject`
-pins `torch==2.7.0` and the flash-attn wheel is `cu12torch2.7cxx11abiTRUE-cp311`.
+## Dual-source training
 
-## Build
-
-Two equivalent recipes — the Dockerfile and the enroot script. Keep them in
-step if you change one; compose is just a wrapper around the Dockerfile.
-
-| where | how |
-|---|---|
-| machine with docker | `docker build -f scripts/train/Dockerfile -t psi:train .` (from repo root) |
-| machine with compose | `docker compose build psi` (equivalent; see `docker-compose.yml`) |
-| cluster node with enroot | `bash scripts/train/build-sqsh.sh` |
-
-On the cluster (no docker, no root needed — `--root` is UID 0 *inside* a user
-namespace only):
+Run the launcher from the repository root after preparing the data and weights:
 
 ```bash
-ssh h9
-cd /path/to/psi0
-bash scripts/train/build-sqsh.sh              # ~10 min; PSIX_DRY_RUN=1 to just print paths
-sudo cp /mnt/beegfs/scratch/$USER/containers/psix.sqsh /mnt/beegfs/containers/psix.sqsh
+bash VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh
 ```
 
-`build-sqsh.sh` runs on the host; `inner.sh` runs inside the container.
-It writes to `/mnt/beegfs/scratch/$USER/containers/psix.sqsh` — installing to
-`/mnt/beegfs/containers/` needs an admin, since that directory is root-owned.
+It automatically loads [`configs/unifolm.env.sh`](../../../configs/unifolm.env.sh). Edit that file for your storage paths, or set `UNIFOLM_ENV_FILE` to a separate configuration file.
 
-To convert a docker-built image instead of building on the cluster:
+| Entry point | Purpose |
+| --- | --- |
+| [`posttrain-dual-source-unifolm.sh`](psi0/posttrain-dual-source-unifolm.sh) | Train a new dual-source action expert while jointly updating the VLM and MotionExpert |
+| [`posttrain-dual-source-unifolm-speedup.sh`](psi0/posttrain-dual-source-unifolm-speedup.sh) | Enable optional training optimizations; defaults to input checks, requires `--run` to train |
 
-```bash
-ENROOT_TEMP_PATH=/data/enroot-tmp \
-ENROOT_SQUASH_OPTIONS='-comp zstd -Xcompression-level 10' \
-  enroot import -o psix.sqsh dockerd://psi:train
-```
+The base launcher supports `--dry-run` to print the command and `--check-only` to check files and metadata before printing it. Both return without starting training.
 
-Use zstd, not enroot's `-comp lz4 -noD` default — it roughly halves the result
-(16GB vs ~33GB when measured on the older NGC-based image).
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `NPROC_PER_NODE` | `1` for the base launcher; `8` for the optimized launcher | GPU workers on one node |
+| `BATCH_SIZE` | `16` | Batch size per GPU |
+| `GRAD_ACCUM_STEPS` | `2` | Gradient accumulation steps |
+| `MAX_STEPS` | `40000` | Optimizer updates |
+| `MOTION_USE_EMA` | `1` | Select EMA (`1`) or raw (`0`) Motion initialization |
+| `UNIFOLM_RESUME_CHECKPOINT` | Unset | Absolute `checkpoints/ckpt_N` directory for continuation |
 
-## Packages
+For a new task adaptation, use `model.pretrained_joint_checkpoint` to initialize from a trained joint model and start a new optimizer. This differs from continuing a run with `UNIFOLM_RESUME_CHECKPOINT`. See [resume and task adaptation](../../README.md#resume-and-task-adaptation).
 
-Dependencies come from `pyproject.toml` + `uv.lock` — change them there, never
-inside the image:
+## Upstream recipes
 
-```bash
-uv add <pkg> --group psi     # or edit pyproject.toml, then: uv lock
-```
+The other recipes under [`psi0/`](psi0/) and [`openpi/`](openpi/) are retained from Ψ₀ or implement task-specific adaptations. Their datasets, action representations and initialization weights can differ from the dual-source recipe. Refer to the [pinned Ψ₀ documentation](https://github.com/physical-superintelligence-lab/Psi0/tree/cda3fdfafe47cb6fa75400d013de1bd36e3cea05) for the upstream workflows.
 
-Then rebuild. A shared image requires a **shared lockfile**: a branch pinning a
-different torch or python (e.g. `release` is 3.10, this image is 3.11) needs its
-own image.
+## Optional container and cluster tools
 
-`flash-attn` is deliberately *not* in `pyproject.toml`. PyPI ships only an sdist
-(~1h compile), so both recipes install upstream's prebuilt wheel, pinned to
-match the lock (`cu12 / torch2.7 / cxx11abiTRUE / cp311`). Re-pin that URL if the
-torch or python pin moves. Because it is absent from `uv.lock`, a later
-`uv sync` treats it as extraneous — hence `--inexact` in the Dockerfile.
+| Tool | Purpose |
+| --- | --- |
+| [`Dockerfile`](Dockerfile) | Package VLM Expert dependencies from [`pyproject.toml`](../../pyproject.toml) and [`uv.lock`](../../uv.lock) |
+| [`build-sqsh.sh`](build-sqsh.sh), [`inner.sh`](inner.sh) | Build an Enroot image |
+| [`slurm_job.sh`](slurm_job.sh) | Submit an upstream training recipe through Slurm/Pyxis |
+| [`ddp.launch.yaml`](ddp.launch.yaml), [`deepspeed.launch.yaml`](deepspeed.launch.yaml) | Accelerate launcher configurations |
 
-## Use
-
-`scripts/train/slurm_job.sh` already points at the image:
-
-```
---container-image=/mnt/beegfs/containers/psix.sqsh
---container-mounts=/mnt/beegfs:/mnt/beegfs,"$PROJECT_ROOT":/workspace/psi0
---container-workdir=/workspace/psi0
-```
-
-`PROJECT_ROOT` is `$(pwd)` at submit time, so whichever checkout you submit from
-is the code that runs. Train scripts pick the venv with:
-
-```bash
-source "${PSI_VENV:-$([ -d /workspace/.venv-psi ] && echo /workspace/.venv-psi || echo .venv-psi)}/bin/activate"
-```
-
-which prefers the image venv, falls back to a repo-local `.venv-psi` outside the
-container (robot/workstation runs are unaffected), and honours `PSI_VENV`.
-
-## Gotchas
-
-- **GitHub is flaky from the cluster.** `uv` does not retry the `git fetch` for
-  the `lerobot` dependency, so the build pre-clones it to
-  `/mnt/beegfs/scratch/$USER/mirrors/lerobot.git` and rewrites that one URL with
-  `git config insteadOf`. `uv.lock` is untouched; the pinned SHA still resolves.
-- **Keep uv's cache node-local.** On BeeGFS, building sdists fails with
-  `Device or resource busy` — BeeGFS rejects rename-over-an-open-file. The build
-  bind-mounts `/tmp/uv-cache-$USER` at `/uv-cache`, which also keeps the cache
-  out of the image.
-- **The build needs node-local scratch** for the extracted rootfs — ~60GB was
-  enough for the NGC-based image, so it is a safe upper bound for this one.
-- **Editable `psi` records an absolute path** (`/workspace/psi0/src/psi`). With a
-  second checkout, `import psi` still resolves through the mount, not your cwd.
+Container builds use `VLMExpert/` as their build context. Cluster helpers retain upstream scheduler settings; configure resource requests, container locations, dataset mounts and cache paths for your cluster. The dual-source launcher above uses a single-node, standalone distributed launch.

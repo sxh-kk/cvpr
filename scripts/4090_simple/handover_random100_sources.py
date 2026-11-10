@@ -12,6 +12,7 @@ import ast
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import zipfile
@@ -24,7 +25,7 @@ from prepare_handover_eval import remap_paths
 
 REPO = Path(__file__).resolve().parents[2]
 SIMPLE = REPO / "VLMExpert/third_party/SIMPLE"
-RESOURCES = Path("/home/zxc/CVPR_Evaluation_runtime/resources")
+RESOURCES = Path(os.environ.get("CVPR_SIMPLE_RUNTIME") or Path.home() / "sigma0" / "runtime").expanduser() / "resources"
 DEFAULT_ARCHIVE = RESOURCES / "simple_finetune_sources/rich_teleop/G1WholebodyHandoverTeleop-v0.zip"
 DEFAULT_PROVENANCE = DEFAULT_ARCHIVE.with_name("G1WholebodyHandoverTeleop-v0.receipt.json")
 PREFIX = "G1WholebodyHandoverTeleop-v0/level-0"

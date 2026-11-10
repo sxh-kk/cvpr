@@ -2,10 +2,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env BEFORE importing huggingface_hub
+# Load an optional .env BEFORE importing huggingface_hub
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-assert (PROJECT_ROOT / ".env").exists(), f".env file not found in {PROJECT_ROOT}"
-load_dotenv(PROJECT_ROOT / ".env")
+if (PROJECT_ROOT / ".env").exists():
+    load_dotenv(PROJECT_ROOT / ".env")
 
 from huggingface_hub import snapshot_download, hf_hub_download, list_repo_files
 import tyro

@@ -1,12 +1,10 @@
-# 相机原生帧质量修订、11个motion hidden均值、QKV归一化；已验收，按用户授权启动训练。
-# 归档、窗口缓存、新统计和GPU验收全部通过后，才可手动使用--from-scratch。
-# 复用原生30Hz DINO；旧GLOBAL/旧注意力checkpoint不兼容，保留追溯。
+# SMPL-H motion forecasting with mean-pooled hidden tokens and QKV normalization.
 DATA:
-  ARCHIVE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality
-  SPLIT_MANIFEST: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality/meta/splits.json
-  STATS_PATH: /gaozt-test1/datasets/MixEgoMotion/statistics/smplh_k12_5hz_joint_camera-quality-v4.pt
-  VISION_PROFILE_ROOT: /gaozt-test1/datasets/MixEgoMotion/smplh-parameters-v4-camera-quality/vision_profiles/psi0_256x480_v1_30hz
-  WINDOW_CACHE_ROOT: /gaozt-test1/datasets/MixEgoMotion/training_cache/smplh245_5hz_w11_camera-quality-v4
+  ARCHIVE_ROOT: ~/sigma0/data/MixEgoMotion/smplh-parameters-v4-camera-quality
+  SPLIT_MANIFEST: ~/sigma0/data/MixEgoMotion/smplh-parameters-v4-camera-quality/meta/splits.json
+  STATS_PATH: ~/sigma0/data/MixEgoMotion/statistics/smplh_k12_5hz_joint_camera-quality-v4.pt
+  VISION_PROFILE_ROOT: ~/sigma0/data/MixEgoMotion/smplh-parameters-v4-camera-quality/vision_profiles/psi0_256x480_v1_30hz
+  WINDOW_CACHE_ROOT: ~/sigma0/data/MixEgoMotion/training_cache/smplh245_5hz_w11_camera-quality-v4
   IMAGE_PROFILE: 256x480
   REPRE_TYPE: smplh12_rot6d_hands21_contacts_v1
   ROTATION_BASIS_MODE: smplh_model_defined
@@ -33,7 +31,7 @@ MODEL:
 FLOW:
   GLOBAL_WEIGHT: 8.0
 TRAIN:
-  EXP_PATH: /gaozt-test1/datasets/MixEgoMotion/training/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch
+  EXP_PATH: ~/sigma0/runs/motion/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch
   NUM_GPUS: 8
   LR: 1.0e-4
   NUM_EPOCHS: 200

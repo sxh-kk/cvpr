@@ -1,5 +1,5 @@
 # Source after conda activate. Runtime files and resources live outside the checkout.
-export CVPR_SIMPLE_RUNTIME="${CVPR_SIMPLE_RUNTIME:-${HOME}/CVPR_Evaluation_runtime}"
+export CVPR_SIMPLE_RUNTIME="${CVPR_SIMPLE_RUNTIME:-${HOME}/sigma0/runtime}"
 export PYTHONNOUSERSITE=1
 export HF_HOME="${CVPR_SIMPLE_RUNTIME}/cache/huggingface"
 export TORCH_HOME="${CVPR_SIMPLE_RUNTIME}/cache/torch"

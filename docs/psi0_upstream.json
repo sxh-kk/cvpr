@@ -1,8 +1,7 @@
 {
   "schema_version": 1,
   "snapshot_date": "2026-10-18",
-  "purpose": "官方Psi0源码、配置与必要资源快照，不安装依赖或准备运行环境",
-  "previous_cvpr_commit": "6061f5c9376727e09b59100bbddb0eb4cd71b430",
+  "purpose": "VLMExpert上游源码、第三方依赖及资源来源清单",
   "upstream": {
     "url": "https://github.com/physical-superintelligence-lab/Psi0.git",
     "branch": "main",
@@ -63,39 +62,7 @@
   "packaging": {
     "submodules": "展开为普通文件，固定到官方Psi0记录的commit",
     "lfs": "使用根仓库.gitattributes，不复制展开依赖内部.gitattributes",
-    "external_payloads": "权重、训练数据、环境、安装与编译产物及未复用的大仿真资源另行准备",
-    "retired_customizations": [
-      "GLOBAL token VLM预训练与特征接口",
-      "WBT原生适配"
-    ],
-    "unchanged_modules": [
-      "MotionExpert",
-      "ImageProcess",
-      "pipeline",
-      "datasets"
-    ]
-  },
-  "validation": {
-    "source_content_verified_files": 6782,
-    "python_ast_checked_files": 281,
-    "shell_bash_n_checked_files": 40,
-    "cpu_tests": {
-      "passed": 20,
-      "python_version": "3.10.12（现有独立CPU检查环境；官方完整运行环境要求3.11）",
-      "gpu_count": 0,
-      "working_directory": "VLMExpert",
-      "command": "CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. python -m pytest -p no:cacheprovider -q tests/test_dex3_to_dex1.py tests/test_real_dex1_1_client.py scripts/tests/test_wire_contracts.py"
-    },
-    "not_executed": [
-      "test_sampler.py：现有检查环境缺rich",
-      "test_psi0_sonic_dex1_bridge.py：现有检查环境缺unitree_sdk2py",
-      "完整Python 3.11环境安装、模型训练/推理、GPU、仿真及真机运行"
-    ],
-    "upstream_limitations": [
-      "官方README仍有引用已移除训练脚本及未注册serve_psi0入口的旧示例",
-      "serve_psi0_simple仍硬性检查CUDA，未验收其XPU路径"
-    ],
-    "sanitized_upstream_files": 1
+    "external_payloads": "权重、训练数据、环境、安装与编译产物及未复用的大仿真资源另行准备"
   },
   "excluded_upstream_paths": {
     "checkpoint_or_tensor_artifact": [
@@ -648,8 +615,7 @@
         "VLMExpert/tests/test_dual_source_data.py",
         "VLMExpert/tests/test_unifolm_dino_history.py"
       ],
-      "validation": "docs/unifolm_vlm_color_validation.json",
-      "note": "原始当前RGB在模型transform中按resize→颜色→grid顺序只处理一次；验证/no_aug不增强。旧shared_rgb默认保留，缓存extractor/profile/metadata不变，不重做缓存或启动训练。"
+      "note": "当前RGB按resize→颜色→grid顺序处理；验证/no_aug不增强。保留shared_rgb默认策略。"
     },
     {
       "date": "2026-10-18",
@@ -664,8 +630,7 @@
         "VLMExpert/src/psi/config/transform.py",
         "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh"
       ],
-      "validation": "docs/unifolm_dino_validation.json",
-      "note": "下载和特征准备不启动训练；原生缓存按同episode真实时间读取6个5Hz时刻，末帧与当前VLM RGB一致，不足历史/断点过滤；HTTP服务历史缓冲仍需接线"
+      "note": "按episode真实时间读取6个5Hz历史时刻，末帧与当前VLM RGB一致；过滤历史不足或时间不连续的窗口。"
     },
     {
       "date": "2026-10-18",
@@ -682,13 +647,12 @@
         "VLMExpert/scripts/train/psi0/posttrain-dual-source-unifolm.sh",
         "VLMExpert/tests/test_dual_source_joint_training.py"
       ],
-      "validation": "docs/dual_source_joint_validation.json",
-      "note": "VLM仅取最后一层，Motion仍完整11tokens，DINO冻结；Motion LR1e-5是本仓库初值。未启动正式训练，真实EgoDex VLM和UnifoLM历史数据端到端仍需单独验收。历史冻结验收记录保留。"
+      "note": "使用最后一层VLM与完整11个Motion tokens，DINO冻结；支持分别冻结VLM和MotionExpert。"
     },
     {
       "date": "2026-10-18",
       "architecture": "psi0_dual_source_sa_vlm_motion_ffn_adaln12_v1",
-      "change": "新增dual_source_v1：冻结最后层VLM和完整11-token MotionExpert，逐block串行SA/CA-VLM/CA-Motion/FFN，由p_V/p_M/action时间融合生成12d调制；保留psi0_joint",
+      "change": "新增dual_source_v1：最后层VLM和完整11-token MotionExpert作为两路memory，逐block串行SA/CA-VLM/CA-Motion/FFN，由p_V/p_M/action时间融合生成12d调制；保留psi0_joint",
       "paths": [
         "VLMExpert/src/psi/models/dual_source_action.py",
         "VLMExpert/src/psi/models/frozen_motion.py",
@@ -705,8 +669,7 @@
         "VLMExpert/tests/test_vlm_features.py",
         "VLMExpert/README.md"
       ],
-      "validation": "docs/dual_source_action_validation.json",
-      "note": "数据集需提供对齐的六帧DINO历史；HTTP服务历史输入尚需接线；原快照验收计数仅描述导入时状态"
+      "note": "数据集提供对齐的六帧DINO历史，当前视觉帧与最后一个历史时刻对应。"
     },
     {
       "date": "2026-10-18",
@@ -717,7 +680,7 @@
         "VLMExpert/tests/test_vlm_features.py",
         "VLMExpert/README.md"
       ],
-      "note": "上述文件在初始快照基础上扩展；快照一致性和初始验收计数仍描述导入时状态"
+      "note": "在原action expert完整hidden tokens上新增p_V接口，保留完整tokens和checkpoint参数结构。"
     }
   ],
   "sanitization": [

@@ -14,14 +14,20 @@ if [[ "${1:-}" == "--check-only" ]]; then check_only=1; shift; fi
 experiment="${1:-dual_source_unifolm}"
 if (( $# > 1 )); then echo "Usage: $0 [--dry-run|--check-only] [experiment]" >&2; exit 2; fi
 
+recipe_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
+env_file="${UNIFOLM_ENV_FILE:-$recipe_root/../configs/unifolm.env.sh}"
+[[ -f "$env_file" ]] || {
+    echo "Missing UnifoLM environment configuration: $env_file" >&2; exit 2;
+}
+source "$env_file"
+
 : "${EGO_DEX_VLM_PATH:?Set the explicit EgoDex-pretrained VLM directory}"
 : "${MOTION_EXPERT_CHECKPOINT:?Set an explicit compatible MotionExpert checkpoint file}"
-: "${UNIFOLM_DINO_ROOT:?Set the UnifoLM data root, e.g. /gaozt-test1/datasets/UnifoLM}"
+: "${UNIFOLM_DINO_ROOT:?Set the UnifoLM data root, e.g. ~/sigma0/data/UnifoLM}"
 : "${UNIFOLM_DINO_TRAIN_ID:?Set the original training pack ID}"
 : "${UNIFOLM_DINO_VAL_ID:?Set the original validation pack ID}"
 : "${UNIFOLM_DINO_CACHE:?Set the completed native30Hz DINO cache root with per-pack subdirectories}"
 
-recipe_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$recipe_root"
 export PYTHONPATH="$recipe_root/src:$recipe_root/..:$recipe_root${PYTHONPATH:+:$PYTHONPATH}"
 python_bin="${PSI_PYTHON:-python3}"

@@ -1455,9 +1455,10 @@ def run(args):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    runtime=Path('/home/zxc/CVPR_Evaluation_runtime')
+    runtime=Path(os.environ.get("CVPR_SIMPLE_RUNTIME") or Path.home() / "sigma0" / "runtime").expanduser()
+    asset_root = Path(os.environ.get("SIMPLE_DATA_DIR") or runtime / "resources/simple_local_usd_v1").expanduser()
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--data-root',type=Path,default=runtime/'resources/simple_local_usd_v1')
+    parser.add_argument('--data-root', type=Path, default=asset_root)
     parser.add_argument('--sonic-resources',type=Path,default=runtime/'resources/sonic_v1_1')
     parser.add_argument('--human-info',type=Path,default=GEAR/'data/human/human_joints_info.pkl')
     parser.add_argument('--render-mode',choices=('none','isaac','mujoco_deferred'),default='mujoco_deferred')

@@ -13,8 +13,7 @@ Input camera geometry must already follow the source dataset's established polic
 | `256x480` | 270×480 | 256×480 | MotionExpert pretraining; Robust fine-tuning |
 | `256x320` | 240×320 | 256×320 | SONIC-style post-training |
 
-The geometry follows the pinned Ψ₀ revision
-`2830f9367fc12ca49d9b4df4348726daae9db15d`: fixed NEAREST resize, same-size center
+The [image profiles](configs/) follow [Ψ₀ image processing](https://github.com/physical-superintelligence-lab/Psi0/tree/2830f9367fc12ca49d9b4df4348726daae9db15d): fixed NEAREST resize, same-size center
 crop, training augmentation, then PIL BICUBIC resize to the Qwen 32-pixel grid.
 The configured minimum area is 65,536 pixels. Geometry preserves the complete
 source image without an additional deterministic crop; fixed rectangular resize
@@ -144,14 +143,3 @@ managed by the caller; this image processor does not create missing history.
 Current data and extraction commands are documented in
 [pipeline](../pipeline/README.md); fresh training and differentiable hidden-token
 interfaces are documented in [MotionExpert](../MotionExpert/README.md).
-
-## CPU checks
-
-```sh
-python -m unittest discover -s ImageProcess/tests -v
-```
-
-Tests cover both profiles, reference pixel geometry, synchronized historical and
-current images, JSON replay, local RNG, augmentation bounds, and invalid inputs.
-When torchvision is installed, a pixel-level reference test also compares the
-crop and color operations to its PIL implementation. No model download is used.

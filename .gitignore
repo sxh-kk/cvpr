@@ -19,6 +19,8 @@ __pycache__/
 .cache/
 .direnv/
 /.codex/
+/.local/
+/pipeline/configs/dino.local.json
 build/
 dist/
 logs/

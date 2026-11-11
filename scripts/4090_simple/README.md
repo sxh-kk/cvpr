@@ -592,3 +592,5 @@ Mobile planner现在显式选择可用CPU倒数第三个（本机29），避开�
 BendPick5000 官方固定30例的独立部署与RTC评测见 [BendPick评测说明](README_bend_pick_eval.md)。
 该入口保留原生400tick（含预热）及约9cm成功门；保存状态reset的可逆兼容说明、
 全部30任务CPU构造恢复检查、失败attempt保留及当前003入口以专门文档和实际状态凭据为准。
+
+- [XMovePick固定上肢准备姿态独立四例诊断](README_xmove_ready_upper.md)：`ready_upper_v1`显式可选，原生scene与原50tick预算保持，预热参考已变，结果独立记账；默认路径不启用。

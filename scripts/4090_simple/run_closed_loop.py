@@ -383,6 +383,8 @@ def validate_server_info(server_info, args):
     actual = {name: server_info.get(name) for name in expected}
     if actual != expected:
         raise ValueError(f"Actual service RTC configuration differs: expected={expected}, actual={actual}")
+    if getattr(args,'pick_warmup_profile','native')=='ready_upper_v1' and server_info.get('rtc_guidance_action_scope')!='all':
+        raise ValueError('ready_upper_v1 requires actual legacy all80 RTC guidance; do not mix a guidance-mask change')
     return {"status": "passed", "requested": expected, "actual": actual,
             "action_exec_horizon": args.execute_steps, "action_chunk_size": 30,
             "synchronization": "synchronous HTTP pauses simulation; no asynchronous latency compensation claim"}
@@ -414,6 +416,10 @@ def parse_args():
                         default="measured_pose_pd", help="Optional live-pose v1.1 balance reference while genuine RGB history fills")
     parser.add_argument("--warmup-hand-policy", choices=("measured", "open"), default="measured",
                         help="Optional neutral zero hand targets during live-pose SONIC warmup only")
+    parser.add_argument('--pick-warmup-profile', choices=('native', 'ready_upper_v1'), default='native',
+                        help='Explicit XMovePick5000 diagnostic only; changes startup reference, never the saved scene')
+    parser.add_argument('--pick-ready-planner-model', type=Path,
+                        help='Pinned official CPU neutral planner; required only for ready_upper_v1')
     parser.add_argument("--body-token-projection", choices=("none", "fsq_v1_1"), default="none",
                         help="Optional denormalized body64 projection to the fixed SONIC v1.1 32-level FSQ grid")
     parser.add_argument("--tasks", nargs="+", choices=SUPPORTED_TASKS, default=list(TASKS))
@@ -473,6 +479,20 @@ def parse_args():
             parser.error('Moving Pick requires its sole private task, synchronized observation-only Isaac and no foreign initialization/fall gate')
     elif any(task in PICK_EVAL_TASKS for task in args.tasks) or args.worker_task in PICK_EVAL_TASKS:
         parser.error('Private moving Pick tasks require their explicit official profile')
+    ready_upper = args.pick_warmup_profile == 'ready_upper_v1'
+    if ready_upper != (args.pick_ready_planner_model is not None):
+        parser.error('ready_upper_v1 requires exactly its explicit planner model')
+    if ready_upper:
+        if (not args.pick_official_protocol or args.pick_profile != 'xmove_pick'
+                or args.warmup_control != 'live_pose_sonic_v1_1' or args.warmup_hand_policy != 'measured'
+                or not args.pick_interaction_diagnostics or args.body_token_projection != 'none'
+                or args.expected_checkpoint_step != 5000 or args.execute_steps != 15
+                or args.rtc_mode != 'test_time' or args.seconds != 16.
+                or args.pd_profile != 'official_v1_1_ankle_pitch_1_5' or args.hand_torque_profile != 'mjcf_limits'
+                or args.rtc_inference_delay != 0 or args.min_exec_horizon not in (None,15)
+                or args.pig_mask_schedule != 'exponential' or args.pig_guidance_alpha != .9):
+            parser.error('ready_upper_v1 is an explicit XMovePick5000 test_time/15-action diagnostic with all physical contacts recorded')
+        args.pick_ready_planner_model = args.pick_ready_planner_model.resolve(strict=True)
     stable_support = args.initialization_profile == 'stable_support_v1'
     if stable_support != (args.support_geometry_manifest is not None) or (stable_support and not args.bend_official_protocol):
         parser.error('Stable-support initialization requires only BendPick plus --support-geometry-manifest')
@@ -683,7 +703,12 @@ def run_worker(args):
                 "robot_pose_precision":"full authoritative MuJoCo values; no decimal rounding; Isaac/USD representation precision still applies"}
         client.sim_clock = lambda: float(raw.mujoco.mjData.time)
         warmup_control = None
-        if args.warmup_control == "live_pose_sonic_v1_1":
+        if args.pick_warmup_profile == 'ready_upper_v1':
+            from xmove_ready_upper_warmup import ReadyUpperSonicWarmup
+            warmup_control = ReadyUpperSonicWarmup(args.sonic_resources, args.pick_ready_planner_model)
+            result.update(pick_warmup_profile='ready_upper_v1', native_saved_scene_initialization_preserved=True,
+                original_official_initialization=False, warmup_protocol_modified=True)
+        elif args.warmup_control == "live_pose_sonic_v1_1":
             from simple.baselines.live_pose_sonic_warmup import LivePoseSonicWarmup
             warmup_control = LivePoseSonicWarmup(args.sonic_resources, hand_policy=args.warmup_hand_policy)
         agent = DualSourcePsi0Agent(raw.task.robot, client=client, controller=controller,
@@ -785,6 +810,9 @@ def run_worker(args):
                     pick_protocol=pick_protocol, pick_source_environment_config=pick_source,
                     pick_reset_derivation=pick_derivation, pick_adaptation=pick_adaptation,
                     pick_environment_binding=pick_binding, evaluation_control_policy=CONTROL_POLICY)
+            if args.pick_warmup_profile == 'ready_upper_v1':
+                episode.update(pick_warmup_profile='ready_upper_v1', native_saved_scene_initialization_preserved=True,
+                    original_official_initialization=False, warmup_protocol_modified=True)
             if args.bend_official_protocol:
                 episode.update(bend_protocol=protocol, bend_source_environment_config=bend_source,
                     bend_adaptation=bend_receipt, bend_environment_binding=actual_binding,

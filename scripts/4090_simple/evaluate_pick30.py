@@ -29,6 +29,9 @@ from pick_eval_protocol import profile_spec, pick_official_protocol, derive_pick
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = 'cvpr-pick-fixed-official30-sonic-rtc-diagnostic-v1'
 DIAGNOSTIC_CONTRACT = 'cvpr-pick-explicit-cases-rtc-single-factor-pilot-v1'
+READY_UPPER_CONTRACT = 'cvpr-xmove-pick-ready-upper-v1-four-case-diagnostic-v1'
+READY_UPPER_ROLE = 'fixed_ready_upper_warmup_single_factor_pilot'
+READY_UPPER_CASES = ((0,6),(0,0),(2,7),(0,4))
 VALIDATED_PACKER_SHA256 = 'b9861390ff1e5dba1b92b066f4584c4564613841887bb2e7ad13b2ee4e84b1da'
 READY_CONTRACT = 'cvpr-pick-local-deployment-v1'
 READY_STATUS = 'local_pick_checkpoint_prepared'
@@ -83,6 +86,10 @@ def diagnostic_pairs(args):
     return value
 
 
+def ready_upper(args):
+    return getattr(args, 'pick_warmup_profile', 'native') == 'ready_upper_v1'
+
+
 def evaluation_policy(args):
     diagnostic=diagnostic_pairs(args) is not None
     # The matched-factor pilot preserves15 consumed actions /25 physical ticks
@@ -98,6 +105,12 @@ def evaluation_policy(args):
         'Validated repack guidance requires an explicit test_time diagnostic pilot')
     require(not getattr(args,'pick_interaction_diagnostics',False) or diagnostic,
         'Interaction diagnostics require explicit diagnostic cases')
+    if ready_upper(args):
+        require(diagnostic_pairs(args)==READY_UPPER_CASES and getattr(args,'profile',None)=='xmove_pick'
+            and getattr(args,'checkpoint_step',None)==5000 and getattr(args,'sampling_seed',None)==20261105
+            and policy['rtc_mode']=='test_time' and scope=='all'
+            and getattr(args,'pick_interaction_diagnostics',False),
+            'ready_upper_v1 requires exactly XMovePick5000 cases0:6,0:0,2:7,0:4 with unchanged test_time/all/15 and interactions')
     policy.update(rtc_guidance_action_scope=scope,guided_action_dimensions=78 if scope=='validated_repack' else 80)
     require(diagnostic or policy['rtc_mode']=='test_time',
         'Full30 production requires test_time RTC; off is only an explicit diagnostic case pilot')
@@ -112,7 +125,10 @@ def execution_cases(frozen):
         require(not frozen.get('diagnostic_selected_cases') and frozen.get('evaluation_denominator',30)==30,
             'Full30 source cannot silently select a pilot subset')
         return frozen['cases']
-    require(frozen.get('contract')==DIAGNOSTIC_CONTRACT and frozen.get('experiment_role')=='same_seed_rtc_single_factor_pilot'
+    require((frozen.get('contract')==DIAGNOSTIC_CONTRACT and frozen.get('experiment_role')=='same_seed_rtc_single_factor_pilot'
+        or frozen.get('contract')==READY_UPPER_CONTRACT and frozen.get('experiment_role')==READY_UPPER_ROLE
+        and frozen.get('warmup_profile')=='ready_upper_v1' and frozen.get('original_official_initialization') is False
+        and frozen.get('native_saved_scene_initialization_preserved') is True)
         and frozen.get('full_official30_claim') is False,'Independent diagnostic contract/role is required')
     selected=frozen.get('diagnostic_selected_cases');require(isinstance(selected,list) and selected,'Missing explicit pilot selection')
     lookup={(c['level'],c['case_index']):c for c in frozen['cases']};result=[];seen=set()
@@ -255,6 +271,18 @@ def freeze_inputs(args):
     model = file_identity(args.deployment/'checkpoints'/f'ckpt_{args.checkpoint_step}'/'model.safetensors')
     require(model['sha256'] == args.expected_model_sha256, 'Actual checkpoint bytes differ')
     sources = source_identities(profile)
+    if ready_upper(args):
+        from sonic_locomotion_planner import MODEL_SHA256
+        require(args.ready_planner_model is not None, 'Explicit pinned ready planner model required')
+        planner = file_identity(args.ready_planner_model.resolve(strict=True))
+        require(planner['sha256']==MODEL_SHA256, 'Ready neutral planner differs from the pinned official model')
+        sources['ready/planner_model'] = planner
+        for name in ('xmove_ready_upper_warmup.py','pico_locomotion_reference.py','sonic_locomotion_planner.py',
+                'handover_sonic_teleop_reference.py','prepare_carrybox_v11.py'):
+            sources['ready/'+name]=file_identity(Path(__file__).with_name(name))
+        sonic=args.runtime_root/'resources/sonic_v1_1'
+        for name in ('model_encoder.onnx','model_decoder.onnx','observation_config.yaml'):
+            sources['ready/resource/'+name]=file_identity(sonic/name)
     sources['deployment_ready'] = file_identity(ready_path)
     artifacts = ready.get('deployment_artifacts')
     require(isinstance(artifacts, dict) and set(artifacts) == DEPLOYMENT_ARTIFACTS, 'Seven complete deployment artifacts are required')
@@ -314,6 +342,15 @@ def freeze_inputs(args):
         'diagnostic_selected_cases':[{key:c[key] for key in ('level','case_index','flat_index','sampling_seed')} for c in selection],
         'interaction_diagnostics_requested':bool(getattr(args,'pick_interaction_diagnostics',False)),
         'automatic_retries':0,'evaluation_policy':policy}
+    if ready_upper(args):
+        frozen.update(contract=READY_UPPER_CONTRACT,experiment_role=READY_UPPER_ROLE,
+            warmup_profile='ready_upper_v1',original_official_initialization=False,
+            native_saved_scene_initialization_preserved=True,warmup_protocol_modified=True,
+            ready_planner_model=sources['ready/planner_model'],
+            boundary=BOUNDARY+'; ready_upper_v1 explicitly changes only50tick startup references; its outcomes are a separate four-case diagnostic')
+        for case in cases:
+            case.update(warmup_profile='ready_upper_v1',original_official_initialization=False,
+                native_saved_scene_initialization_preserved=True,warmup_protocol_modified=True)
     execution_cases(frozen)
     return frozen
 
@@ -337,6 +374,8 @@ def commands(args, case, directory):
         '--warmup-control', 'live_pose_sonic_v1_1', '--warmup-hand-policy', 'measured', '--body-token-projection', 'none',
         '--video', '--worker-wall-timeout', '1800', '--worker-task', task]
     if getattr(args,'pick_interaction_diagnostics',False):simulator.append('--pick-interaction-diagnostics')
+    if ready_upper(args):simulator.extend(['--pick-warmup-profile','ready_upper_v1',
+        '--pick-ready-planner-model',str(args.ready_planner_model)])
     return {'server': server, 'simulator': simulator}
 
 
@@ -448,7 +487,7 @@ def validate_pick_identity(result, episode, case, frozen):
     spec = profile_spec(frozen['profile'])
     require(any(item['level']==case['level'] and item['case_index']==case['case_index'] for item in execution_cases(frozen)),
         'Case was not selected by this campaign')
-    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
+    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
         frozen.get('source_task_id') == spec['source_task_id'] and case.get('profile') == frozen['profile'] and
         case.get('task_id') == spec['task_id'] and case.get('source_task_id') == spec['source_task_id'],
         'Pick frozen profile/task identity differs')
@@ -579,6 +618,93 @@ def validate_interaction_observation(episode,ticks,requests):
         'counts':dict(counts),'first_contacts':first,'live_state_writes':False,'physics_steps_added':0}
 
 
+def validate_ready_upper_evidence(result,episode,ticks,frozen):
+    """Bind the changed startup to actual50 sent commands and passive contacts."""
+    from xmove_ready_upper_warmup import PROFILE,READY_JOINTS,blend
+    require(frozen.get('contract')==READY_UPPER_CONTRACT and frozen.get('experiment_role')==READY_UPPER_ROLE
+        and frozen.get('profile')=='xmove_pick' and frozen.get('checkpoint_step')==5000
+        and frozen.get('warmup_profile')==PROFILE,'Ready diagnostic identity differs')
+    policy=frozen['evaluation_policy']
+    require(policy['rtc_mode']=='test_time' and policy['rtc_guidance_action_scope']=='all'
+        and policy['execute_steps']==15,'Ready pilot mixed another policy factor')
+    for value in (result,episode):
+        require(value.get('pick_warmup_profile')==PROFILE and value.get('original_official_initialization') is False
+            and value.get('native_saved_scene_initialization_preserved') is True
+            and value.get('warmup_protocol_modified') is True,'Ready warmup may not masquerade as original initialization')
+    require(episode.get('warmup_frames')==50 and len(ticks)>=50 and not episode.get('fell_before_first_policy_command')
+        and all(row.get('fell') is False for row in ticks[:50]),'Ready warmup was shortened/extended or fell')
+    warm=episode.get('warmup_control',{})
+    require(warm.get('kind')==warm.get('initialization_profile')==PROFILE
+        and warm.get('fixed_ready_joint_targets_rad')==READY_JOINTS
+        and warm.get('helper_source_sha256')==frozen['sources']['ready/xmove_ready_upper_warmup.py']['sha256']
+        and warm.get('planner_model_sha256')==frozen['sources']['ready/planner_model']['sha256']
+        and warm.get('planner_model_path')==frozen['sources']['ready/planner_model']['path']
+        and warm.get('encoder_sha256')==frozen['sources']['ready/resource/model_encoder.onnx']['sha256']
+        and type(warm.get('planner_seed')) is int and warm['planner_seed']==20261027,
+        'Actual ready preset/helper/planner/encoder identity differs')
+    for field in ('PICO_or_teacher_data_read','live_physical_state_writes','live_state_writes',
+            'object_pose_inputs_used','target_or_scene_or_reward_inputs_used','cold_DEFAULT_initialization',
+            'teacher_reference_inputs_used','policy_phase_interventions','state_forcing','history_injection'):
+        require(warm.get(field) is False,'Ready startup has a forbidden data/state intervention: '+field)
+    require(warm.get('private_fk') is True and type(warm.get('physics_steps_added')) is int
+        and warm['physics_steps_added']==0 and type(warm.get('initialization_count')) is int
+        and warm['initialization_count']==1 and type(warm.get('encoder_calls')) is int
+        and warm['encoder_calls']==40 and warm.get('encoder_mode')==1
+        and warm.get('warmup_budget_control_ticks')==50,'Ready reference changed the real startup budget/history')
+    names=warm.get('initial_joint_names43');initial=warm.get('initial_measured_joint_qpos43')
+    require(isinstance(names,list) and len(names)==len(set(names))==43,'Ready initial measured joint identity differs')
+    finite_array(initial,(43,),'first actual measured43 joint state')
+    named=dict(zip(names,initial));root=warm.get('first_actual_root_pose7')
+    finite_array(root,(7,),'first actual root pose7')
+    for a,b in zip(root[:3],episode['initial_pelvis_position_m']):close_number(a,b,'Ready first actual pelvis differs')
+    finite_array(warm.get('first_actual_body_q29'),(29,),'first actual29 body joints')
+    refs=warm.get('ready_reference_events');encoded=warm.get('events')
+    require(isinstance(refs,list) and len(refs)==50 and isinstance(encoded,list) and len(encoded)==40,
+        'Missing one of50 real ramp references or40 actual encoder outputs')
+    hands=warm.get('hand_target_joint_names');require(isinstance(hands,list) and len(hands)==14 and len(set(hands))==14,
+        'Ready measured hand identity differs')
+    held=warm.get('first_actual_measured_hands14')
+    finite_array(held,(14,),'first actual14 measured hands')
+    for index,(ref,row) in enumerate(zip(refs,ticks[:50])):
+        require(type(ref.get('control_tick')) is int and ref['control_tick']==index
+            and ref.get('private_fk_only') is True and ref.get('live_qpos_writes') is False,
+            'Ready FK reference is not the matching private control tick')
+        close_number(ref.get('sim_time_s',float('nan')),row['sim_time_s'],'Ready reference clock differs')
+        close_number(ref.get('blend',float('nan')),blend(index),'Ready smoothstep was tuned or retimed')
+        target=ref.get('virtual_ready_targets_rad',{})
+        require(set(target)==set(READY_JOINTS),'Ready virtual joint preset changed')
+        for name,goal in READY_JOINTS.items():
+            require(name in named,'Ready virtual joint absent from measured initial state')
+            close_number(target[name],named[name]+blend(index)*(goal-named[name]),'Ready virtual target changed')
+        finite_array(ref.get('local_points_m'),(3,3),'ready private FK three points')
+        quats=ref.get('local_quaternions_wxyz')
+        finite_array(quats,(3,4),'ready private FK orientations')
+        for quat in quats:close_number(sum(v*v for v in quat),1.,'Private FK quaternion is not unit')
+        sent=row.get('pick_measured_control',{})
+        require(sent.get('joint_names')==names,'Ready actual named43 order differs')
+        if index<10:require(sent.get('sent_body_token64') is None,'Ready latent preceded ten real history frames')
+        else:
+            event=encoded[index-10]
+            close_number(event.get('sim_time_s',float('nan')),row['sim_time_s'],'Ready encoder/command time differs')
+            require(event.get('reference_evidence',{}).get('encoder_mode')==1
+                and event.get('state_forcing') is False and event.get('history_injection') is False,
+                'Ready command was not actual mode1 encoding')
+            token=event.get('token64')
+            finite_array(token,(64,),'actual ready encoder output64')
+            require(list(token)==sent.get('sent_body_token64'),'Sent startup body64 differs from actual ready encoder')
+            require(event.get('hand_targets14')==list(held),'Ready hand hold differs from measured initial state')
+            for name,value in zip(hands,held):close_number(sent['sent_hand_targets'][name],value,'Ready sent hand hold differs')
+    bundles=[*episode.get('initial_solved_contacts',[]),
+        *[bundle for row in ticks[:50] for bundle in row.get('pick_interaction_substeps',[])]]
+    forbidden={'robot_target','robot_table','robot_distractor','robot_self'}
+    require(not any(forbidden.intersection(contact['categories']) for bundle in bundles for contact in bundle['contacts']),
+        'Ready warmup has a solved robot/scene or robot self contact')
+    return {'status':'passed','warmup_profile':PROFILE,'actual_encoder_and_sent_commands_checked':40,
+        'private_fk_references_checked':50,'observed_physics_substeps':201,'robot_positive_force_contacts':0,
+        'original_official_initialization':False,'native_saved_scene_initialization_preserved':True,
+        'warmup_protocol_modified':True,'teacher_data_inputs_used':False,'live_state_writes':False,'physics_steps_added':0}
+
+
 def validate_case(directory, case, frozen):
     """Read actual trace, both HTTP sides and decoded video; never infer success from geometry."""
     from run_closed_loop import worker_result_errors
@@ -623,7 +749,8 @@ def validate_case(directory, case, frozen):
     require(all(type(tick["terminated"]) is bool and type(tick["truncated"]) is bool for tick in ticks), "Native flags are not bool")
     for index, tick in enumerate(ticks):
         require(tick["phase"] == ("warmup_measured_pose_pd" if index < 10 else
-                                  "warmup_live_pose_sonic_v1_1" if index < 50 else "policy_latent"),
+                                  ("warmup_ready_upper_v1" if frozen.get('warmup_profile')=='ready_upper_v1' else
+                                   "warmup_live_pose_sonic_v1_1") if index < 50 else "policy_latent"),
                 "Warmup/policy phase ledger differs")
         close_number(tick["next_sim_time_s"] - tick["sim_time_s"], .02, "Wrong simulation tick")
         if index:
@@ -666,6 +793,8 @@ def validate_case(directory, case, frozen):
     rtc_execution = validate_action_execution(result,ticks,requests,policy)
     validate_sampler_action_evidence(requests,policy)
     interaction=(validate_interaction_observation(episode,ticks,requests) if frozen.get('interaction_diagnostics_requested') else None)
+    ready_acceptance=(validate_ready_upper_evidence(result,episode,ticks,frozen)
+        if frozen.get('warmup_profile')=='ready_upper_v1' else None)
     video = Path(episode["video"]["path"]).resolve(strict=True)
     require(video == (episode_dir / "rollout.mp4").resolve() and episode["video"]["ffmpeg_returncode"] == 0, "Wrong/incomplete case video")
     probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-threads", "1", "-select_streams", "v:0",
@@ -686,7 +815,7 @@ def validate_case(directory, case, frozen):
             'sampling_seed':case['sampling_seed'],
             'experiment_role':frozen.get('experiment_role','fixed_official30_rtc_diagnostic'),
             'evaluation_denominator':frozen.get('evaluation_denominator',30),
-            'checkpoint_step': frozen['checkpoint_step'], 'original_official_initialization': True,
+            'checkpoint_step': frozen['checkpoint_step'], 'original_official_initialization': frozen['original_official_initialization'],
             'initialization_profile': INITIALIZATION_PROFILE,
             'initialization_warnings': episode['pick_initialization_safety']['engineering_reference_warnings'],
             'initialization_warning_count': len(episode['pick_initialization_safety']['engineering_reference_warnings']),
@@ -694,7 +823,10 @@ def validate_case(directory, case, frozen):
             'reset_derivation': case['reset_derivation'], 'adaptation': case['adaptation'],
             'pick_initialization_safety': episode['pick_initialization_safety'],
             'interaction_observation_acceptance':interaction,
-            'pick_interaction_observer':episode.get('pick_interaction_observer')}
+            'pick_interaction_observer':episode.get('pick_interaction_observer'),
+            **({'warmup_profile':'ready_upper_v1','ready_upper_acceptance':ready_acceptance,
+                'native_saved_scene_initialization_preserved':True,'warmup_protocol_modified':True}
+               if ready_acceptance is not None else {})}
 
 
 def execute(args, case, frozen, state):
@@ -776,7 +908,7 @@ def finish_diagnostic(state):
     require(expected and len(expected)==len(set(expected)) and all(0<=a<=2 and 0<=b<=9 for a,b in expected),
         'Diagnostic final state has no valid unique explicit selection')
     require(state.get('planned_cases')==state.get('evaluation_denominator')==len(expected) and
-        state.get('full_official30_claim') is False and state.get('experiment_role')=='same_seed_rtc_single_factor_pilot',
+        state.get('full_official30_claim') is False and state.get('experiment_role') in ('same_seed_rtc_single_factor_pilot',READY_UPPER_ROLE),
         'Diagnostic final denominator/role differs')
     rows=state['cases'];complete=[row for row in rows if row.get('status')=='complete' and type(row.get('native_success')) is bool]
     actual=[(row['level'],row['case_index']) for row in rows]
@@ -796,7 +928,7 @@ def finish_diagnostic(state):
 
 def finish(state):
     """Keep all30 native outcomes; initialization warnings do not filter cases."""
-    code=finish_diagnostic(state) if state.get('contract')==DIAGNOSTIC_CONTRACT else common.finish(state)
+    code=finish_diagnostic(state) if state.get('contract') in (DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT) else common.finish(state)
     state['initialization_profile']=INITIALIZATION_PROFILE
     warnings=[{'level':row['level'],'case_index':row['case_index'],
         'warnings':list(row['initialization_warnings'])} for row in state['cases'] if row.get('initialization_warnings')]
@@ -820,11 +952,15 @@ def main(argv=None):
         help="Explicit pilot only, e.g.0:6,0:0,2:7,0:4; independent contract/denominator, not a full30 result")
     parser.add_argument("--rtc-guidance-action-scope",choices=("all","validated_repack"),default="all")
     parser.add_argument("--pick-interaction-diagnostics",action="store_true")
+    parser.add_argument('--pick-warmup-profile',choices=('native','ready_upper_v1'),default='native')
+    parser.add_argument('--ready-planner-model',type=Path)
     parser.add_argument("--execute-steps", type=int, help="Exact15 actions with test_time RTC, consuming25 simulation ticks per window")
     args = parser.parse_args(argv)
     require(len(args.expected_model_sha256) == 64 and all(char in "0123456789abcdef" for char in args.expected_model_sha256), "Expected SHA must be lowercase SHA256")
     require(args.checkpoint_step > 0 and 1024 <= args.port <= 65535 and 0 <= args.sampling_seed <= 2**32 - 30, "Invalid step/port/seed")
     policy = evaluation_policy(args)
+    require(ready_upper(args)==(args.ready_planner_model is not None), 'Only ready_upper_v1 requires its explicit planner model')
+    if args.ready_planner_model is not None:args.ready_planner_model=args.ready_planner_model.resolve(strict=True)
     for name in ("deployment", "data_root", "training_manifest", "runtime_root"):
         setattr(args, name, getattr(args, name).resolve(strict=True))
     require(args.output.is_absolute() and not args.output.exists() and not args.output.is_symlink(), "Campaign must be a fresh absolute directory")
@@ -839,10 +975,13 @@ def main(argv=None):
              "task_id": frozen["task_id"], "source_task_id": frozen["source_task_id"], "profile": args.profile, "cases": [], "formal_evaluation_eligible": False, "boundary": frozen["boundary"],
              "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": frozen["evaluation_policy"],
              "interaction_diagnostics_requested":frozen["interaction_diagnostics_requested"],
-             'original_official_initialization': True, 'initialization_profile': INITIALIZATION_PROFILE,
+             'original_official_initialization': frozen['original_official_initialization'], 'initialization_profile': INITIALIZATION_PROFILE,
              'experiment_role':frozen['experiment_role'],'evaluation_denominator':frozen['evaluation_denominator'],
              'full_official30_claim':frozen['full_official30_claim'],
              'diagnostic_selected_cases':frozen['diagnostic_selected_cases'],'source_cases_frozen':30}
+    if ready_upper(args):
+        state.update(warmup_profile='ready_upper_v1',native_saved_scene_initialization_preserved=True,
+            warmup_protocol_modified=True)
     write(args.output / "state.json", state)
     try:
         for case in execution_cases(frozen):

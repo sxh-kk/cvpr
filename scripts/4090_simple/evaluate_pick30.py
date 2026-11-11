@@ -14,6 +14,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -27,6 +28,8 @@ from run_closed_loop import _json_value
 from pick_eval_protocol import profile_spec, pick_official_protocol, derive_pick_eval_reset, adapt_pick_config
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = 'cvpr-pick-fixed-official30-sonic-rtc-diagnostic-v1'
+DIAGNOSTIC_CONTRACT = 'cvpr-pick-explicit-cases-rtc-single-factor-pilot-v1'
+VALIDATED_PACKER_SHA256 = 'b9861390ff1e5dba1b92b066f4584c4564613841887bb2e7ad13b2ee4e84b1da'
 READY_CONTRACT = 'cvpr-pick-local-deployment-v1'
 READY_STATUS = 'local_pick_checkpoint_prepared'
 INITIALIZATION_PROFILE = 'native_saved_scene_observed_v1'
@@ -56,11 +59,158 @@ mark_owned, stop_owned = common.mark_owned, common.stop_owned
 preflight, environment, finish = common.preflight, common.environment, common.finish
 
 
+def parse_diagnostic_cases(value):
+    """Explicit ordered, unique original case IDs; no silent case selection."""
+    require(isinstance(value,str) and bool(value.strip()), 'Diagnostic cases must explicitly select LEVEL:CASE pairs')
+    pieces=value.split(',');pairs=[]
+    for item in pieces:
+        match=re.fullmatch(r'([0-2]):([0-9])',item.strip())
+        require(match is not None,'Diagnostic cases require comma-separated LEVEL:CASE with level0..2 and case0..9')
+        pair=tuple(map(int,match.groups()))
+        require(pair not in pairs,'Duplicate diagnostic case selection')
+        pairs.append(pair)
+    return tuple(pairs)
+
+
+def diagnostic_pairs(args):
+    value=getattr(args,'diagnostic_cases',None)
+    if value is None:return None
+    if isinstance(value,str):return parse_diagnostic_cases(value)
+    require(isinstance(value,tuple) and 1<=len(value)<=30,'Invalid parsed diagnostic case selection')
+    require(all(isinstance(pair,tuple) and len(pair)==2 and type(pair[0]) is int and type(pair[1]) is int and
+        0<=pair[0]<=2 and 0<=pair[1]<=9 for pair in value) and len(set(value))==len(value),
+        'Invalid parsed diagnostic case selection')
+    return value
+
+
 def evaluation_policy(args):
-    policy = common.evaluation_policy(args)
-    require(policy['rtc_mode'] == 'test_time' and policy['execute_steps'] == 15,
-        'This Pick campaign requires the requested test_time RTC / exact15-action execution window')
+    diagnostic=diagnostic_pairs(args) is not None
+    # The matched-factor pilot preserves15 consumed actions /25 physical ticks
+    # even with RTC disabled; the common off-mode default30 must not leak in.
+    mode=getattr(args,'rtc_mode','test_time')
+    steps=getattr(args,'execute_steps',None)
+    policy=common.evaluation_policy(argparse.Namespace(rtc_mode=mode,execute_steps=15 if steps is None else steps))
+    require(policy['execute_steps']==15 and policy['control_ticks_per_window']==25,
+        'Pick comparisons require the exact15-action/25-control-tick execution window')
+    scope=getattr(args,'rtc_guidance_action_scope','all')
+    require(scope in ('all','validated_repack'),'Unknown RTC guidance action scope')
+    require(scope=='all' or diagnostic and policy['rtc_mode']=='test_time',
+        'Validated repack guidance requires an explicit test_time diagnostic pilot')
+    require(not getattr(args,'pick_interaction_diagnostics',False) or diagnostic,
+        'Interaction diagnostics require explicit diagnostic cases')
+    policy.update(rtc_guidance_action_scope=scope,guided_action_dimensions=78 if scope=='validated_repack' else 80)
+    require(diagnostic or policy['rtc_mode']=='test_time',
+        'Full30 production requires test_time RTC; off is only an explicit diagnostic case pilot')
     return policy
+
+
+def execution_cases(frozen):
+    """Bind selected IDs and seeds to all30 frozen source cases."""
+    require(len(frozen['cases'])==30 and [(c['level'],c['case_index']) for c in frozen['cases']]==
+        [(level,case) for level in range(3) for case in range(10)],'All30 source cases must stay frozen')
+    if frozen.get('contract')==CONTRACT:
+        require(not frozen.get('diagnostic_selected_cases') and frozen.get('evaluation_denominator',30)==30,
+            'Full30 source cannot silently select a pilot subset')
+        return frozen['cases']
+    require(frozen.get('contract')==DIAGNOSTIC_CONTRACT and frozen.get('experiment_role')=='same_seed_rtc_single_factor_pilot'
+        and frozen.get('full_official30_claim') is False,'Independent diagnostic contract/role is required')
+    selected=frozen.get('diagnostic_selected_cases');require(isinstance(selected,list) and selected,'Missing explicit pilot selection')
+    lookup={(c['level'],c['case_index']):c for c in frozen['cases']};result=[];seen=set()
+    for item in selected:
+        key=(item['level'],item['case_index'])
+        require(key in lookup and key not in seen,'Unknown/duplicate selected pilot case')
+        source=lookup[key]
+        require(item=={name:source[name] for name in ('level','case_index','flat_index','sampling_seed')},
+            'Selected pilot seed or identity differs from its frozen original')
+        result.append(source);seen.add(key)
+    require(type(frozen.get('evaluation_denominator')) is int and frozen['evaluation_denominator']==len(result)
+        and frozen.get('planned_cases')==len(result),'Pilot denominator differs from explicit selection')
+    return result
+
+
+def all_guidance_proof():
+    return {'scope':'all','action_dim':80,'guided_action_dimensions':80,'excluded_action_indices':[]}
+
+
+def freeze_guidance_proof(args,ready,sources):
+    """Independently derive78 supervised outputs from accepted source files."""
+    policy=evaluation_policy(args)
+    if policy['rtc_guidance_action_scope']=='all':return all_guidance_proof()
+    name='release_metadata/packed/PACK_READY.json'
+    path=args.deployment/'provenance'/name
+    require(path.resolve(strict=True).is_relative_to(args.deployment),'Guidance pack provenance escapes deployment')
+    pack_identity=file_identity(path);sources['guidance_pack_ready']=pack_identity;pack=read(path)
+    require(ready.get('source_metadata_sha256',{}).get(name)==pack_identity['sha256'],
+        'Guidance source pack SHA differs from accepted deployment')
+    spec=profile_spec(args.profile);config=read(args.deployment/'run_config.json')
+    require(pack.get('contract')=='cvpr-pico-pick-lerobot-pack-v1' and pack.get('task_id')==spec['task_id'] and
+        pack.get('packer_sha256')==VALIDATED_PACKER_SHA256,'Guidance packer/task contract is not independently recognized')
+    model=config.get('model',{});repack=config.get('data',{}).get('transform',{}).get('repack',{})
+    require(model.get('action_dim')==80 and model.get('action_architecture')=='dual_source_v1' and
+        repack.get('action_keys')==['action.body_token_v1_1','action[:14]'] and repack.get('pad_action_dim')==80 and
+        repack.get('action_mask_key')=='action_mask','Guidance repack is not supervised body64+hand14 with masked padding')
+    expected_hands=[side+'_hand_'+name+'_joint' for side in ('left','right') for name in
+        ('thumb_0','thumb_1','thumb_2','middle_0','middle_1','index_0','index_1')]
+    require(pack.get('checkpoint_contract',{}).get('hand_joint_names')==expected_hands,'Guidance named hand14 order differs')
+    return {'contract':'cvpr-pick-rtc-validated-repack-guidance-v1','scope':'validated_repack','task_id':spec['task_id'],
+        'action_dim':80,'guided_action_dimensions':78,'guidance_action_mask':[True]*78+[False]*2,
+        'excluded_action_indices':[78,79],'local_run_ready_sha256':sources['deployment_ready']['sha256'],
+        'run_config_sha256':sources['deployment/run_config.json']['sha256'],'pack_ready_sha256':pack_identity['sha256'],
+        'packer_sha256':VALIDATED_PACKER_SHA256,'source':'accepted_pick_pack_body64_named_hand14'}
+
+
+def validate_guidance_proof(actual,policy):
+    expected=policy.get('rtc_guidance_action_proof',all_guidance_proof())
+    require(isinstance(actual,dict) and actual==expected and actual.get('scope')==policy['rtc_guidance_action_scope'] and
+        type(actual.get('action_dim')) is int and actual['action_dim']==80 and
+        type(actual.get('guided_action_dimensions')) is int and actual['guided_action_dimensions']==policy['guided_action_dimensions'],
+        'Actual RTC guidance scope/proof differs from independently frozen deployment evidence')
+    if policy['rtc_guidance_action_scope']=='validated_repack':
+        mask=actual.get('guidance_action_mask')
+        require(isinstance(mask,list) and len(mask)==80 and all(type(v) is bool for v in mask) and
+            mask==[True]*78+[False]*2,'Actual RTC guidance mask is not the strict78 boolean supervised-output mask')
+
+
+def runtime_gate(startup,expected,model_sha,seed,pid,policy=None):
+    policy=policy or evaluation_policy(argparse.Namespace())
+    accepted=common.runtime_gate(startup,expected,model_sha,seed,pid,policy)
+    require(startup.get('rtc_guidance_action_scope')==policy['rtc_guidance_action_scope'],'Actual startup guidance scope differs')
+    validate_guidance_proof(startup.get('rtc_guidance_action_proof'),policy)
+    require(startup.get('rtc_mode')==policy['rtc_mode'] and startup.get('Tp')==30 and
+        startup.get('parameter_tensor_count',0)>0 and startup.get('trainable_parameter_tensor_count')==0 and
+        startup.get('parameter_gradient_tensor_count')==0,'Actual policy mode/horizon/frozen parameter evidence differs')
+    return accepted
+
+
+def validate_action_execution(result,ticks,requests,policy):
+    if policy['rtc_enabled']:
+        result=common.validate_rtc_execution(result,ticks,requests,policy)
+        result.update(rtc_guidance_action_scope=policy['rtc_guidance_action_scope'],guided_action_dimensions=policy['guided_action_dimensions'])
+        return result
+    info=result['server_info']
+    require(info.get('rtc_enabled') is False and info.get('rtc_mode')=='off' and
+        info.get('action',{}).get('action_exec_horizon')==15,'Actual non-RTC response contract differs')
+    successful=[row for row in requests if row['status']==200]
+    policy_ticks=[row for row in ticks if row['phase']=='policy_latent'];window=policy['control_ticks_per_window']
+    require(window==25 and policy['execute_steps']==15,'Non-RTC comparison changed execution window')
+    require(len(successful)==(len(policy_ticks)+window-1)//window,'Plain sampler did not replan on exact execution windows')
+    for row in requests:
+        calls=row.get('sampler_calls',{})
+        require(set(calls)=={'plain','test_time','train'} and all(type(v) is int and v>=0 for v in calls.values()) and
+            row.get('parameter_gradient_tensor_count')==0,'Missing/faulty actual plain sampler or gradient evidence')
+        if row['status']==425:
+            require(row.get('sampling_path') is None and sum(calls.values())==0,'Warmup ran a sampler')
+    for index,row in enumerate(successful):
+        close_number(float(row['sim_time_s']),policy_ticks[index*window]['sim_time_s'],'Plain sampler request used the wrong consumed-action clock')
+        require(row.get('sampling_path')=='plain' and row['sampler_calls']=={'plain':1,'test_time':0,'train':0} and
+            row.get('response_action_shape')==[15,80],'Non-RTC path did not actually use exactly one plain sampler and15 returned actions')
+    for index,row in enumerate(policy_ticks):
+        start=policy_ticks[index//window*window]['sim_time_s']
+        close_number(row['chunk_start_sim_time_s'],start,'Plain chunk anchoring differs')
+        action=math.floor((row['sim_time_s']-start)*30+1e-7)
+        require(row['action_index_at_30hz']==action and 0<=action<15,'Plain execution consumed a stale/extra action')
+    return {'status':'passed','plain_requests':len(successful),'test_time_requests':0,'train_requests':0,
+        'execution_window':15,'control_ticks_per_window':25,'all_requests_and_action_indices_aligned':True}
 
 
 def source_identities(profile):
@@ -68,7 +218,7 @@ def source_identities(profile):
     adapter = importlib.import_module(profile_data["adapter_module"])
     sources = {name: file_identity(Path(__file__).with_name(name)) for name in (
         'evaluate_pick30.py', 'pick_eval_protocol.py', 'prepare_pick_eval.py', 'evaluate_mobile_pp30.py', 'run_closed_loop.py', 'serve_evaluation.py',
-        profile_data['adapter_module']+'.py', 'capture_simple.py', 'video_capture.py', 'bend_initialization_monitor.py')}
+        profile_data['adapter_module']+'.py', 'capture_simple.py', 'video_capture.py', 'bend_initialization_monitor.py', 'pick_interaction_observer.py')}
     for relative in ('deploy/serve_psi0_simple.py', 'deploy/dual_source_runtime.py', 'models/psi0.py', 'models/dual_source_action.py'):
         sources['psi/'+relative] = file_identity(REPO/'VLMExpert/src/psi'/relative)
     spec = importlib.util.find_spec('simple')
@@ -86,6 +236,7 @@ def source_identities(profile):
 def freeze_inputs(args):
     from capture_simple import remap_episode_paths
     profile = args.profile
+    evaluation_policy(args)
     spec = profile_spec(profile)
     require(type(args.checkpoint_step) is int and args.checkpoint_step in SAVE_STEPS, 'Unselected checkpoint step')
     ready_path = args.deployment/'LOCAL_RUN_READY.json'
@@ -118,6 +269,8 @@ def freeze_inputs(args):
     dino_contract = read(args.deployment/'dino_training_contract.json')
     require(config['data']['transform']['model'].get('motion_image_policy') ==
         dino_contract.get('motion_image_policy') == 'vlm_color_clean_motion', 'Trained image policy may not revert to shared_rgb')
+    policy=evaluation_policy(args)
+    policy['rtc_guidance_action_proof']=freeze_guidance_proof(args,ready,sources)
     cases, metadata_files = [], []
     for level in range(3):
         path = args.data_root/'eval'/spec['source_task']/f'dr-level-{level}'/'meta/episodes.jsonl'
@@ -141,7 +294,10 @@ def freeze_inputs(args):
                 'initialization_profile': INITIALIZATION_PROFILE})
         unchanged(identity)
         metadata_files.append(identity)
-    return {'contract': CONTRACT, 'profile': profile, 'task_id': spec['task_id'], 'source_task_id': spec['source_task_id'],
+    pairs=diagnostic_pairs(args)
+    selection=([c for pair in pairs for c in cases if (c['level'],c['case_index'])==pair] if pairs is not None else [])
+    contract=DIAGNOSTIC_CONTRACT if pairs is not None else CONTRACT
+    frozen={'contract': contract, 'profile': profile, 'task_id': spec['task_id'], 'source_task_id': spec['source_task_id'],
         'prepared_utc': now(), 'checkpoint_step': args.checkpoint_step, 'model': model, 'deployment': str(args.deployment),
         'training_manifest': manifest, 'metadata_files': metadata_files, 'sources': sources, 'cases': cases,
         'official_repository': 'USC-PSI-Lab/psi-data', 'official_revision': OFFICIAL_REVISION,
@@ -150,18 +306,27 @@ def freeze_inputs(args):
         'source_split_labels_preserved': True, 'independent_heldout_split_proven': False,
         'original_official_initialization': True, 'initialization_profile': INITIALIZATION_PROFILE,
         'world_translation_m': [0., 0., 0.],
-        'case_order': 'original_level_case_order', 'automatic_retries': 0,
-        'evaluation_policy': evaluation_policy(args)}
+        'case_order': 'explicit_diagnostic_selection' if pairs is not None else 'original_level_case_order',
+        'planned_cases':len(selection) if pairs is not None else 30,
+        'evaluation_denominator':len(selection) if pairs is not None else 30,
+        'experiment_role':'same_seed_rtc_single_factor_pilot' if pairs is not None else 'fixed_official30_rtc_diagnostic',
+        'full_official30_claim':False if pairs is not None else True, 'source_cases_frozen':30,
+        'diagnostic_selected_cases':[{key:c[key] for key in ('level','case_index','flat_index','sampling_seed')} for c in selection],
+        'interaction_diagnostics_requested':bool(getattr(args,'pick_interaction_diagnostics',False)),
+        'automatic_retries':0,'evaluation_policy':policy}
+    execution_cases(frozen)
+    return frozen
 
 
 def commands(args, case, directory):
     policy = evaluation_policy(args)
     task = profile_spec(args.profile)['task']
-    options = ['--rtc-mode', 'test_time', '--execute-steps', '15', '--rtc-inference-delay', '0',
+    options = ['--rtc-mode', policy['rtc_mode'], '--execute-steps', '15', '--rtc-inference-delay', '0',
         '--min-exec-horizon', '15', '--pig-mask-schedule', 'exponential', '--pig-guidance-alpha', '0.9']
     server = [str(MODEL_PY), str(REPO/'scripts/4090_simple/serve_evaluation.py'), '--run-dir', str(args.deployment),
         '--ckpt-step', str(args.checkpoint_step), '--sampling-seed', str(case['sampling_seed']),
-        '--output', str(directory/'server'), '--port', str(args.port), *options]
+        '--output', str(directory/'server'), '--port', str(args.port), *options,
+        '--rtc-guidance-action-scope',policy['rtc_guidance_action_scope']]
     simulator = [str(SIM_PY), str(REPO/'scripts/4090_simple/run_closed_loop.py'), '--data-root', str(args.data_root),
         '--sonic-resources', str(args.runtime_root/'resources/sonic_v1_1'), '--output', str(directory/'simulation'),
         '--tasks', task, '--episode-start', str(case['case_index']), '--episodes-per-task', '1',
@@ -171,6 +336,7 @@ def commands(args, case, directory):
         '--diagnostic-unverified-sonic', '--pd-profile', 'official_v1_1_ankle_pitch_1_5', '--hand-torque-profile', 'mjcf_limits',
         '--warmup-control', 'live_pose_sonic_v1_1', '--warmup-hand-policy', 'measured', '--body-token-projection', 'none',
         '--video', '--worker-wall-timeout', '1800', '--worker-task', task]
+    if getattr(args,'pick_interaction_diagnostics',False):simulator.append('--pick-interaction-diagnostics')
     return {'server': server, 'simulator': simulator}
 
 
@@ -280,12 +446,17 @@ def validate_initialization_safety(safety):
 
 def validate_pick_identity(result, episode, case, frozen):
     spec = profile_spec(frozen['profile'])
-    require(frozen.get('contract') == CONTRACT and frozen.get('task_id') == spec['task_id'] and
+    require(any(item['level']==case['level'] and item['case_index']==case['case_index'] for item in execution_cases(frozen)),
+        'Case was not selected by this campaign')
+    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
         frozen.get('source_task_id') == spec['source_task_id'] and case.get('profile') == frozen['profile'] and
         case.get('task_id') == spec['task_id'] and case.get('source_task_id') == spec['source_task_id'],
         'Pick frozen profile/task identity differs')
     require(all(value.get('initialization_profile') == INITIALIZATION_PROFILE for value in
         (frozen,case,result,episode,episode.get('pick_protocol',{}))), 'Native initialization profile identity differs')
+    require(result.get('server_info',{}).get('rtc_guidance_action_scope')==frozen['evaluation_policy']['rtc_guidance_action_scope'],
+        'Actual server guidance action scope differs')
+    validate_guidance_proof(result.get('server_info',{}).get('rtc_guidance_action_proof'),frozen['evaluation_policy'])
     adapter = result.get('pick_adapter', {})
     require(adapter.get('initialization_profile') == INITIALIZATION_PROFILE, 'Private adapter initialization profile differs')
     require(adapter.get('adaptation') == case['adaptation'] and adapter.get('reset_derivation') == case['reset_derivation'] and
@@ -301,6 +472,111 @@ def validate_pick_identity(result, episode, case, frozen):
     require(case['adaptation'].get('world_translation_m') == [0., 0., 0.], 'XMove may not inherit Bend world shift')
     require(result.get('server_info', {}).get('ckpt_step') == frozen['checkpoint_step'] and
         result['server_info'].get('run_dir') == frozen['deployment'], 'Actual server checkpoint step/deployment differs')
+
+
+def finite_array(value,shape,label):
+    if not shape:
+        require(type(value) in (int,float) and math.isfinite(value),'Nonfinite/non-numeric '+label)
+        return
+    require(isinstance(value,list) and len(value)==shape[0],'Wrong shape for '+label)
+    for item in value:finite_array(item,shape[1:],label)
+
+
+def validate_sampler_action_evidence(requests,policy):
+    """Inspect actual sampler kwargs and both normalized and sent actions."""
+    expected=policy['rtc_guidance_action_proof']
+    for row in requests:
+        require(row.get('rtc_guidance_action_scope')==policy['rtc_guidance_action_scope'],'Request guidance scope differs')
+        validate_guidance_proof(row.get('rtc_guidance_action_proof'),policy)
+        if row['status']!=200:continue
+        finite_array(row.get('normalized_prediction'),(1,30,80),'normalized sampler prediction')
+        finite_array(row.get('denormalized_returned_action'),(15,80),'denormalized returned execution actions')
+        if row.get('sampling_path')=='test_time':
+            require('actual_rtc_guidance_action_mask' in row,'RTC request lacks actual sampler mask-argument evidence')
+            mask=row['actual_rtc_guidance_action_mask']
+            require(mask==expected.get('guidance_action_mask'),'Actual RTC sampler mask argument differs from frozen proof')
+            if mask is not None:
+                require(all(type(v) is bool for v in mask),'Actual sampler mask is not boolean')
+            finite_array(row.get('normalized_shifted_previous'),(1,30,80),'actual RTC shifted previous plan')
+        else:
+            require(row.get('actual_rtc_guidance_action_mask') is None,'Plain sampler unexpectedly used RTC guidance')
+
+
+def validate_interaction_observation(episode,ticks,requests):
+    """Audit passive solved intervals, measured poses and commands actually sent."""
+    receipt=episode.get('pick_interaction_observer',{})
+    require(receipt.get('contract')=='cvpr-pick-passive-interaction-observer-v1' and
+        type(receipt.get('observed_physics_substeps')) is int and receipt['observed_physics_substeps']==1+4*len(ticks),
+        'Interaction observer physical-step coverage differs')
+    close_number(receipt.get('solved_interval_end_s',float('nan')),.005+.02*len(ticks),'Interaction observer final solved clock differs')
+    require(receipt.get('live_state_writes') is False and type(receipt.get('physics_steps_added')) is int and
+        receipt['physics_steps_added']==0 and receipt.get('controller_commands_modified') is False,
+        'Interaction diagnostics changed physics/control')
+    require(receipt.get('contact_phase')=='query existing solved contacts after the real mj_step; no mj_forward' and
+        receipt.get('force_count_semantics')=='positive-force contact points per physical substep; not unique collision events',
+        'Interaction contact phase/count interpretation differs')
+    counts=Counter();first={};last_event_step=0
+    groups={'robot_target','robot_table','robot_distractor','robot_self','target_table','target_distractor'}
+    def events(bundles,start_step,end_step,phase):
+        nonlocal last_event_step
+        require(isinstance(bundles,list),'Missing physical contact interval ledger')
+        for bundle in bundles:
+            step=bundle.get('physics_substep')
+            require(type(step) is int and start_step<=step<=end_step and step>last_event_step and bundle.get('phase')==phase,
+                'Contact interval is outside its actual four-step tick or phase')
+            last_event_step=step
+            for key,value in (('solved_interval_end_s',step*.005),('solved_interval_start_s',(step-1)*.005)):
+                close_number(bundle.get(key,float('nan')),value,'Solved contact interval clock differs')
+            contacts=bundle.get('contacts');require(isinstance(contacts,list) and contacts,'Empty event bundle must not fabricate contact')
+            for contact in contacts:
+                categories=contact.get('categories')
+                require(isinstance(categories,list) and categories and set(categories)<=groups and len(categories)==len(set(categories)),
+                    'Unknown/duplicate solved-contact category')
+                for key in ('body_names','geom_names'):
+                    require(isinstance(contact.get(key),list) and len(contact[key])==2 and all(isinstance(v,str) for v in contact[key]),
+                        'Missing actual contact body/geometry names')
+                finite_array(contact.get('position_m'),(3,),'solved contact position')
+                for key in ('distance_m','normal_force_N','force_norm_N'):finite_array(contact.get(key),(),key)
+                require(contact['force_norm_N']>1e-6,'Diagnostic recorded an unsolved/zero-force contact')
+                for group in categories:
+                    key=phase+':'+group;counts[key]+=1
+                    if key not in first:first[key]=dict(solved_interval_end_s=bundle['solved_interval_end_s'],
+                        solved_interval_start_s=bundle['solved_interval_start_s'],physics_substep=step,**contact)
+    events(episode.get('initial_solved_contacts'),1,1,'native_reset')
+    hands=[side+'_hand_'+name+'_joint' for side in ('left','right') for name in
+        ('thumb_0','thumb_1','thumb_2','middle_0','middle_1','index_0','index_1')]
+    plans={round(float(row['sim_time_s']),8):row['denormalized_returned_action'] for row in requests if row['status']==200}
+    for index,row in enumerate(ticks):
+        events(row.get('pick_interaction_substeps'),2+4*index,5+4*index,row['phase'])
+        snapshot=row.get('pick_measured_control',{})
+        close_number(snapshot.get('sim_time_s',float('nan')),row['next_sim_time_s'],'Measured command pose is from a different control tick')
+        bodies=snapshot.get('bodies',{})
+        require(set(bodies)=={'pelvis','left_wrist_yaw_link','right_wrist_yaw_link'},'Missing actual pelvis/wrist body poses')
+        for body in bodies.values():
+            finite_array(body.get('xyz_m'),(3,),'measured body position');finite_array(body.get('quaternion_wxyz'),(4,),'measured body quaternion')
+            close_number(sum(v*v for v in body['quaternion_wxyz']),1.,'Measured body quaternion is not unit')
+        finite_array(snapshot.get('target_xyz_m'),(3,),'measured target position')
+        for actual,expected in zip(snapshot['target_xyz_m'],row['pick_native_state']['target_xyz_m']):
+            close_number(actual,expected,'Contact/control target pose differs from native same-frame state')
+        names=snapshot.get('joint_names');q=snapshot.get('joint_qpos')
+        require(isinstance(names,list) and len(names)==43 and len(set(names))==43 and all(isinstance(v,str) for v in names),
+            'Measured43-joint identity is incomplete')
+        finite_array(q,(43,),'measured43 joint state')
+        token=snapshot.get('sent_body_token64')
+        if token is None:require(row['phase']!='policy_latent','Learned policy lacks its actually sent body64')
+        else:finite_array(token,(64,),'actually sent body64')
+        hand=snapshot.get('sent_hand_targets',{})
+        require(isinstance(hand,dict) and set(hand)==set(hands),'Sent hand targets are not the named14')
+        for value in hand.values():finite_array(value,(),'actually sent hand target')
+        if row['phase']=='policy_latent':
+            key=round(row['chunk_start_sim_time_s'],8);require(key in plans,'Consumed command has no matching actual returned plan')
+            action=plans[key][row['action_index_at_30hz']]
+            for actual,expected in zip(token+[hand[name] for name in hands],action[:78]):
+                require(math.isclose(actual,expected,rel_tol=1e-6,abs_tol=1e-6),'Actually sent body/hand command differs from consumed server action')
+    require(receipt.get('counts')==dict(counts) and receipt.get('first_contacts')==first,
+        'Interaction summary differs from every genuine solved-contact interval')
+    return {'status':'passed','observed_physics_substeps':1+4*len(ticks),'policy_command_identity_checked':True,
+        'counts':dict(counts),'first_contacts':first,'live_state_writes':False,'physics_steps_added':0}
 
 
 def validate_case(directory, case, frozen):
@@ -387,7 +663,9 @@ def validate_case(directory, case, frozen):
     observed = [row["history"]["sim_time_s"] for row in http if row["endpoint"] == "/observe"]
     require(observed == [row["sim_time_s"] for row in ticks], "History is not sourced from each current observation")
     policy = frozen["evaluation_policy"]
-    rtc_execution = (validate_rtc_execution(result, ticks, requests, policy) if policy["rtc_enabled"] else None)
+    rtc_execution = validate_action_execution(result,ticks,requests,policy)
+    validate_sampler_action_evidence(requests,policy)
+    interaction=(validate_interaction_observation(episode,ticks,requests) if frozen.get('interaction_diagnostics_requested') else None)
     video = Path(episode["video"]["path"]).resolve(strict=True)
     require(video == (episode_dir / "rollout.mp4").resolve() and episode["video"]["ffmpeg_returncode"] == 0, "Wrong/incomplete case video")
     probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-threads", "1", "-select_streams", "v:0",
@@ -405,13 +683,18 @@ def validate_case(directory, case, frozen):
             "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution,
             "contract": frozen.get('contract', CONTRACT),
             'profile': frozen['profile'], 'task_id': spec['task_id'], 'source_task_id': spec['source_task_id'],
+            'sampling_seed':case['sampling_seed'],
+            'experiment_role':frozen.get('experiment_role','fixed_official30_rtc_diagnostic'),
+            'evaluation_denominator':frozen.get('evaluation_denominator',30),
             'checkpoint_step': frozen['checkpoint_step'], 'original_official_initialization': True,
             'initialization_profile': INITIALIZATION_PROFILE,
             'initialization_warnings': episode['pick_initialization_safety']['engineering_reference_warnings'],
             'initialization_warning_count': len(episode['pick_initialization_safety']['engineering_reference_warnings']),
             'source_environment_config': case['source_environment_config'],
             'reset_derivation': case['reset_derivation'], 'adaptation': case['adaptation'],
-            'pick_initialization_safety': episode['pick_initialization_safety']}
+            'pick_initialization_safety': episode['pick_initialization_safety'],
+            'interaction_observation_acceptance':interaction,
+            'pick_interaction_observer':episode.get('pick_interaction_observer')}
 
 
 def execute(args, case, frozen, state):
@@ -452,7 +735,7 @@ def execute(args, case, frozen, state):
                     raise TimeoutError("Model server startup exceeded480s")
                 time.sleep(1)
             acceptance = runtime_gate(read(directory / "server/startup.json"), read(args.training_manifest)["encoder"],
-                args.expected_model_sha256, case["sampling_seed"], server.pid, evaluation_policy(args))
+                args.expected_model_sha256, case["sampling_seed"], server.pid, frozen['evaluation_policy'])
             acceptance["training_manifest_sha256"] = frozen["training_manifest"]["sha256"]
             write(directory / "ONLINE_DINO_RUNTIME_ACCEPTANCE.json", acceptance)
             row["status"] = "simulating"
@@ -486,9 +769,34 @@ def execute(args, case, frozen, state):
         raise KeyboardInterrupt("Campaign interrupted; owned children cleaned, evidence retained")
 
 
+def finish_diagnostic(state):
+    """Technical completion of exactly the selected cases, including zero success."""
+    selected=state.get('diagnostic_selected_cases',[])
+    expected=[(row['level'],row['case_index']) for row in selected]
+    require(expected and len(expected)==len(set(expected)) and all(0<=a<=2 and 0<=b<=9 for a,b in expected),
+        'Diagnostic final state has no valid unique explicit selection')
+    require(state.get('planned_cases')==state.get('evaluation_denominator')==len(expected) and
+        state.get('full_official30_claim') is False and state.get('experiment_role')=='same_seed_rtc_single_factor_pilot',
+        'Diagnostic final denominator/role differs')
+    rows=state['cases'];complete=[row for row in rows if row.get('status')=='complete' and type(row.get('native_success')) is bool]
+    actual=[(row['level'],row['case_index']) for row in rows]
+    full=(actual==expected and len(complete)==len(expected) and
+        all(row.get('sampling_seed')==selection['sampling_seed'] for row,selection in zip(rows,selected)))
+    native=sum(row['native_success'] for row in complete)
+    state.update(status='complete' if full else 'incomplete',completed_utc=now(),
+        technically_valid_cases=len(complete),technical_errors=sum(row.get('status')=='technical_error' for row in rows),
+        not_attempted_cases=len(set(expected)-set(actual)),native_successes=native,
+        native_success_rate=native/len(expected),
+        levels=[{'level':level,'planned_cases':sum(a==level for a,b in expected),
+            'technically_valid_cases':sum(row['level']==level for row in complete),
+            'native_successes':sum(row['native_success'] for row in complete if row['level']==level),
+            'technical_errors':sum(row['level']==level and row.get('status')=='technical_error' for row in rows)} for level in range(3)])
+    return 0 if full else 1
+
+
 def finish(state):
     """Keep all30 native outcomes; initialization warnings do not filter cases."""
-    code=common.finish(state)
+    code=finish_diagnostic(state) if state.get('contract')==DIAGNOSTIC_CONTRACT else common.finish(state)
     state['initialization_profile']=INITIALIZATION_PROFILE
     warnings=[{'level':row['level'],'case_index':row['case_index'],
         'warnings':list(row['initialization_warnings'])} for row in state['cases'] if row.get('initialization_warnings')]
@@ -507,7 +815,11 @@ def main(argv=None):
     parser.add_argument("--profile", choices=tuple(OFFICIAL_METADATA_SHA256), required=True)
     parser.add_argument("--port", type=int, default=21115)
     parser.add_argument("--sampling-seed", type=int, default=20261111)
-    parser.add_argument("--rtc-mode", choices=("test_time",), default="test_time")
+    parser.add_argument("--rtc-mode", choices=("off","test_time"), default="test_time")
+    parser.add_argument("--diagnostic-cases", type=parse_diagnostic_cases,
+        help="Explicit pilot only, e.g.0:6,0:0,2:7,0:4; independent contract/denominator, not a full30 result")
+    parser.add_argument("--rtc-guidance-action-scope",choices=("all","validated_repack"),default="all")
+    parser.add_argument("--pick-interaction-diagnostics",action="store_true")
     parser.add_argument("--execute-steps", type=int, help="Exact15 actions with test_time RTC, consuming25 simulation ticks per window")
     args = parser.parse_args(argv)
     require(len(args.expected_model_sha256) == 64 and all(char in "0123456789abcdef" for char in args.expected_model_sha256), "Expected SHA must be lowercase SHA256")
@@ -522,14 +834,18 @@ def main(argv=None):
     frozen = json.loads(json.dumps(freeze_inputs(args), default=_json_value, allow_nan=False))
     args.output.mkdir(parents=True, exist_ok=False)
     write(args.output / "FROZEN_CAMPAIGN.json", frozen)
-    state = {"contract": frozen["contract"], "status": "running", "created_utc": now(), "planned_cases": 30,
+    state = {"contract": frozen["contract"], "status": "running", "created_utc": now(), "planned_cases": frozen["planned_cases"],
              "checkpoint_step": args.checkpoint_step, "model_sha256": args.expected_model_sha256,
              "task_id": frozen["task_id"], "source_task_id": frozen["source_task_id"], "profile": args.profile, "cases": [], "formal_evaluation_eligible": False, "boundary": frozen["boundary"],
-             "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": policy,
-             'original_official_initialization': True, 'initialization_profile': INITIALIZATION_PROFILE}
+             "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": frozen["evaluation_policy"],
+             "interaction_diagnostics_requested":frozen["interaction_diagnostics_requested"],
+             'original_official_initialization': True, 'initialization_profile': INITIALIZATION_PROFILE,
+             'experiment_role':frozen['experiment_role'],'evaluation_denominator':frozen['evaluation_denominator'],
+             'full_official30_claim':frozen['full_official30_claim'],
+             'diagnostic_selected_cases':frozen['diagnostic_selected_cases'],'source_cases_frozen':30}
     write(args.output / "state.json", state)
     try:
-        for case in frozen["cases"]:
+        for case in execution_cases(frozen):
             execute(args, case, frozen, state)
     finally:
         code = finish(state)

@@ -440,6 +440,8 @@ def parse_args():
     parser.add_argument('--pick-official-protocol', action='store_true',
                         help='Moving Pick private task with exact saved scene, native success and800 control ticks')
     parser.add_argument('--pick-profile', choices=('xmove_pick', 'xmove_bend_pick'))
+    parser.add_argument('--pick-interaction-diagnostics', action='store_true',
+                        help='Read solved200Hz contacts and actual sent actions; no physical intervention')
     parser.add_argument('--bend-official-protocol', action='store_true',
                         help='BendPick private SONIC adapter: saved native scene, original reward and metadata TimeLimit')
     parser.add_argument('--initialization-profile', choices=('official_original', 'stable_support_v1'),
@@ -456,6 +458,8 @@ def parse_args():
                         default="mjcf_limits")
     parser.add_argument("--worker-task", choices=SUPPORTED_TASKS, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.pick_interaction_diagnostics and not args.pick_official_protocol:
+        parser.error('Pick interaction diagnostics require an explicit private Pick task')
     from pick_eval_protocol import profile_spec
     if args.pick_official_protocol != (args.pick_profile is not None):
         parser.error('Moving Pick requires both --pick-official-protocol and --pick-profile')
@@ -670,6 +674,9 @@ def run_worker(args):
         if args.mobile_official_protocol or mobile_initializer is not None:
             env = mobile_time_limit(env)
         raw = env.unwrapped
+        if args.pick_interaction_diagnostics:
+            from pick_interaction_observer import install_interaction_observer
+            install_interaction_observer(raw)
         result["render_contract"] = simulation_render_contract(raw,args)
         if args.sync_observations and raw.isaac is not None:
             result["isaac_observation_bridge"] = {"time_delta_s":0,
@@ -802,6 +809,8 @@ def run_worker(args):
             pelvis_id = raw.mujoco.mjModel.body("pelvis").id
             episode["initial_pelvis_position_m"] = raw.mujoco.mjData.xpos[pelvis_id].tolist()
             episode["initial_pelvis_quaternion_wxyz"] = raw.mujoco.mjData.xquat[pelvis_id].tolist()
+            if args.pick_interaction_diagnostics:
+                episode['initial_solved_contacts'] = raw._pick_interaction_observer.drain()
             result["episodes"].append(episode)
             write_json(path, result)
             first_time = float(obs["sim_time_s"])
@@ -867,6 +876,8 @@ def run_worker(args):
                             "action_index_at_30hz": index, "action_type": command.type,
                             "action_wait_wall_seconds": action_wall, "decoder_calls_before_step": controller.decoder_calls,
                             "pelvis_height_m": height, "pelvis_tilt_degrees": tilt, "fell": fell_now}
+                        if args.pick_interaction_diagnostics:
+                            raw._pick_interaction_observer.phase = phase
                         obs, reward, terminated, truncated, info = env.step(command)
                         last_obs = obs
                         record.update(next_sim_time_s=float(obs["sim_time_s"]),
@@ -876,6 +887,10 @@ def run_worker(args):
                             record['pick_native_state'] = {'target_xyz_m': list(map(float, info['target'][:3])),
                                 'baseline_target_z_m': float(raw.task._init_target_height),
                                 'native_reward': float(reward), 'native_success': bool(terminated)}
+                        if args.pick_interaction_diagnostics:
+                            from pick_interaction_observer import measured_control_snapshot
+                            record['pick_interaction_substeps'] = raw._pick_interaction_observer.drain()
+                            record['pick_measured_control'] = measured_control_snapshot(raw,command,obs)
                         if args.bend_official_protocol:
                             record['bend_native_state'] = {'target_xyz_m': list(map(float, info['target'][:3])),
                                 'baseline_target_z_m': float(raw.task._init_target_height),
@@ -956,6 +971,12 @@ def run_worker(args):
                 if args.pick_official_protocol:
                     from pick_eval_protocol import initialization_receipt
                     episode['pick_initialization_safety'] = initialization_receipt(raw)
+                if args.pick_interaction_diagnostics:
+                    observer = raw._pick_interaction_observer
+                    episode['pick_interaction_observer'] = observer.receipt()
+                    if episode['status'] not in ('error', 'running'):
+                        episode['pick_interaction_observer'] = observer.completed_receipt(
+                            episode['warmup_frames']+episode['policy_frames'])
                 if args.bend_official_protocol and support_geometry is not None:
                     episode['bend_initialization_safety'] = raw._bend_initialization_monitor.receipt()
                 episode["strategy_quality_assessment"] = (

@@ -2382,8 +2382,11 @@ class Psi0Model(nn.Module):
         return_vlm_features: bool = False,
         motion_img_embs: Optional[torch.Tensor] = None,
         motion_features: Optional[MotionFeatures] = None,
+        guidance_action_mask: Optional[torch.Tensor] = None,
         **kwargs: str
     ) -> Union[torch.Tensor, HumanFoundationModelOutput]:
+
+        from psi.models.dual_source_action import rtc_guidance_error
 
         ## RTC related ##
         H = self.action_horizon
@@ -2500,7 +2503,8 @@ class Psi0Model(nn.Module):
                     tau = self.noise_scheduler.sigmas[self.noise_scheduler.index_for_timestep(timestep)].detach()
                     pred_x0 = action_samples_grad - tau * model_pred
                     # 2. 计算(Y - pred_X_0) * weights
-                    error = (prev_actions - pred_x0.detach()) * mask_expanded
+                    error = rtc_guidance_error(prev_actions, pred_x0, mask_expanded,
+                                               guidance_action_mask)
                     # 3. vjp
                     pinv_correction = torch.autograd.grad(
                         outputs=pred_x0,  # [1,T,D]

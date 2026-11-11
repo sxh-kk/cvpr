@@ -23,6 +23,25 @@ MOTION_TOKEN_COUNT = 11
 MOTION_FEATURE_DIM = 768
 
 
+def rtc_guidance_error(previous: torch.Tensor, predicted: torch.Tensor,
+                       temporal_mask: torch.Tensor,
+                       action_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Mask RTC target residuals, never the full-dimensional sampling input.
+
+    The optional boolean [D] mask describes supervised action outputs. Its VJP
+    may still affect every input channel through the network Jacobian: those
+    inputs remain full Gaussian samples, including unsupervised padding.
+    """
+    error = previous - predicted.detach()
+    if action_mask is not None:
+        if (not isinstance(action_mask, torch.Tensor) or action_mask.dtype != torch.bool
+                or action_mask.shape != (error.shape[-1],) or not action_mask.any().item()):
+            raise ValueError("RTC guidance action mask must be nonempty boolean [action_dim]")
+        # where also discards nonfinite values in excluded target channels.
+        error = torch.where(action_mask.to(error.device).view(1, 1, -1), error, 0.)
+    return error * temporal_mask
+
+
 @dataclass
 class DualSourceActionOutput:
     action: torch.Tensor

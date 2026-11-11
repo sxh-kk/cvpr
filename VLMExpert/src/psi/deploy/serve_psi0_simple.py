@@ -1,4 +1,5 @@
 import os
+import hashlib
 import sys
 import threading
 import tyro
@@ -10,7 +11,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from PIL import Image
-from typing import Union, Dict, Any, List
+from typing import Union, Dict, Any, List, Literal
 from base64 import b64decode, b64encode
 from fastapi.responses import JSONResponse
 from numpy.lib.format import descr_to_dtype, dtype_to_descr
@@ -25,6 +26,73 @@ from psi.utils import parse_args_to_tyro_config, pad_to_len, seed_everything, ap
 from psi.utils.overwatch import initialize_overwatch 
 
 overwatch = initialize_overwatch(__name__)
+
+class SimpleServerConfig(ServerConfig):
+    # Explicit diagnostic opt-in; legacy deployments retain all-output RTC.
+    rtc_guidance_action_scope: Literal["all", "validated_repack"] = "all"
+
+
+_PICK_TASKS = {
+    "xmove_pick": "cvpr/G1SonicXMovePickPico-v0",
+    "bend_pick": "cvpr/G1SonicBendPickPico-v0",
+    "xmove_bend_pick": "cvpr/G1SonicXMoveBendPickPico-v0",
+}
+# This reviewed packer verifies each supervised action row is body64 + named
+# hand14 and has exactly [True]*78+[False]*2. Unknown packers fail closed.
+_PICK_MASK_PACKER_SHA256 = "b9861390ff1e5dba1b92b066f4584c4564613841887bb2e7ad13b2ee4e84b1da"
+
+
+def validated_repack_guidance(run_dir: Path, action_dim: int):
+    """Derive guidance outputs from a SHA-bound accepted Pick repack contract."""
+    run_dir = Path(run_dir)
+
+    def read(relative):
+        raw = (run_dir / relative).read_bytes()
+        return json.loads(raw), hashlib.sha256(raw).hexdigest(), len(raw)
+
+    def require(condition, message):
+        if not condition:
+            raise ValueError("RTC validated_repack: " + message)
+
+    ready, ready_sha, _ = read("LOCAL_RUN_READY.json")
+    require(ready.get("contract") == "cvpr-pick-local-deployment-v1"
+            and ready.get("status") == "local_pick_checkpoint_prepared", "accepted Pick deployment required")
+    task = _PICK_TASKS.get(ready.get("profile"))
+    require(task is not None and ready.get("task_id") == task, "task/profile identity mismatch")
+    require(ready.get("training_completed") is True and ready.get("checkpoint_save_completed") is True
+            and ready.get("component_load_validation", {}).get("status") == "passed",
+            "training/checkpoint/strict component acceptance missing")
+    config, config_sha, config_bytes = read("run_config.json")
+    require(ready.get("deployment_artifacts", {}).get("run_config.json")
+            == {"sha256": config_sha, "bytes": config_bytes}, "run config artifact SHA mismatch")
+    pack_name = "release_metadata/packed/PACK_READY.json"
+    pack, pack_sha, _ = read("provenance/" + pack_name)
+    require(ready.get("source_metadata_sha256", {}).get(pack_name) == pack_sha,
+            "source pack receipt SHA mismatch")
+    require(pack.get("contract") == "cvpr-pico-pick-lerobot-pack-v1"
+            and pack.get("task_id") == task and pack.get("packer_sha256") == _PICK_MASK_PACKER_SHA256,
+            "unrecognized task/packer action-mask contract")
+    model = config.get("model", {})
+    repack = config.get("data", {}).get("transform", {}).get("repack", {})
+    require(type(action_dim) is int and action_dim == 80
+            and model.get("action_dim") == 80 and model.get("action_architecture") == "dual_source_v1",
+            "expected dual-source 80-dimensional model")
+    require(repack.get("action_keys") == ["action.body_token_v1_1", "action[:14]"]
+            and repack.get("pad_action_dim") == 80 and repack.get("action_mask_key") == "action_mask",
+            "repack does not declare supervised body64 + hand14 with padding mask")
+    hands = pack.get("checkpoint_contract", {}).get("hand_joint_names", [])
+    expected_hands = [side + "_hand_" + name + "_joint" for side in ("left", "right")
+                      for name in ("thumb_0", "thumb_1", "thumb_2", "middle_0", "middle_1", "index_0", "index_1")]
+    require(hands == expected_hands, "named hand14 order mismatch")
+    mask = [True] * 78 + [False] * 2
+    proof = dict(contract="cvpr-pick-rtc-validated-repack-guidance-v1", scope="validated_repack",
+                 task_id=task, action_dim=80, guided_action_dimensions=78,
+                 guidance_action_mask=mask, excluded_action_indices=[78, 79],
+                 local_run_ready_sha256=ready_sha, run_config_sha256=config_sha,
+                 pack_ready_sha256=pack_sha, packer_sha256=pack["packer_sha256"],
+                 source="accepted_pick_pack_body64_named_hand14")
+    return torch.tensor(mask, dtype=torch.bool), proof
+
 
 class Server:
     
@@ -43,6 +111,7 @@ class Server:
         rtc_session_timeout: float = 30.0,
         rtc_inference_delay: int | None = None,
         min_exec_horizon: int | None = None,
+        rtc_guidance_action_scope: str = "all",
     ):
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available. Please check your CUDA installation.")
@@ -152,6 +221,19 @@ class Server:
             raise ValueError(
                 "rtc_mode=train needs a checkpoint trained with --model.rtc; this run has "
                 "model.rtc=False. Serve with rtc_mode=test_time (or rtc_mode=auto) or --no-rtc.")
+        if rtc_guidance_action_scope not in ("all", "validated_repack"):
+            raise ValueError("rtc_guidance_action_scope must be all|validated_repack")
+        self.rtc_guidance_action_scope = rtc_guidance_action_scope
+        self.rtc_guidance_action_mask = None
+        self.rtc_guidance_action_proof = dict(scope="all", action_dim=self.Da,
+                                             guided_action_dimensions=self.Da,
+                                             excluded_action_indices=[])
+        if rtc_guidance_action_scope == "validated_repack":
+            if self.rtc_mode != "test_time" or not self.uses_dual_source:
+                raise ValueError("validated_repack guidance requires dual-source test_time RTC")
+            mask, self.rtc_guidance_action_proof = validated_repack_guidance(run_dir, self.Da)
+            self.rtc_guidance_action_mask = mask.to(self.device)
+        overwatch.info("RTC guidance action proof: " + json.dumps(self.rtc_guidance_action_proof, sort_keys=True))
         self.rtc_max_delay = int(getattr(launch_config.model, "max_delay", 8) or 8)  # type:ignore
         if self.enable_rtc:
             # Both RTC paths condition on the previous chunk shifted left by exec_shift
@@ -461,6 +543,7 @@ class Server:
                             execution_horizon=self.min_exec_horizon,
                             mask_schedule=self.pig_mask_schedule,
                             guidance_alpha=self.pig_guidance_alpha,
+                            guidance_action_mask=getattr(self, "rtc_guidance_action_mask", None),
                         )
                     else:
                         raw_pred_actions = self.model.predict_action_with_training_rtc_flow(
@@ -537,6 +620,9 @@ class Server:
             },
             "rtc_enabled": self.enable_rtc,
             "rtc_mode": self.rtc_mode,
+            "rtc_guidance_action_scope": getattr(self, "rtc_guidance_action_scope", "all"),
+            "rtc_guidance_action_proof": getattr(self, "rtc_guidance_action_proof",
+                dict(scope="all", action_dim=self.Da, guided_action_dimensions=self.Da, excluded_action_indices=[])),
             # RTC geometry, all in rows. exec_shift is what the server assumes the
             # client consumed (always action_exec_horizon); d/s are tuning.
             "rtc_exec_shift": self.exec_shift if self.enable_rtc else None,
@@ -601,6 +687,7 @@ def serve(cfg: ServerConfig) -> None:
         rtc_inference_delay=cfg.rtc_inference_delay,
         min_exec_horizon=cfg.min_exec_horizon,
         num_inference_steps=cfg.num_inference_steps,
+        rtc_guidance_action_scope=getattr(cfg, "rtc_guidance_action_scope", "all"),
     )
     
     overwatch.info("Server :: Spinning Up")
@@ -611,11 +698,11 @@ def main():
     overwatch.info(f"Args: {sys.argv}")
     from dotenv import load_dotenv
     load_dotenv()
-    config = tyro.cli(ServerConfig, config=(tyro.conf.ConsolidateSubcommandArgs,), args=sys.argv[1:])
+    config = tyro.cli(SimpleServerConfig, config=(tyro.conf.ConsolidateSubcommandArgs,), args=sys.argv[1:])
     serve(config)
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
-    config = tyro.cli(ServerConfig, config=(tyro.conf.ConsolidateSubcommandArgs,))
+    config = tyro.cli(SimpleServerConfig, config=(tyro.conf.ConsolidateSubcommandArgs,))
     serve(config)

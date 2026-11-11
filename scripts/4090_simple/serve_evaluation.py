@@ -35,6 +35,10 @@ def audited_server(factory, seed, seed_function, output, source_sha):
     receipt = {"weight_sha256": source_sha, "sampling_seed": seed, "pid": os.getpid(),
                "rng_sha256": rng_sha(), "host": "127.0.0.1", "Ta": server.Ta, "Tp": server.Tp,
                "rtc": server.enable_rtc, "rtc_mode": server.rtc_mode,
+               "rtc_guidance_action_scope": getattr(server, "rtc_guidance_action_scope", "all"),
+               "rtc_guidance_action_proof": getattr(server, "rtc_guidance_action_proof",
+                   dict(scope="all", action_dim=getattr(server, "Da", 80), guided_action_dimensions=getattr(server, "Da", 80),
+                        excluded_action_indices=[])),
                "inference_steps": server.num_inference_steps,
                "rtc_exec_shift": server.exec_shift if server.enable_rtc else None,
                "rtc_inference_delay": server.rtc_inference_delay if server.enable_rtc else None,
@@ -46,13 +50,31 @@ def audited_server(factory, seed, seed_function, output, source_sha):
     sampler_names = ("predict_action", "predict_action_with_rtc_flow", "predict_action_with_training_rtc_flow")
     sampler_paths = dict(zip(sampler_names, ("plain", "test_time", "train")))
     sampler_counts = {name: 0 for name in sampler_names}
+    sampler_action_audit = {}
+
+    def action_values(value):
+        return value.detach().float().cpu().tolist() if isinstance(value, torch.Tensor) else np.asarray(value).tolist()
     for name in sampler_names:
         method = getattr(server.model, name, None)
         if callable(method):
             def wrap(original, sampler_name):
                 def call(*args, **kwargs):
                     sampler_counts[sampler_name] += 1
-                    return original(*args, **kwargs)
+                    # Diagnostic values are copied after actual production calls;
+                    # never replace the sampler input, RNG or normalized cache.
+                    if sampler_name == "predict_action_with_rtc_flow":
+                        mask = kwargs.get("guidance_action_mask")
+                        actual_mask = None if mask is None else mask.detach().cpu().tolist()
+                        sampler_action_audit["actual_rtc_guidance_action_mask"] = actual_mask
+                        expected_mask = receipt["rtc_guidance_action_proof"].get("guidance_action_mask")
+                        if actual_mask != expected_mask:
+                            raise RuntimeError("Actual RTC sampler action mask differs from accepted scope proof")
+                    previous = kwargs.get("prev_actions")
+                    if previous is not None:
+                        sampler_action_audit["normalized_shifted_previous"] = action_values(previous)
+                    result = original(*args, **kwargs)
+                    sampler_action_audit["normalized_prediction"] = action_values(result)
+                    return result
                 return call
             setattr(server.model, name, wrap(method, name))
     receipt["audited_sampler_methods"] = [name for name in sampler_names if callable(getattr(server.model, name, None))]
@@ -89,6 +111,7 @@ def audited_server(factory, seed, seed_function, output, source_sha):
             row = {"ordinal": ordinal, "episode_id": history.get("episode_id"), "session_id": history.get("session_id"),
                    "sim_time_s": str(history.get("sim_time_s")), "rng_before": rng_sha(), "status": "exception"}
             before_samplers = sampler_counts.copy()
+            sampler_action_audit.clear()
             started = time.monotonic()
             try:
                 claim(history)
@@ -100,6 +123,7 @@ def audited_server(factory, seed, seed_function, output, source_sha):
                         action = np.frombuffer(b64decode(action["__numpy__"]),
                             descr_to_dtype(action["dtype"])).reshape(action["shape"])
                     row["response_action_shape"] = list(np.asarray(action).shape)
+                    row["denormalized_returned_action"] = np.asarray(action).tolist()
                 return response
             except BaseException as error:
                 row["status"] = getattr(error, "status_code", "exception")
@@ -108,6 +132,9 @@ def audited_server(factory, seed, seed_function, output, source_sha):
             finally:
                 calls = {sampler_paths[name]: sampler_counts[name] - before_samplers[name] for name in sampler_names}
                 row["sampler_calls"] = calls
+                row["rtc_guidance_action_scope"] = receipt["rtc_guidance_action_scope"]
+                row["rtc_guidance_action_proof"] = receipt["rtc_guidance_action_proof"]
+                row.update(sampler_action_audit)
                 paths = [name for name, count in calls.items() if count]
                 row["sampling_path"] = paths[0] if len(paths) == 1 else None
                 row["parameter_gradient_tensor_count"] = sum(value.grad is not None for value in parameters)
@@ -135,6 +162,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=21074)
     parser.add_argument("--rtc-mode", choices=("off", "test_time"), default="off")
+    parser.add_argument("--rtc-guidance-action-scope", choices=("all", "validated_repack"), default="all")
     parser.add_argument("--execute-steps", type=int, default=30)
     parser.add_argument("--rtc-inference-delay", type=int, default=0)
     parser.add_argument("--min-exec-horizon", type=int)
@@ -154,12 +182,16 @@ def main():
                             enable_rtc=args.rtc_mode != "off", action_exec_horizon=args.execute_steps,
                             rtc_mode=args.rtc_mode, num_inference_steps=10,
                             rtc_inference_delay=args.rtc_inference_delay, min_exec_horizon=args.min_exec_horizon,
-                            pig_mask_schedule=args.pig_mask_schedule, pig_guidance_alpha=args.pig_guidance_alpha),
+                            pig_mask_schedule=args.pig_mask_schedule, pig_guidance_alpha=args.pig_guidance_alpha,
+                            rtc_guidance_action_scope=args.rtc_guidance_action_scope),
                             args.sampling_seed, seed_everything, args.output, sha256(weights))
     server.run("127.0.0.1", args.port)
 
 
 def validate_runtime_options(args):
+    scope = getattr(args, "rtc_guidance_action_scope", "all")
+    if scope not in ("all", "validated_repack") or (scope == "validated_repack" and args.rtc_mode != "test_time"):
+        raise ValueError("validated_repack action guidance requires test_time RTC")
     if not 1 <= args.execute_steps <= 30:
         raise ValueError("execute-steps must be in [1,30]")
     if not math.isfinite(args.pig_guidance_alpha) or not 0 <= args.pig_guidance_alpha <= 1:

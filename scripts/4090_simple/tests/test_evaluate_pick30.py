@@ -154,6 +154,175 @@ class PickCampaignTests(unittest.TestCase):
             self.args.execute_steps=value
             with self.assertRaises(ValueError):evaluate.commands(self.args,c,self.root/'case')
 
+    def test_explicit_diagnostic_parser_and_full30_default_rtc_gate(self):
+        pairs=((0,6),(0,0),(2,7),(0,4))
+        self.assertEqual(evaluate.parse_diagnostic_cases('0:6,0:0,2:7,0:4'),pairs)
+        for value in ('','0:6,0:6','0:10','3:0','0:0,','0:0;2:7','-1:0','0:00'):
+            with self.subTest(value=value),self.assertRaises(ValueError):evaluate.parse_diagnostic_cases(value)
+        self.args.rtc_mode='off'
+        with self.assertRaisesRegex(ValueError,'Full30 production'):evaluate.evaluation_policy(self.args)
+        self.args.diagnostic_cases=pairs;self.args.execute_steps=None
+        policy=evaluate.evaluation_policy(self.args)
+        self.assertFalse(policy['rtc_enabled']);self.assertEqual((policy['execute_steps'],policy['control_ticks_per_window']),(15,25))
+        self.args.execute_steps=30
+        with self.assertRaises(ValueError):evaluate.evaluation_policy(self.args)
+
+    def test_pilot_freezes_all30_but_selects_only_ordered_original_cases_and_seeds(self):
+        self.args.diagnostic_cases='0:6,0:0,2:7,0:4';self.args.rtc_mode='off'
+        frozen=evaluate.freeze_inputs(self.args)
+        self.assertEqual(frozen['contract'],evaluate.DIAGNOSTIC_CONTRACT)
+        self.assertEqual(frozen['experiment_role'],'same_seed_rtc_single_factor_pilot')
+        self.assertEqual(len(frozen['cases']),30);self.assertEqual(len(frozen['metadata_files']),3)
+        self.assertEqual(frozen['planned_cases'],4);self.assertEqual(frozen['evaluation_denominator'],4)
+        self.assertFalse(frozen['full_official30_claim'])
+        selected=evaluate.execution_cases(frozen)
+        self.assertEqual([(c['level'],c['case_index']) for c in selected],[(0,6),(0,0),(2,7),(0,4)])
+        self.assertEqual([c['sampling_seed'] for c in selected],[20261111,20261105,20261132,20261109])
+        for command in evaluate.commands(self.args,selected[0],self.root/'case').values():
+            self.assertEqual(command[command.index('--rtc-mode')+1],'off')
+            self.assertEqual(command[command.index('--execute-steps')+1],'15')
+        changed=deepcopy(frozen);changed['diagnostic_selected_cases'][0]['sampling_seed']+=1
+        with self.assertRaisesRegex(ValueError,'seed or identity'):evaluate.execution_cases(changed)
+        changed=deepcopy(frozen);changed['contract']=evaluate.CONTRACT
+        with self.assertRaisesRegex(ValueError,'silently select'):evaluate.execution_cases(changed)
+        self.args.rtc_mode='test_time'
+        self.assertEqual(evaluate.freeze_inputs(self.args)['contract'],evaluate.DIAGNOSTIC_CONTRACT)
+
+    def test_pilot_zero_success_technical_completion_uses_selected_denominator_and_seed(self):
+        self.args.diagnostic_cases='0:6,0:0,2:7,0:4';self.args.rtc_mode='off';f=evaluate.freeze_inputs(self.args)
+        state={key:deepcopy(f[key]) for key in ('contract','experiment_role','planned_cases','evaluation_denominator',
+            'full_official30_claim','diagnostic_selected_cases')}
+        state['cases']=[dict(c,status='complete',native_success=False) for c in f['diagnostic_selected_cases']]
+        self.assertEqual(evaluate.finish(state),0);self.assertEqual(state['status'],'complete')
+        self.assertEqual(state['technically_valid_cases'],4);self.assertEqual(state['native_successes'],0)
+        self.assertEqual(state['native_success_rate'],0.)
+        self.assertEqual([r['planned_cases'] for r in state['levels']],[3,0,1])
+        for mutate in (lambda v:v['cases'][0].update(status='technical_error'),
+            lambda v:v['cases'].pop(),lambda v:v['cases'].append(deepcopy(v['cases'][0])),
+            lambda v:v['cases'][0].update(sampling_seed=0),
+            lambda v:v['cases'].__setitem__(0,deepcopy(v['cases'][1]))):
+            changed=deepcopy(state);mutate(changed)
+            with self.subTest(mutation=mutate):self.assertEqual(evaluate.finish(changed),1)
+
+    def test_pilot_main_launches_only_explicit_four_cases_with_zero_success(self):
+        self.args.runtime_root.mkdir();argv=[]
+        for name in ('deployment','data-root','training-manifest','output','runtime-root'):
+            argv += ['--'+name,str(getattr(self.args,name.replace('-','_')))]
+        argv += ['--profile',self.args.profile,'--checkpoint-step',str(self.args.checkpoint_step),
+            '--expected-model-sha256',self.args.expected_model_sha256,'--rtc-mode','off',
+            '--diagnostic-cases','0:6,0:0,2:7,0:4','--sampling-seed',str(self.args.sampling_seed)]
+        called=[]
+        def execute(args,case,frozen,state):
+            called.append((case['level'],case['case_index'],case['sampling_seed']))
+            state['cases'].append(dict(case,status='complete',native_success=False))
+        with patch.object(evaluate,'execute',side_effect=execute),patch.object(evaluate.subprocess,'Popen') as child:
+            self.assertEqual(evaluate.main(argv),0);child.assert_not_called()
+        self.assertEqual(called,[(0,6,20261111),(0,0,20261105),(2,7,20261132),(0,4,20261109)])
+        state=evaluate.read(self.args.output/'FINAL_EVALUATION_ACCEPTANCE.json')
+        self.assertEqual(state['planned_cases'],4);self.assertEqual(state['evaluation_denominator'],4)
+        self.assertEqual(state['native_successes'],0);self.assertEqual(state['contract'],evaluate.DIAGNOSTIC_CONTRACT)
+        self.assertFalse(state['full_official30_claim'])
+
+    def prepare_guidance_fixture(self):
+        config=evaluate.read(self.args.deployment/'run_config.json')
+        config.update(model={'action_dim':80,'action_architecture':'dual_source_v1'})
+        config['data']['transform']['repack']={'action_keys':['action.body_token_v1_1','action[:14]'],
+            'pad_action_dim':80,'action_mask_key':'action_mask'}
+        self.write(self.args.deployment/'run_config.json',config)
+        path=self.args.deployment/'run_config.json'
+        self.ready['deployment_artifacts']['run_config.json']={'sha256':sha(path),'bytes':path.stat().st_size}
+        hands=[side+'_hand_'+name+'_joint' for side in ('left','right') for name in
+            ('thumb_0','thumb_1','thumb_2','middle_0','middle_1','index_0','index_1')]
+        path=self.args.deployment/'provenance/release_metadata/packed/PACK_READY.json'
+        self.write(path,{'contract':'cvpr-pico-pick-lerobot-pack-v1','task_id':profile_spec(self.args.profile)['task_id'],
+            'packer_sha256':evaluate.VALIDATED_PACKER_SHA256,'checkpoint_contract':{'hand_joint_names':hands}})
+        self.ready['source_metadata_sha256']={'release_metadata/packed/PACK_READY.json':sha(path)}
+        self.write(self.args.deployment/'LOCAL_RUN_READY.json',self.ready)
+
+    def test_guidance_scope_is_explicit_pilot_only_and_bound_to_accepted_repack_files(self):
+        self.args.rtc_guidance_action_scope='validated_repack'
+        with self.assertRaisesRegex(ValueError,'explicit test_time diagnostic'):evaluate.evaluation_policy(self.args)
+        self.args.diagnostic_cases='0:6,0:0,2:7,0:4';self.prepare_guidance_fixture()
+        frozen=evaluate.freeze_inputs(self.args);policy=frozen['evaluation_policy'];proof=policy['rtc_guidance_action_proof']
+        self.assertEqual(proof['guidance_action_mask'],[True]*78+[False]*2)
+        self.assertEqual(proof['excluded_action_indices'],[78,79]);self.assertEqual(proof['guided_action_dimensions'],78)
+        self.assertEqual(proof['local_run_ready_sha256'],sha(self.args.deployment/'LOCAL_RUN_READY.json'))
+        self.assertEqual(proof['run_config_sha256'],sha(self.args.deployment/'run_config.json'))
+        self.assertIn('guidance_pack_ready',frozen['sources'])
+        evaluate.validate_guidance_proof(proof,policy)
+        bad=deepcopy(proof);bad['guidance_action_mask'][0]=1
+        with self.assertRaises(ValueError):evaluate.validate_guidance_proof(bad,policy)
+        self.args.rtc_mode='off'
+        with self.assertRaises(ValueError):evaluate.freeze_inputs(self.args)
+        self.args.rtc_mode='test_time'
+        path=self.args.deployment/'provenance/release_metadata/packed/PACK_READY.json';pack=evaluate.read(path)
+        pack['packer_sha256']='0'*64;self.write(path,pack)
+        self.ready['source_metadata_sha256']['release_metadata/packed/PACK_READY.json']=sha(path)
+        self.write(self.args.deployment/'LOCAL_RUN_READY.json',self.ready)
+        with self.assertRaisesRegex(ValueError,'not independently recognized'):evaluate.freeze_inputs(self.args)
+
+    def test_validated_guidance_full_case_actual_sampler_mask_and_action_arrays_are_required(self):
+        self.args.diagnostic_cases='0:0';self.args.rtc_guidance_action_scope='validated_repack';self.prepare_guidance_fixture()
+        directory,c,f,result,probe=self.evidence(False,800)
+        task=profile_spec(self.args.profile)['task'];epdir=directory/'simulation'/task/'episode-0'
+        with patch.object(evaluate.subprocess,'check_output',return_value=json.dumps(probe).encode()):
+            row=evaluate.validate_case(directory,c,f)
+            self.assertEqual(row['rtc_execution']['guided_action_dimensions'],78)
+            requests=evaluate.json_lines(directory/'server/requests.jsonl')
+            requests[-1]['actual_rtc_guidance_action_mask'][-1]=True
+            (directory/'server/requests.jsonl').write_text('\n'.join(map(json.dumps,requests)))
+            with self.assertRaisesRegex(ValueError,'mask argument'):evaluate.validate_case(directory,c,f)
+            requests[-1]['actual_rtc_guidance_action_mask'][-1]=False
+            requests[-1]['normalized_prediction']=[0.]*80
+            (directory/'server/requests.jsonl').write_text('\n'.join(map(json.dumps,requests)))
+            with self.assertRaisesRegex(ValueError,'shape'):evaluate.validate_case(directory,c,f)
+
+    def interaction_fixture(self):
+        hands=[side+'_hand_'+name+'_joint' for side in ('left','right') for name in
+            ('thumb_0','thumb_1','thumb_2','middle_0','middle_1','index_0','index_1')]
+        contact={'categories':['target_table'],'body_names':['cracker_box','world'],'geom_names':['box','table'],
+            'position_m':[0.,0.,.5],'distance_m':-.0001,'normal_force_N':1.,'force_norm_N':1.}
+        initial=[{'physics_substep':1,'phase':'native_reset','solved_interval_start_s':0.,'solved_interval_end_s':.005,'contacts':[contact]}]
+        ticks=[]
+        for index in range(3):
+            start=.005+.02*index;end=start+.02
+            snapshot={'sim_time_s':end,'bodies':{name:{'xyz_m':[0.,0.,.8],'quaternion_wxyz':[1.,0.,0.,0.]}
+                for name in ('pelvis','left_wrist_yaw_link','right_wrist_yaw_link')},'target_xyz_m':[0.,0.,.5],
+                'joint_names':['body_'+str(i) for i in range(29)]+hands,'joint_qpos':[0.]*43,
+                'sent_body_token64':[0.]*64,'sent_hand_targets':{name:0. for name in hands}}
+            ticks.append({'phase':'policy_latent','sim_time_s':start,'next_sim_time_s':end,
+                'chunk_start_sim_time_s':.005,'action_index_at_30hz':int(index*.02*30+1e-7),
+                'pick_native_state':{'target_xyz_m':[0.,0.,.5]},'pick_interaction_substeps':[],
+                'pick_measured_control':snapshot})
+        episode={'initial_solved_contacts':initial,'pick_interaction_observer':{
+            'contract':'cvpr-pick-passive-interaction-observer-v1',
+            'contact_phase':'query existing solved contacts after the real mj_step; no mj_forward',
+            'force_count_semantics':'positive-force contact points per physical substep; not unique collision events',
+            'observed_physics_substeps':13,'solved_interval_end_s':.065,
+            'live_state_writes':False,'physics_steps_added':0,'controller_commands_modified':False,
+            'counts':{'native_reset:target_table':1},'first_contacts':{'native_reset:target_table':{
+                'solved_interval_end_s':.005,'solved_interval_start_s':0.,'physics_substep':1,**contact}}}}
+        requests=[{'status':200,'sim_time_s':'.005','denormalized_returned_action':[[0.]*80 for _ in range(15)]}]
+        return episode,ticks,requests
+
+    def test_passive_interaction_audit_checks_physical_count_real_tick_commands_and_no_intervention(self):
+        episode,ticks,requests=self.interaction_fixture()
+        accepted=evaluate.validate_interaction_observation(episode,ticks,requests)
+        self.assertEqual(accepted['observed_physics_substeps'],13)
+        for mutate in (lambda e,t:e['pick_interaction_observer'].update(observed_physics_substeps=12),
+            lambda e,t:e['pick_interaction_observer'].update(live_state_writes=True),
+            lambda e,t:t[0]['pick_measured_control']['sent_body_token64'].__setitem__(0,1.),
+            lambda e,t:t[0]['pick_measured_control'].update(sent_body_token64=None),
+            lambda e,t:t[0]['pick_measured_control']['sent_hand_targets'].pop(next(iter(t[0]['pick_measured_control']['sent_hand_targets']))),
+            lambda e,t:e['initial_solved_contacts'][0].update(physics_substep=2),
+            lambda e,t:e['pick_interaction_observer']['counts'].update(wrong=1)):
+            e,t=deepcopy(episode),deepcopy(ticks);mutate(e,t)
+            with self.assertRaises(ValueError):evaluate.validate_interaction_observation(e,t,requests)
+        self.args.pick_interaction_diagnostics=True
+        with self.assertRaises(ValueError):evaluate.evaluation_policy(self.args)
+        self.args.diagnostic_cases='0:0';c=evaluate.freeze_inputs(self.args)['cases'][0]
+        self.assertIn('--pick-interaction-diagnostics',evaluate.commands(self.args,c,self.root/'case')['simulator'])
+
     def safety(self,displacement=.0003,rotation=.02):
         v=bend_tests.BendCampaignTests.safety_fixture(self)
         origin=fixture(self.args.profile)['layout']['actors']['target']['pose']
@@ -207,12 +376,25 @@ class PickCampaignTests(unittest.TestCase):
         http=evaluate.read(epdir/'http.json');times={float(q['sim_time_s']) for q in filtered}
         http=[q for q in http if q['endpoint']!='/act' or q['history']['sim_time_s'] in times]
         e['http_counts']['/act']=len(filtered);result['http_request_count']=len(http)
+        for request in filtered:
+            request.update(rtc_guidance_action_scope=f['evaluation_policy']['rtc_guidance_action_scope'],
+                rtc_guidance_action_proof=deepcopy(f['evaluation_policy']['rtc_guidance_action_proof']))
+            if request['status']==200:
+                request.update(normalized_prediction=[[[0.]*80 for _ in range(30)]],
+                    denormalized_returned_action=[[0.]*80 for _ in range(15)])
+                if request['sampling_path']=='test_time':
+                    request.update(normalized_shifted_previous=[[[0.]*80 for _ in range(30)]],
+                        actual_rtc_guidance_action_mask=deepcopy(f['evaluation_policy']['rtc_guidance_action_proof'].get('guidance_action_mask')))
+        result['server_info'].update(rtc_guidance_action_scope=f['evaluation_policy']['rtc_guidance_action_scope'],
+            rtc_guidance_action_proof=deepcopy(f['evaluation_policy']['rtc_guidance_action_proof']))
         self.write(epdir/'http.json',http);(epdir/'trace.jsonl').write_text('\n'.join(map(json.dumps,ticks)))
         (directory/'server/requests.jsonl').write_text('\n'.join(map(json.dumps,filtered)))
         self.write(epdir.parent/'result.json',result)
         startup={'weight_sha256':self.args.expected_model_sha256,'pid':123,'sampling_seed':c['sampling_seed'],'Ta':15,'Tp':30,
             'rtc':True,'inference_steps':10,'online_dino_runtime':encoder(),'parameter_tensor_count':12,
-            'trainable_parameter_tensor_count':0,'parameter_gradient_tensor_count':0}
+            'trainable_parameter_tensor_count':0,'parameter_gradient_tensor_count':0,
+            'rtc_guidance_action_scope':f['evaluation_policy']['rtc_guidance_action_scope'],
+            'rtc_guidance_action_proof':deepcopy(f['evaluation_policy']['rtc_guidance_action_proof'])}
         startup.update({k:policy[k] for k in ('rtc_mode','rtc_exec_shift','rtc_inference_delay','rtc_min_exec_horizon','pig_mask_schedule','pig_guidance_alpha')})
         self.write(directory/'server/startup.json',startup)
         return directory,c,f,result,probe
@@ -273,6 +455,26 @@ class PickCampaignTests(unittest.TestCase):
             with self.assertRaises(ValueError):evaluate.main(argv)
             launch.assert_not_called()
         self.assertFalse(self.args.output.exists())
+
+    def test_off_pilot_actual_plain_sampler_full800tick_ledger_and_no_hidden_rtc(self):
+        self.args.diagnostic_cases='0:6,0:0,2:7,0:4';self.args.rtc_mode='off'
+        directory,c,f,result,probe=self.evidence(False,800)
+        task=profile_spec(self.args.profile)['task'];epdir=directory/'simulation'/task/'episode-0'
+        requests=evaluate.json_lines(directory/'server/requests.jsonl')
+        for row in requests:
+            if row['status']==200:row.update(sampling_path='plain',sampler_calls={'plain':1,'test_time':0,'train':0})
+        result['server_info'].update(rtc_enabled=False,rtc_mode='off')
+        self.write(epdir.parent/'result.json',result)
+        startup=evaluate.read(directory/'server/startup.json');startup.update(rtc=False,rtc_mode='off')
+        self.write(directory/'server/startup.json',startup)
+        (directory/'server/requests.jsonl').write_text('\n'.join(map(json.dumps,requests)))
+        with patch.object(evaluate.subprocess,'check_output',return_value=json.dumps(probe).encode()):
+            row=evaluate.validate_case(directory,c,f)
+            self.assertFalse(row['native_success']);self.assertEqual(row['evaluation_denominator'],4)
+            self.assertEqual((row['rtc_execution']['plain_requests'],row['rtc_execution']['test_time_requests']),(30,0))
+            requests[-1].update(sampling_path='test_time',sampler_calls={'plain':0,'test_time':1,'train':0})
+            (directory/'server/requests.jsonl').write_text('\n'.join(map(json.dumps,requests)))
+            with self.assertRaisesRegex(ValueError,'actually use exactly one plain'):evaluate.validate_case(directory,c,f)
 
     def test_initialization_profile_contract_and_all201_samples_are_required(self):
         evaluate.validate_initialization_safety(self.safety())

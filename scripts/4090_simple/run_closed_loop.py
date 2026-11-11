@@ -114,8 +114,10 @@ def derive_bend_eval_reset(source_config):
     """Remove only stale spatial entries that have no real scene actor.
 
     Official eval L0/L1 carries unused DR keys left by source generation.
-    All actual target/distractor/robot poses remain byte-value identical;
-    the unchanged training adapter still validates the complete derived reset.
+    All actual target/distractor/robot poses remain byte-value identical.
+    Three optional camera serialization fields unsupported by CameraCfg are
+    removed only when None; nonempty calibration must never be discarded.
+    The unchanged training adapter still validates the complete derived reset.
     """
     source = deepcopy(source_config)
     bend_official_protocol(source)
@@ -135,15 +137,27 @@ def derive_bend_eval_reset(source_config):
         raise ValueError('An unexpected robot spatial key may not be removed')
     derived = deepcopy(source)
     derived['dr_state_dict']['spatial'] = {uid: deepcopy(value) for uid, value in dr['spatial'].items() if uid in keep}
+    removed_sensor_fields = {}
+    for name, sensor in derived['sensor_cfgs'].items():
+        for field in ('intrinsics', 'depth_intrinsics', 'depth_to_color_extrinsics'):
+            if field not in sensor:
+                continue
+            if sensor[field] is not None:
+                raise ValueError('Bend eval may not discard nonempty camera calibration: sensor_cfgs.'+name+'.'+field)
+            removed_sensor_fields.setdefault(name, {})[field] = sensor.pop(field)
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
         allow_nan=False, default=_json_value).encode()).hexdigest()
-    return derived, {'contract': 'cvpr-bend-pick-official-eval-unused-spatial-reset-derivation-v1',
+    return derived, {'contract': 'cvpr-bend-pick-official-eval-reset-derivation-v2',
         'source_config_sha256': digest(source), 'derived_config_sha256': digest(derived),
         'removed_unused_spatial_uids': removed,
         'removed_unused_spatial_entries': {uid: deepcopy(dr['spatial'][uid]) for uid in removed},
+        'removed_optional_sensor_fields': removed_sensor_fields,
+        'removed_optional_sensor_field_paths': [['sensor_cfgs', name, field]
+            for name, fields in removed_sensor_fields.items() for field in fields],
+        'camera_geometry_or_nonempty_calibration_modified': False,
         'preserved_real_spatial_uids': sorted(keep), 'actual_actor_poses_modified': False,
         'metadata_split_or_dr_level_modified': False, 'reward_or_success_modified': False,
-        'reason': 'Removed only official DR spatial keys absent from every selected real actor; unchanged adapter validation still applies'}
+        'reason': 'Removed only unused DR spatial keys and the three named None-only camera serialization fields unsupported by CameraCfg; no real actor pose, camera geometry or nonempty calibration changed; unchanged adapter validation applies'}
 
 
 def make_bend_environment(sonic_config, source_config, *, sim_mode, sync_observations, isaac_observation_only):

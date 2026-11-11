@@ -107,6 +107,54 @@ class BendProtocolTests(unittest.TestCase):
                 with self.subTest(argv=argv), patch.object(sys, 'argv', argv), patch('sys.stderr'), self.assertRaises(SystemExit):
                     loop.parse_args()
 
+    def test_optional_sensor_serialization_fields_are_none_only_and_reversible(self):
+        original = fixture()
+        fields = ('intrinsics', 'depth_intrinsics', 'depth_to_color_extrinsics')
+        for sensor in original['sensor_cfgs'].values(): sensor.update(dict.fromkeys(fields))
+        before = deepcopy(original)
+        derived, receipt = loop.derive_bend_eval_reset(original)
+        restored = deepcopy(derived)
+        restored['dr_state_dict']['spatial'].update(receipt['removed_unused_spatial_entries'])
+        for name, values in receipt['removed_optional_sensor_fields'].items():
+            restored['sensor_cfgs'][name].update(values)
+        self.assertEqual(restored, original)
+        self.assertEqual(original, before)
+        self.assertFalse(receipt['camera_geometry_or_nonempty_calibration_modified'])
+        self.assertEqual(receipt['removed_optional_sensor_field_paths'],
+            [['sensor_cfgs', 'side', field] for field in fields])
+        self.assertNotEqual(receipt['source_config_sha256'], receipt['derived_config_sha256'])
+        for field in fields:
+            changed = deepcopy(original); changed['sensor_cfgs']['side'][field] = [[1., 0., 0.]]
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'nonempty camera calibration'):
+                loop.derive_bend_eval_reset(changed)
+        unknown = deepcopy(original); unknown['sensor_cfgs']['side']['unknown_new_field'] = None
+        derived, _ = loop.derive_bend_eval_reset(unknown)
+        self.assertIn('unknown_new_field', derived['sensor_cfgs']['side'])  # No broad signature-based dropping.
+
+    def test_real_sim_camera_constructors_accept_all60_derived_official_sensors(self):
+        from simple.sensors.config import CameraCfg, StereoCameraCfg
+        root = Path('/var/tmp/cvpr-bend-pick-ckpt5000-20261111/official_eval/data_root')
+        if not root.is_dir(): self.skipTest('Local official metadata optional integration fixture absent')
+        sensor_count = removed_count = 0
+        for level in range(3):
+            for line in (root/'eval'/loop.BEND_PICK_SOURCE_TASK/f'dr-level-{level}/meta/episodes.jsonl').read_text().splitlines():
+                source = json.loads(json.loads(line)['environment_config'])
+                derived, receipt = loop.derive_bend_eval_reset(source)
+                adapted, _ = adapter.adapt_official_config(derived)
+                restored = deepcopy(derived)
+                restored['dr_state_dict']['spatial'].update(receipt['removed_unused_spatial_entries'])
+                for name, fields in receipt['removed_optional_sensor_fields'].items():
+                    restored['sensor_cfgs'][name].update(fields)
+                    removed_count += len(fields)
+                self.assertEqual(restored, source)
+                for name, sensor in adapted['sensor_cfgs'].items():
+                    actual = (StereoCameraCfg if 'baseline' in sensor else CameraCfg)(**deepcopy(sensor))
+                    self.assertEqual(actual.uid, source['sensor_cfgs'][name]['uid'])
+                    for field in ('width', 'height', 'fov', 'near', 'far', 'focal_length', 'baseline'):
+                        if field in sensor: self.assertEqual(getattr(actual, field), source['sensor_cfgs'][name][field])
+                    sensor_count += 1
+        self.assertEqual((sensor_count, removed_count), (60, 180))
+
     def test_actual_official30_metadata_derives_without_changing_material_or_real_actors(self):
         root = Path('/var/tmp/cvpr-bend-pick-ckpt5000-20261111/official_eval/data_root')
         if not root.is_dir(): self.skipTest('Local official metadata optional integration fixture absent')

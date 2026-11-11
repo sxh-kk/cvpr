@@ -21,6 +21,8 @@
 
 原官方eval包的配置仍写 `split=train`、内部dr_level0，这些原始字节保持不变，级别取官方目录。不能据此声称独立heldout或新场景泛化。20份配置有不对应任何真实actor的多余spatial记录：只在派生reset中移除这些unused UID，记录原配置、派生配置SHA及精确删除条目，可逆恢复原件；所有真实物体、机器人、材质和奖励保持。训练adapter本身的严格验证不放宽。
 
+原件还含当前SIM310相机配置类不接受的 `intrinsics`、`depth_intrinsics`、`depth_to_color_extrinsics` 三项空字段。派生reset仅在值为 `None` 时去除这三个明确字段；非空标定拒绝，未知字段不静默删除。逐相机删除路径、原值及原件/派生SHA写入同一可逆收据，不改变相机几何。全部60个官方相机已通过实际配置类构造检查，真实渲染仍由场景测评验证。
+
 ## 准备与启动
 
 本次实际运行根为 `/var/tmp/cvpr-bend-pick-ckpt5000-20261111/`，使用本机系统盘空间。位置引用保存在 `CVPR_Evaluation_runtime/bendpick_ckpt5000_testtimertc_20261111/LOCATION.json`；服务器训练目录及原数据不变。
@@ -45,3 +47,5 @@ python -B scripts/4090_simple/evaluate_bend_pick30.py \
 准备进程使用MODEL311、隐藏GPU、单核低优先级。正式campaign使用SIM310及完整CPU affinity，服务端用MODEL311；确认本机无其他GPU计算任务后运行，仅清理本次创建且身份匹配的进程组。首次真实场景仍必须检查画面、低层控制、HTTP、RTC及视频；CPU测试和静态资产闭包不等于物理或渲染验收。
 
 运行记录为 `FETCH_STATE.json`、`EVALUATION_STAGE.json`、`CPU_PREPARATION_EXIT.json` 和 `OFFICIAL30_RTC_EXIT.json`。完整30例结果为 `official30_rtc_001/FINAL_EVALUATION_ACCEPTANCE.json`，每例结果在对应 `level*/case_*/CASE_SUMMARY.json`；失败保留 `TECHNICAL_FAILURE.json`，不覆盖旧尝试。
+
+本次001尝试在首例相机初始化时因上述空字段报错，尚无物理步或模型动作；已精确停止其所有自有进程，保留记录，不能记作抓取失败。修复后使用新的 `official30_rtc_002/`，复用已严格验收的同一5000步部署，30个场景、种子、RTC及原生成功条件不变。当前运行位置与状态读取 `ACTIVE_EVALUATION.json`，启动/退出分别读取 `OFFICIAL30_RTC_002_LAUNCH.json`、`RETRY002_EXIT.json`；不能把001的中止状态当作002结果。

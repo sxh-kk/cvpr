@@ -1,6 +1,7 @@
 """CPU-only saved-scene derivation and exact native Bend budget checks."""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -146,6 +147,8 @@ class BendProtocolTests(unittest.TestCase):
                 for name, fields in receipt['removed_optional_sensor_fields'].items():
                     restored['sensor_cfgs'][name].update(fields)
                     removed_count += len(fields)
+                for name, fields in receipt['removed_compatible_dr_fields'].items():
+                    restored['dr_cfgs'][name].update(fields)
                 self.assertEqual(restored, source)
                 for name, sensor in adapted['sensor_cfgs'].items():
                     actual = (StereoCameraCfg if 'baseline' in sensor else CameraCfg)(**deepcopy(sensor))
@@ -154,6 +157,72 @@ class BendProtocolTests(unittest.TestCase):
                         if field in sensor: self.assertEqual(getattr(actual, field), source['sensor_cfgs'][name][field])
                     sensor_count += 1
         self.assertEqual((sensor_count, removed_count), (60, 180))
+
+    def test_dr_compatibility_accepts_only_exact_source_types_values_and_is_reversible(self):
+        original = fixture()
+        original['dr_cfgs'].update(spatial={'placement_attempts': 100},
+            scene={'randomize_scene_pose': True}, material={'table_material': None})
+        derived, receipt = loop.derive_bend_eval_reset(original)
+        restored = deepcopy(derived)
+        restored['dr_state_dict']['spatial'].update(receipt['removed_unused_spatial_entries'])
+        for name, fields in receipt['removed_compatible_dr_fields'].items(): restored['dr_cfgs'][name].update(fields)
+        self.assertEqual(restored, original)
+        self.assertEqual(receipt['removed_compatible_dr_field_paths'], [
+            ['dr_cfgs', 'spatial', 'placement_attempts'], ['dr_cfgs', 'scene', 'randomize_scene_pose'],
+            ['dr_cfgs', 'material', 'table_material']])
+        for name, field, values in [('spatial', 'placement_attempts', [True, 100., 99, None]),
+            ('scene', 'randomize_scene_pose', [1, False, None]), ('material', 'table_material', [{}, 'wood', False])]:
+            for value in values:
+                changed = deepcopy(original); changed['dr_cfgs'][name][field] = value
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, 'non-equivalent'):
+                    loop.derive_bend_eval_reset(changed)
+        unknown = deepcopy(original); unknown['dr_cfgs']['spatial']['unknown_sampling_parameter'] = None
+        derived, _ = loop.derive_bend_eval_reset(unknown)
+        self.assertIn('unknown_sampling_parameter', derived['dr_cfgs']['spatial'])
+        self.assertEqual(derived['dr_state_dict'], {**original['dr_state_dict'],
+            'spatial': {k:v for k,v in original['dr_state_dict']['spatial'].items() if k != '99'}})
+
+    def test_all30_real_private_tasks_construct_and_reset_on_cpu_with_complete_binding(self):
+        root = Path('/var/tmp/cvpr-bend-pick-ckpt5000-20261111/official_eval/data_root')
+        if not root.is_dir(): self.skipTest('Local official metadata optional integration fixture absent')
+        from capture_simple import remap_episode_paths
+        from gear_sonic.utils.mujoco_sim.configs import SimLoopConfig
+        import torch
+        self.assertFalse(torch.cuda.is_initialized())
+        count = cfg_count = 0
+        with patch.dict(os.environ, {'SIMPLE_DATA_DIR': str(root), 'CUDA_VISIBLE_DEVICES': ''}):
+            config = SimLoopConfig().load_wbc_yaml()
+            config.update(ENV_NAME='simple', SIMULATE_DT=.005, ENABLE_ELASTIC_BAND=False)
+            official = adapter._load_official()
+            for level in range(3):
+                for line in (root/'eval'/loop.BEND_PICK_SOURCE_TASK/f'dr-level-{level}/meta/episodes.jsonl').read_text().splitlines():
+                    source = remap_episode_paths(json.loads(json.loads(line)['environment_config']), root)
+                    before = deepcopy(source)
+                    derived, receipt = loop.derive_bend_eval_reset(source)
+                    state, _ = adapter.adapt_official_config(derived)
+                    # Exercise all240 real configs and the full private task initializer, not a mock.
+                    for name, raw in state['dr_cfgs'].items():
+                        cls = type(official.dr_cfgs[name])
+                        cls(**{k: adapter._cfg_value(v) for k,v in raw.items() if k != 'randmizer_class'})
+                        cfg_count += 1
+                    task = adapter.make_bend_pick_task(config, adapted_config=state)
+                    shared_manager = task.dr.get_randomizer('scene').scene_manager
+                    shared_scene_before = deepcopy(shared_manager.hssd_scenes)
+                    task.reset(seed=0, options={'state_dict': state, 'dr_level': None})
+                    self.assertEqual(shared_manager.hssd_scenes, shared_scene_before)
+                    self.assertIsNot(task.dr.get_randomizer('scene').scene_manager, shared_manager)
+                    binding = adapter.bend_pick_environment_binding_receipt(state, task.state_dict())
+                    self.assertTrue(binding['matched'], binding)
+                    self.assertEqual(task.success_criteria, .9)
+                    self.assertEqual(source, before)
+                    restored = deepcopy(derived)
+                    restored['dr_state_dict']['spatial'].update(receipt['removed_unused_spatial_entries'])
+                    for name, fields in receipt['removed_optional_sensor_fields'].items(): restored['sensor_cfgs'][name].update(fields)
+                    for name, fields in receipt['removed_compatible_dr_fields'].items(): restored['dr_cfgs'][name].update(fields)
+                    self.assertEqual(restored, source)
+                    count += 1
+            self.assertFalse(torch.cuda.is_initialized())
+        self.assertEqual((count, cfg_count), (30, 240))
 
     def test_actual_official30_metadata_derives_without_changing_material_or_real_actors(self):
         root = Path('/var/tmp/cvpr-bend-pick-ckpt5000-20261111/official_eval/data_root')

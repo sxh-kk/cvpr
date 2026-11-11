@@ -145,9 +145,29 @@ def derive_bend_eval_reset(source_config):
             if sensor[field] is not None:
                 raise ValueError('Bend eval may not discard nonempty camera calibration: sensor_cfgs.'+name+'.'+field)
             removed_sensor_fields.setdefault(name, {})[field] = sensor.pop(field)
+    # Exact source/runtime compatibility, valid only with complete saved DR and
+    # reset dr_level=None. These are not generic sampling-policy overrides.
+    compatible_dr_fields = {
+        ('spatial', 'placement_attempts'): (int, 100,
+            'Current SpatialDR has the same hard-coded range(100); saved real poses are restored'),
+        ('scene', 'randomize_scene_pose'): (bool, True,
+            'Saved scene pose is restored and inner-state return bypasses scene-pose sampling'),
+        ('material', 'table_material'): (type(None), None,
+            'No configuration override; complete saved table/robot/object material state is restored'),
+    }
+    removed_dr_fields = {}
+    dr_field_reasons = {}
+    for (name, field), (expected_type, expected_value, reason) in compatible_dr_fields.items():
+        config = derived['dr_cfgs'].get(name, {})
+        if field not in config:
+            continue
+        if type(config[field]) is not expected_type or config[field] != expected_value:
+            raise ValueError('Unsupported non-equivalent Bend eval DR option: dr_cfgs.'+name+'.'+field)
+        removed_dr_fields.setdefault(name, {})[field] = config.pop(field)
+        dr_field_reasons[name+'.'+field] = reason
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
         allow_nan=False, default=_json_value).encode()).hexdigest()
-    return derived, {'contract': 'cvpr-bend-pick-official-eval-reset-derivation-v2',
+    return derived, {'contract': 'cvpr-bend-pick-official-eval-reset-derivation-v3',
         'source_config_sha256': digest(source), 'derived_config_sha256': digest(derived),
         'removed_unused_spatial_uids': removed,
         'removed_unused_spatial_entries': {uid: deepcopy(dr['spatial'][uid]) for uid in removed},
@@ -155,9 +175,14 @@ def derive_bend_eval_reset(source_config):
         'removed_optional_sensor_field_paths': [['sensor_cfgs', name, field]
             for name, fields in removed_sensor_fields.items() for field in fields],
         'camera_geometry_or_nonempty_calibration_modified': False,
+        'removed_compatible_dr_fields': removed_dr_fields,
+        'removed_compatible_dr_field_paths': [['dr_cfgs', name, field]
+            for name, fields in removed_dr_fields.items() for field in fields],
+        'compatible_dr_field_reasons': dr_field_reasons,
+        'compatibility_scope': 'complete saved DR restore with dr_level=None; no fresh randomization equivalence claim',
         'preserved_real_spatial_uids': sorted(keep), 'actual_actor_poses_modified': False,
         'metadata_split_or_dr_level_modified': False, 'reward_or_success_modified': False,
-        'reason': 'Removed only unused DR spatial keys and the three named None-only camera serialization fields unsupported by CameraCfg; no real actor pose, camera geometry or nonempty calibration changed; unchanged adapter validation applies'}
+        'reason': 'Removed only unused spatial keys, three named None-only camera fields, and three exact-value source/runtime DR options with explicit saved-reset equivalence evidence; real poses, camera geometry, saved materials and original reward remain unchanged'}
 
 
 def make_bend_environment(sonic_config, source_config, *, sim_mode, sync_observations, isaac_observation_only):

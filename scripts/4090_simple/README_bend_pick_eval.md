@@ -23,6 +23,20 @@
 
 原件还含当前SIM310相机配置类不接受的 `intrinsics`、`depth_intrinsics`、`depth_to_color_extrinsics` 三项空字段。派生reset仅在值为 `None` 时去除这三个明确字段；非空标定拒绝，未知字段不静默删除。逐相机删除路径、原值及原件/派生SHA写入同一可逆收据，不改变相机几何。全部60个官方相机已通过实际配置类构造检查，真实渲染仍由场景测评验证。
 
+
+当前eval源还带有SIM310配置构造器不接受的三项DR配置。reset派生v3只接受并记录以下精确类型和值：
+
+- `spatial.placement_attempts` 为整数100：当前SpatialDR本来硬编码100次放置尝试，保存的实际位姿直接恢复。
+- `scene.randomize_scene_pose` 为布尔true：保存场景的center_offset、orientation和桌体恢复到inner state后直接返回，未运行姿态采样。
+- `material.table_material` 为None：没有配置材质覆盖；保存的桌体、机器人及物体材质状态完整恢复。
+
+非精确类型或值一律拒绝，未知参数不静默丢弃。逐路径原值、兼容理由及原件/派生SHA记录在收据中；
+相机字段、DR字段及unused spatial均能逆向补回，逐字段恢复原配置完全相等。
+这只证明完整保存状态且 `dr_level=None` 的reset兼容，不声称新的随机采样分布等价。
+CPU实测已完成60个相机和240个DR配置构造，以及全部30个真实私有任务的完整构造、
+`task.reset(seed=0, options={'state_dict': adapted, 'dr_level': None})` 和实际环境binding匹配；
+共享scene manager未改、原件未改、CUDA未初始化。此检查不创建仿真env、不进行物理步或RTX渲染。
+
 ## 准备与启动
 
 本次实际运行根为 `/var/tmp/cvpr-bend-pick-ckpt5000-20261111/`，使用本机系统盘空间。位置引用保存在 `CVPR_Evaluation_runtime/bendpick_ckpt5000_testtimertc_20261111/LOCATION.json`；服务器训练目录及原数据不变。
@@ -49,3 +63,11 @@ python -B scripts/4090_simple/evaluate_bend_pick30.py \
 运行记录为 `FETCH_STATE.json`、`EVALUATION_STAGE.json`、`CPU_PREPARATION_EXIT.json` 和 `OFFICIAL30_RTC_EXIT.json`。完整30例结果为 `official30_rtc_001/FINAL_EVALUATION_ACCEPTANCE.json`，每例结果在对应 `level*/case_*/CASE_SUMMARY.json`；失败保留 `TECHNICAL_FAILURE.json`，不覆盖旧尝试。
 
 本次001尝试在首例相机初始化时因上述空字段报错，尚无物理步或模型动作；已精确停止其所有自有进程，保留记录，不能记作抓取失败。修复后使用新的 `official30_rtc_002/`，复用已严格验收的同一5000步部署，30个场景、种子、RTC及原生成功条件不变。当前运行位置与状态读取 `ACTIVE_EVALUATION.json`，启动/退出分别读取 `OFFICIAL30_RTC_002_LAUNCH.json`、`RETRY002_EXIT.json`；不能把001的中止状态当作002结果。
+
+
+002尝试随后在私有任务构造时遇到 `SpatialDRCfg` 不支持 `placement_attempts`，同样尚无任何物理步或RGB。
+其自有进程已核实全部退出，原记录保留，不计任务失败。上述v3全面审计修复后，下一次使用新的
+`official30_rtc_003/`，继续复用相同已验收5000步部署；本说明更新时尚待代码门禁和独立review后启动。
+当前实际位置/状态仍以 `ACTIVE_EVALUATION.json` 为准，003启动和退出分别核
+`OFFICIAL30_RTC_003_LAUNCH.json`、`RETRY003_EXIT.json`（尚不存在时表示尚未发布该阶段凭据）；
+不得读取001/002的失败凭据充当003结果，也不得覆盖旧尝试。

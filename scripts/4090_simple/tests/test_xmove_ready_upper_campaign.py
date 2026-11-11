@@ -91,6 +91,47 @@ class ReadyCampaignTests(unittest.TestCase):
   actual['rtc_guidance_action_scope']='validated_repack'
   with self.assertRaises(ValueError):worker.validate_server_info(actual,a)
 
+ def test_explicit_ready_full30_requires_complete_original_order_and_separate_contract(self):
+  a=args();a.ready_protocol='full30';a.diagnostic_cases=e.READY_UPPER_ALL_CASES
+  self.assertEqual(e.evaluation_policy(a)['execute_steps'],15)
+  for bad in (e.READY_UPPER_CASES,e.READY_UPPER_ALL_CASES[:-1],tuple(reversed(e.READY_UPPER_ALL_CASES))):
+   a.diagnostic_cases=bad
+   with self.assertRaises(ValueError):e.evaluation_policy(a)
+  a.diagnostic_cases=e.READY_UPPER_ALL_CASES;a.ready_protocol='four'
+  with self.assertRaises(ValueError):e.evaluation_policy(a)
+  source=[dict(level=l,case_index=c,flat_index=l*10+c,sampling_seed=20261105+l*10+c)for l,c in e.READY_UPPER_ALL_CASES]
+  frozen=dict(contract=e.READY_UPPER30_CONTRACT,experiment_role=e.READY_UPPER30_ROLE,warmup_profile='ready_upper_v1',
+   original_official_initialization=False,native_saved_scene_initialization_preserved=True,full_official30_claim=False,
+   ready_protocol='full30',cases=source,diagnostic_selected_cases=source,evaluation_denominator=30,planned_cases=30)
+  self.assertEqual(e.execution_cases(frozen),source)
+  state=deepcopy(frozen);state['cases']=[dict(v,status='complete',native_success=False)for v in source]
+  self.assertEqual(e.finish(state),0);self.assertEqual(state['technically_valid_cases'],30)
+  self.assertFalse(state['full_official30_claim']);self.assertEqual(state['native_success_rate'],0.)
+  frozen['contract']=e.READY_UPPER_CONTRACT
+  with self.assertRaises(ValueError):e.execution_cases(frozen)
+
+ def test_freeze_ready_four_and30_bind_actual_source_files_and_distinct_roles(self):
+  fixture=base_tests.PickCampaignTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+  a=fixture.args;a.checkpoint_step=5000;fixture.prepare()
+  a.pick_warmup_profile='ready_upper_v1';a.pick_interaction_diagnostics=True;a.rtc_guidance_action_scope='all'
+  a.ready_protocol='four';a.diagnostic_cases=e.READY_UPPER_CASES
+  a.ready_planner_model=fixture.root/'planner.onnx';a.ready_planner_model.write_bytes(b'only freeze fixture, no inference')
+  sonic=a.runtime_root/'resources/sonic_v1_1';sonic.mkdir(parents=True)
+  for name in ('model_encoder.onnx','model_decoder.onnx','observation_config.yaml'):(sonic/name).write_bytes(b'fixture')
+  import sonic_locomotion_planner
+  with patch.object(sonic_locomotion_planner,'MODEL_SHA256',e.file_identity(a.ready_planner_model)['sha256']):
+   four=e.freeze_inputs(a)
+   self.assertEqual((four['contract'],four['experiment_role'],four['evaluation_denominator']),
+    (e.READY_UPPER_CONTRACT,e.READY_UPPER_ROLE,4))
+   self.assertFalse(four['original_official_initialization']);self.assertTrue(four['native_saved_scene_initialization_preserved'])
+   self.assertEqual(four['sources']['ready/xmove_ready_upper_warmup.py'],e.file_identity(Path(e.__file__).with_name('xmove_ready_upper_warmup.py')))
+   a.ready_protocol='full30';a.diagnostic_cases=e.READY_UPPER_ALL_CASES
+   full=e.freeze_inputs(a)
+   self.assertEqual((full['contract'],full['experiment_role'],full['evaluation_denominator']),
+    (e.READY_UPPER30_CONTRACT,e.READY_UPPER30_ROLE,30))
+   self.assertEqual(full['source_cases_frozen'],30);self.assertFalse(full['formal_evaluation_eligible'])
+   self.assertFalse(full['full_official30_claim']);self.assertEqual(len(e.execution_cases(full)),30)
+
  def test_default_commands_do_not_import_or_enable_ready_and_candidate_only_adds_explicit_flags(self):
   a=args();case=dict(level=0,case_index=6,sampling_seed=20261111,protocol={'maximum_simulated_seconds':16.})
   native=deepcopy(a);native.pick_warmup_profile='native';native.ready_planner_model=None
@@ -159,6 +200,10 @@ class ReadyCampaignTests(unittest.TestCase):
    self.assertFalse(summary['native_success']);self.assertEqual(summary['ticks'],800)
    self.assertFalse(summary['original_official_initialization']);self.assertEqual(summary['contract'],e.READY_UPPER_CONTRACT)
    self.assertEqual(summary['ready_upper_acceptance']['status'],'passed')
+   full=deepcopy(frozen);full.update(contract=e.READY_UPPER30_CONTRACT,experiment_role=e.READY_UPPER30_ROLE,
+    ready_protocol='full30',planned_cases=30,evaluation_denominator=30,
+    diagnostic_selected_cases=[{k:c[k]for k in ('level','case_index','flat_index','sampling_seed')}for c in frozen['cases']])
+   self.assertEqual(e.validate_case(directory,case,full)['contract'],e.READY_UPPER30_CONTRACT)
    rows[12]['pick_measured_control']['sent_body_token64'][0]=.75
    (epdir/'trace.jsonl').write_text('\n'.join(map(json.dumps,rows)))
    with self.assertRaisesRegex(ValueError,'Sent startup body64'):e.validate_case(directory,case,frozen)

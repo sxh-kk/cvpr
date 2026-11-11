@@ -31,6 +31,9 @@ CONTRACT = 'cvpr-pick-fixed-official30-sonic-rtc-diagnostic-v1'
 DIAGNOSTIC_CONTRACT = 'cvpr-pick-explicit-cases-rtc-single-factor-pilot-v1'
 READY_UPPER_CONTRACT = 'cvpr-xmove-pick-ready-upper-v1-four-case-diagnostic-v1'
 READY_UPPER_ROLE = 'fixed_ready_upper_warmup_single_factor_pilot'
+READY_UPPER30_CONTRACT = 'cvpr-xmove-pick-ready-upper-v1-thirty-case-diagnostic-v1'
+READY_UPPER30_ROLE = 'fixed_ready_upper_warmup_full30_diagnostic'
+READY_UPPER_ALL_CASES = tuple((level,case) for level in range(3) for case in range(10))
 READY_UPPER_CASES = ((0,6),(0,0),(2,7),(0,4))
 VALIDATED_PACKER_SHA256 = 'b9861390ff1e5dba1b92b066f4584c4564613841887bb2e7ad13b2ee4e84b1da'
 READY_CONTRACT = 'cvpr-pick-local-deployment-v1'
@@ -92,6 +95,9 @@ def ready_upper(args):
 
 def evaluation_policy(args):
     diagnostic=diagnostic_pairs(args) is not None
+    protocol=getattr(args,'ready_protocol','four')
+    require(protocol in ('four','full30') and (ready_upper(args) or protocol=='four'),
+        'Explicit ready full30 protocol requires ready_upper_v1')
     # The matched-factor pilot preserves15 consumed actions /25 physical ticks
     # even with RTC disabled; the common off-mode default30 must not leak in.
     mode=getattr(args,'rtc_mode','test_time')
@@ -106,11 +112,12 @@ def evaluation_policy(args):
     require(not getattr(args,'pick_interaction_diagnostics',False) or diagnostic,
         'Interaction diagnostics require explicit diagnostic cases')
     if ready_upper(args):
-        require(diagnostic_pairs(args)==READY_UPPER_CASES and getattr(args,'profile',None)=='xmove_pick'
+        require(diagnostic_pairs(args)==(READY_UPPER_CASES if protocol=='four' else READY_UPPER_ALL_CASES)
+            and getattr(args,'profile',None)=='xmove_pick'
             and getattr(args,'checkpoint_step',None)==5000 and getattr(args,'sampling_seed',None)==20261105
             and policy['rtc_mode']=='test_time' and scope=='all'
             and getattr(args,'pick_interaction_diagnostics',False),
-            'ready_upper_v1 requires exactly XMovePick5000 cases0:6,0:0,2:7,0:4 with unchanged test_time/all/15 and interactions')
+            'ready_upper_v1 requires its explicit four-case or ordered complete30 protocol, XMovePick5000/base20261105/test_time/all/15 and interactions')
     policy.update(rtc_guidance_action_scope=scope,guided_action_dimensions=78 if scope=='validated_repack' else 80)
     require(diagnostic or policy['rtc_mode']=='test_time',
         'Full30 production requires test_time RTC; off is only an explicit diagnostic case pilot')
@@ -126,7 +133,7 @@ def execution_cases(frozen):
             'Full30 source cannot silently select a pilot subset')
         return frozen['cases']
     require((frozen.get('contract')==DIAGNOSTIC_CONTRACT and frozen.get('experiment_role')=='same_seed_rtc_single_factor_pilot'
-        or frozen.get('contract')==READY_UPPER_CONTRACT and frozen.get('experiment_role')==READY_UPPER_ROLE
+        or (frozen.get('contract'),frozen.get('experiment_role')) in ((READY_UPPER_CONTRACT,READY_UPPER_ROLE),(READY_UPPER30_CONTRACT,READY_UPPER30_ROLE))
         and frozen.get('warmup_profile')=='ready_upper_v1' and frozen.get('original_official_initialization') is False
         and frozen.get('native_saved_scene_initialization_preserved') is True)
         and frozen.get('full_official30_claim') is False,'Independent diagnostic contract/role is required')
@@ -139,6 +146,11 @@ def execution_cases(frozen):
         require(item=={name:source[name] for name in ('level','case_index','flat_index','sampling_seed')},
             'Selected pilot seed or identity differs from its frozen original')
         result.append(source);seen.add(key)
+    if frozen.get('contract') in (READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT):
+        full=frozen['contract']==READY_UPPER30_CONTRACT
+        require(tuple((c['level'],c['case_index']) for c in result)==(READY_UPPER_ALL_CASES if full else READY_UPPER_CASES)
+            and frozen.get('ready_protocol','four')==('full30' if full else 'four'),
+            'Ready diagnostic case order/protocol cannot be cherry-picked or silently expanded')
     require(type(frozen.get('evaluation_denominator')) is int and frozen['evaluation_denominator']==len(result)
         and frozen.get('planned_cases')==len(result),'Pilot denominator differs from explicit selection')
     return result
@@ -343,11 +355,12 @@ def freeze_inputs(args):
         'interaction_diagnostics_requested':bool(getattr(args,'pick_interaction_diagnostics',False)),
         'automatic_retries':0,'evaluation_policy':policy}
     if ready_upper(args):
-        frozen.update(contract=READY_UPPER_CONTRACT,experiment_role=READY_UPPER_ROLE,
+        frozen.update(contract=READY_UPPER_CONTRACT if getattr(args,'ready_protocol','four')=='four' else READY_UPPER30_CONTRACT,
+            experiment_role=READY_UPPER_ROLE if getattr(args,'ready_protocol','four')=='four' else READY_UPPER30_ROLE,ready_protocol=getattr(args,'ready_protocol','four'),
             warmup_profile='ready_upper_v1',original_official_initialization=False,
             native_saved_scene_initialization_preserved=True,warmup_protocol_modified=True,
             ready_planner_model=sources['ready/planner_model'],
-            boundary=BOUNDARY+'; ready_upper_v1 explicitly changes only50tick startup references; its outcomes are a separate four-case diagnostic')
+            boundary=BOUNDARY+'; ready_upper_v1 explicitly changes only50tick startup references; its outcomes are a separate explicitly selected4/30 diagnostic')
         for case in cases:
             case.update(warmup_profile='ready_upper_v1',original_official_initialization=False,
                 native_saved_scene_initialization_preserved=True,warmup_protocol_modified=True)
@@ -487,7 +500,7 @@ def validate_pick_identity(result, episode, case, frozen):
     spec = profile_spec(frozen['profile'])
     require(any(item['level']==case['level'] and item['case_index']==case['case_index'] for item in execution_cases(frozen)),
         'Case was not selected by this campaign')
-    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
+    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
         frozen.get('source_task_id') == spec['source_task_id'] and case.get('profile') == frozen['profile'] and
         case.get('task_id') == spec['task_id'] and case.get('source_task_id') == spec['source_task_id'],
         'Pick frozen profile/task identity differs')
@@ -621,7 +634,7 @@ def validate_interaction_observation(episode,ticks,requests):
 def validate_ready_upper_evidence(result,episode,ticks,frozen):
     """Bind the changed startup to actual50 sent commands and passive contacts."""
     from xmove_ready_upper_warmup import PROFILE,READY_JOINTS,blend
-    require(frozen.get('contract')==READY_UPPER_CONTRACT and frozen.get('experiment_role')==READY_UPPER_ROLE
+    require((frozen.get('contract'),frozen.get('experiment_role')) in ((READY_UPPER_CONTRACT,READY_UPPER_ROLE),(READY_UPPER30_CONTRACT,READY_UPPER30_ROLE))
         and frozen.get('profile')=='xmove_pick' and frozen.get('checkpoint_step')==5000
         and frozen.get('warmup_profile')==PROFILE,'Ready diagnostic identity differs')
     policy=frozen['evaluation_policy']
@@ -908,8 +921,14 @@ def finish_diagnostic(state):
     require(expected and len(expected)==len(set(expected)) and all(0<=a<=2 and 0<=b<=9 for a,b in expected),
         'Diagnostic final state has no valid unique explicit selection')
     require(state.get('planned_cases')==state.get('evaluation_denominator')==len(expected) and
-        state.get('full_official30_claim') is False and state.get('experiment_role') in ('same_seed_rtc_single_factor_pilot',READY_UPPER_ROLE),
+        state.get('full_official30_claim') is False and state.get('experiment_role') in ('same_seed_rtc_single_factor_pilot',READY_UPPER_ROLE,READY_UPPER30_ROLE),
         'Diagnostic final denominator/role differs')
+    if state.get('contract') in (READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT):
+        full=state['contract']==READY_UPPER30_CONTRACT
+        require(tuple(expected)==(READY_UPPER_ALL_CASES if full else READY_UPPER_CASES)
+            and state.get('ready_protocol','four')==('full30' if full else 'four')
+            and state.get('experiment_role')==(READY_UPPER30_ROLE if full else READY_UPPER_ROLE),
+            'Ready final4/30 denominator/order/role differs from its explicit protocol')
     rows=state['cases'];complete=[row for row in rows if row.get('status')=='complete' and type(row.get('native_success')) is bool]
     actual=[(row['level'],row['case_index']) for row in rows]
     full=(actual==expected and len(complete)==len(expected) and
@@ -928,7 +947,7 @@ def finish_diagnostic(state):
 
 def finish(state):
     """Keep all30 native outcomes; initialization warnings do not filter cases."""
-    code=finish_diagnostic(state) if state.get('contract') in (DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT) else common.finish(state)
+    code=finish_diagnostic(state) if state.get('contract') in (DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT) else common.finish(state)
     state['initialization_profile']=INITIALIZATION_PROFILE
     warnings=[{'level':row['level'],'case_index':row['case_index'],
         'warnings':list(row['initialization_warnings'])} for row in state['cases'] if row.get('initialization_warnings')]
@@ -954,6 +973,8 @@ def main(argv=None):
     parser.add_argument("--pick-interaction-diagnostics",action="store_true")
     parser.add_argument('--pick-warmup-profile',choices=('native','ready_upper_v1'),default='native')
     parser.add_argument('--ready-planner-model',type=Path)
+    parser.add_argument('--ready-protocol',choices=('four','full30'),default='four',
+        help='Ready only: fixed4 pilot or explicitly ordered original30; never an arbitrary subset')
     parser.add_argument("--execute-steps", type=int, help="Exact15 actions with test_time RTC, consuming25 simulation ticks per window")
     args = parser.parse_args(argv)
     require(len(args.expected_model_sha256) == 64 and all(char in "0123456789abcdef" for char in args.expected_model_sha256), "Expected SHA must be lowercase SHA256")
@@ -980,7 +1001,7 @@ def main(argv=None):
              'full_official30_claim':frozen['full_official30_claim'],
              'diagnostic_selected_cases':frozen['diagnostic_selected_cases'],'source_cases_frozen':30}
     if ready_upper(args):
-        state.update(warmup_profile='ready_upper_v1',native_saved_scene_initialization_preserved=True,
+        state.update(warmup_profile='ready_upper_v1',ready_protocol=frozen['ready_protocol'],native_saved_scene_initialization_preserved=True,
             warmup_protocol_modified=True)
     write(args.output / "state.json", state)
     try:

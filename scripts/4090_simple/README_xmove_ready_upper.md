@@ -42,6 +42,12 @@
   --ready-planner-model /home/zxc/CVPR_Evaluation_runtime/handover_random100_20261024/official-planner-v1/planner_sonic.onnx
 ```
 
-唯一允许的诊断覆盖是原seed的上述4例、5000步同一模型、test_time/all/15。不混入RTC关闭、78维纠偏或10000步。冻结输入合同为`cvpr-xmove-pick-ready-upper-v1-four-case-diagnostic-v1`，固定分母4、role为`fixed_ready_upper_warmup_single_factor_pilot`。每例新server/sim、保留原视频/原生reward/HTTP/每次实际发送指令与全部正力接触。预热若出现任何机器人碰物/桌面/干扰物/自身接触、跌倒或证据缺失，按技术验收失败保存，不改scene或悄悄跳过；策略阶段真实接触仍完整记录并按原生任务判定。
+四例模式仅允许原seed的上述4例、5000步同一模型、test_time/all/15。不混入RTC关闭、78维纠偏或10000步。冻结输入合同为`cvpr-xmove-pick-ready-upper-v1-four-case-diagnostic-v1`，固定分母4、role为`fixed_ready_upper_warmup_single_factor_pilot`。每例新server/sim、保留原视频/原生reward/HTTP/每次实际发送指令与全部正力接触。预热若出现任何机器人碰物/桌面/干扰物/自身接触、跌倒或证据缺失，按技术验收失败保存，不改scene或悄悄跳过；策略阶段真实接触仍完整记录并按原生任务判定。
 
 缺省`--pick-warmup-profile native`不导入新helper、不增加planner依赖，旧任务、旧RTC和原场景路径保持不变。无自动重试，不删除旧结果，不启动或停止其他队列。
+
+## 预备完整30例能力（未启动）
+
+缺省`--ready-protocol four`仍仅允许上述固定四例；它的命令、分母和四例合同保持。显式`--ready-protocol full30`必须同时使用`--diagnostic-cases 0:0,0:1,...,2:9`的原始逐级逐case完整顺序，禁止其他子集、重排或静默补充。完整模式独立合同`cvpr-xmove-pick-ready-upper-v1-thirty-case-diagnostic-v1`、role=`fixed_ready_upper_warmup_full30_diagnostic`，分母30而`source_cases_frozen=30`、`formal_evaluation_eligible=false`、`full_official30_claim=false`、`original_official_initialization=false`。原生scene、5k权重、base seed20261105、RTC test_time/all/15、50/800预算与全部实际指令/接触门完全相同。
+
+完整GPU30必须由独立driver检查同save ready四例技术完成、真实clean exit且达到预先声明的效果门之后，才由用户安排启动；此源码能力不是立即运行授权，本文未运行GPU或声明ready成绩。

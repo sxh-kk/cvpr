@@ -67,7 +67,39 @@ python -B scripts/4090_simple/evaluate_bend_pick30.py \
 
 002尝试随后在私有任务构造时遇到 `SpatialDRCfg` 不支持 `placement_attempts`，同样尚无任何物理步或RGB。
 其自有进程已核实全部退出，原记录保留，不计任务失败。上述v3全面审计修复后，下一次使用新的
-`official30_rtc_003/`，继续复用相同已验收5000步部署；本说明更新时尚待代码门禁和独立review后启动。
+`official30_rtc_003/`，继续复用相同已验收5000步部署。003现已完成30个技术有效场景，成功28/30；原结果完整保留。
 当前实际位置/状态仍以 `ACTIVE_EVALUATION.json` 为准，003启动和退出分别核
 `OFFICIAL30_RTC_003_LAUNCH.json`、`RETRY003_EXIT.json`（尚不存在时表示尚未发布该阶段凭据）；
 不得读取001/002的失败凭据充当003结果，也不得覆盖旧尝试。
+
+## 初始化桌沿支撑修复：stable_support_v1
+
+003的两例失败L2/03、L2/08在预热期间发生目标滑落。逐5ms真实MuJoCo接触复现发现：两例初态没有机器人与目标接触，真实碰撞网格编译得到的目标质心投影先超出桌左沿约4.42mm、2.97mm；盒子自行外翻后，才在0.350s、0.420s首次碰到机器人髋部。纯PD或无控制也会滑落，不能通过更换预热手臂控制修复这个支撑问题。
+
+新增显式可选 `--initialization-profile stable_support_v1`，默认仍为 `official_original`。新规则对全部30例统一计算，不读取旧成功标签：从同一生产对象构造器和真实凸碰撞网格编译目标局部COM，将其投影到水平桌面矩形内缩5mm的区域，取最短XY平移。只同步修改派生配置中目标layout和DR的XY；Z、四元数、机器人、其他物体、材质及原官方文件不变。每例保存原件/派生SHA、精确改动字段、移动量、桌面边界、真实COM及网格身份；内部28例严格不动，另外两例分别向内平移9.419mm、7.974mm。
+
+几何清单需先在CPU上通过 `bend_support_initialization.py --prepare` 生成；加载时重新编译同一小型对象并核来源、MuJoCo版本和网格字节，不信任手填COM。worker在真实完整模型首次物理步前，再只读核对目标COM/质量/姿态和桌面几何，校核原坐标到SONIC的+.405m变换。此检查不向运行中的qpos写入修正。
+
+新profile还在reset的1个物理步及50个真实预热控制tick（总201个5ms子步）被动记录目标运动与机器人接触。FK在私有MjData中计算，不改变真实动力学或增加步数。初始化有效性要求目标最大漂移不超过2mm、转角不超过2度、没有机器人接触目标且状态有限；这是单独的初始化技术检查，不替代原生抓取成功条件。策略阶段没有避障shield、物体固定或控制改写。
+
+真实CPU预热测试覆盖全部30例，最大目标漂移不足1mm、没有机器人接触目标；两修复例及成功对照的生产监视器有/无对照，在全部201子步中15个真实状态数组和时间逐元素一致。后续真实RTX/策略闭环仍需单独验收，不把这项预热检查算作抓取成功。
+
+```bash
+CUDA_VISIBLE_DEVICES='' python -B scripts/4090_simple/bend_support_initialization.py \
+  --prepare --data-root /path/to/official_eval/data_root \
+  --output /path/to/new/support_geometry.json
+
+python -B scripts/4090_simple/evaluate_bend_pick30.py \
+  --deployment /path/to/deployment --data-root /path/to/official_eval/data_root \
+  --training-manifest /path/to/source/release_metadata/dino/manifest.json \
+  --runtime-root /path/to/CVPR_Evaluation_runtime --output /path/to/new/stable_support_eval \
+  --expected-model-sha256 <实际备份SHA256> --checkpoint-step 5000 \
+  --sampling-seed 20261105 --rtc-mode test_time --execute-steps 15 \
+  --initialization-profile stable_support_v1 \
+  --support-geometry-manifest /path/to/new/support_geometry.json \
+  --prioritize-support-adjusted
+```
+
+`--prioritize-support-adjusted`只按统一几何规则的applied字段把受修订的场景前置，所有30例、各自seed和独立服务重置保持；不根据模型结果选择或重试。新campaign使用独立 `cvpr-bend-pick-fixed30-stable-support-v1-sonic-rtc-diagnostic-v1` 合同，结果明确称修订初始化的SONIC诊断，不能冒充官方原始30例原样成绩，也不能改写003的28/30。
+
+本次修复的几何、物理诊断和新测评入口位于 `/var/tmp/cvpr-bendpick-init-contact-20261111/`；新输出为 `eval_stable_support_v1_001/`，当前状态由该目录外的 `STABLE_SUPPORT_ACTIVE.json` 与campaign `state.json`记录。原权重和部署继续复用 `/var/tmp/cvpr-bend-pick-ckpt5000-20261111/deployment/`。

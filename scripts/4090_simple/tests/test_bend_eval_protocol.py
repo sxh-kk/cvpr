@@ -132,6 +132,26 @@ class BendProtocolTests(unittest.TestCase):
         derived, _ = loop.derive_bend_eval_reset(unknown)
         self.assertIn('unknown_new_field', derived['sensor_cfgs']['side'])  # No broad signature-based dropping.
 
+    def test_cli_support_revision_requires_explicit_bend_and_geometry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            geometry = Path(temp)/'geometry.json'; geometry.write_text('{}')
+            base = ['run_closed_loop.py', '--data-root', temp, '--sonic-resources', temp, '--output', temp+'/out',
+                '--tasks', loop.BEND_PICK_TASK, '--seconds', '8', '--bend-official-protocol',
+                '--sync-observations', '--isaac-observation-only', '--sim-mode', 'mujoco_isaac']
+            valid = base + ['--initialization-profile', 'stable_support_v1', '--support-geometry-manifest', str(geometry)]
+            with patch.object(sys, 'argv', valid):
+                args = loop.parse_args()
+                self.assertEqual(args.initialization_profile, 'stable_support_v1')
+                self.assertEqual(args.support_geometry_manifest, geometry.resolve())
+            invalid = [base+['--initialization-profile', 'stable_support_v1'],
+                       base+['--support-geometry-manifest', str(geometry)]]
+            foreign = valid.copy(); foreign.remove('--bend-official-protocol')
+            foreign[foreign.index(loop.BEND_PICK_TASK)] = loop.MOBILE_PP_TASK
+            invalid.append(foreign)
+            for argv in invalid:
+                with self.subTest(argv=argv), patch.object(sys, 'argv', argv), patch('sys.stderr'), self.assertRaises(SystemExit):
+                    loop.parse_args()
+
     def test_real_sim_camera_constructors_accept_all60_derived_official_sensors(self):
         from simple.sensors.config import CameraCfg, StereoCameraCfg
         root = Path('/var/tmp/cvpr-bend-pick-ckpt5000-20261111/official_eval/data_root')

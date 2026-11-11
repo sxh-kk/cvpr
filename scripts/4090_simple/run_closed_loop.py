@@ -185,23 +185,77 @@ def derive_bend_eval_reset(source_config):
         'reason': 'Removed only unused spatial keys, three named None-only camera fields, and three exact-value source/runtime DR options with explicit saved-reset equivalence evidence; real poses, camera geometry, saved materials and original reward remain unchanged'}
 
 
-def make_bend_environment(sonic_config, source_config, *, sim_mode, sync_observations, isaac_observation_only):
-    from pico_bend_pick_task import adapt_official_config, make_bend_pick_task, install_frame_adapter
+def prepare_bend_reset(source_config, *, initialization_profile='official_original', support_geometry=None):
+    from pico_bend_pick_task import adapt_official_config
+    derived, derivation = derive_bend_eval_reset(source_config)
+    support_receipt = None
+    if initialization_profile == 'stable_support_v1':
+        from bend_support_initialization import derive_stable_support_reset
+        if support_geometry is None:
+            raise ValueError('Stable-support initialization requires its verified geometry manifest')
+        derived, support_receipt = derive_stable_support_reset(derived, support_geometry)
+    elif initialization_profile != 'official_original' or support_geometry is not None:
+        raise ValueError('Unknown or mismatched BendPick initialization profile')
+    adapted, adaptation = adapt_official_config(derived)
+    return adapted, derivation, adaptation, support_receipt
+
+
+def install_bend_support_checks(env, support_receipt):
+    """Validate compiled initialization before the native reset step; observe only."""
+    from bend_support_initialization import verify_actual_support_model
+    from bend_initialization_monitor import BendInitializationMonitor
+    raw = env.unwrapped
+    raw._bend_support_pending_receipt = deepcopy(support_receipt)
+    raw._bend_support_model_verification = None
+    raw._bend_initialization_monitor = None
+    original_update = raw.mujoco.update_layout
+    original_step = raw.mujoco.step
+
+    def update(*args, **kwargs):
+        raw._bend_support_model_verification = None
+        raw._bend_initialization_monitor = None
+        result = original_update(*args, **kwargs)
+        model, data = raw.mujoco.mjModel, raw.mujoco.mjData
+        raw._bend_support_model_verification = verify_actual_support_model(
+            model, data, raw._bend_support_pending_receipt)
+        raw._bend_initialization_monitor = BendInitializationMonitor(
+            model, data, int(raw.mujoco.mj_objects['target'].id))
+        return result
+
+    def step(*args, **kwargs):
+        monitor = raw._bend_initialization_monitor
+        verification = raw._bend_support_model_verification
+        if (monitor is None or monitor.model is not raw.mujoco.mjModel or
+                not verification or verification.get('status') != 'passed'):
+            raise ValueError('BendPick physics stepped before its initialization verification')
+        result = original_step(*args, **kwargs)
+        monitor.after_step(raw.mujoco.mjModel, raw.mujoco.mjData)
+        return result
+
+    raw.mujoco.update_layout, raw.mujoco.step = update, step
+
+
+def make_bend_environment(sonic_config, source_config, *, sim_mode, sync_observations, isaac_observation_only,
+                          initialization_profile='official_original', support_geometry=None):
+    from pico_bend_pick_task import make_bend_pick_task, install_frame_adapter
     from simple.envs.sonic_loco_manip import SonicLocoManipEnv
     import gymnasium as gym
     protocol = bend_official_protocol(source_config)
-    derived, derivation = derive_bend_eval_reset(source_config)
-    adapted, receipt = adapt_official_config(derived)
+    adapted, derivation, receipt, support_receipt = prepare_bend_reset(source_config,
+        initialization_profile=initialization_profile, support_geometry=support_geometry)
     task = make_bend_pick_task(sonic_config, adapted_config=adapted)
     env = SonicLocoManipEnv(task=task, sonic_config=sonic_config, sim_mode=sim_mode, headless=True,
         dr_level=0, sync_mujoco_observations=sync_observations, isaac_observation_only=isaac_observation_only)
     try:
         binding = install_frame_adapter(env)
+        if support_receipt is not None:
+            install_bend_support_checks(env, support_receipt)
         env = gym.wrappers.TimeLimit(env, max_episode_steps=protocol['max_episode_steps'])
     except BaseException:
         env.close()
         raise
-    return env, {'adaptation': receipt, 'reset_derivation': derivation, 'frame_binding': binding, 'protocol': protocol}
+    return env, {'adaptation': receipt, 'reset_derivation': derivation, 'frame_binding': binding, 'protocol': protocol,
+        'initialization_profile': initialization_profile, 'bend_support_initialization': support_receipt}
 
 
 def mobile_official_protocol(environment_config):
@@ -384,6 +438,10 @@ def parse_args():
                         help="Mobile only: original case DR state, native .9 success and exact1200-step TimeLimit")
     parser.add_argument('--bend-official-protocol', action='store_true',
                         help='BendPick private SONIC adapter: saved native scene, original reward and metadata TimeLimit')
+    parser.add_argument('--initialization-profile', choices=('official_original', 'stable_support_v1'),
+                        default='official_original', help='Explicitly separate revised stable-support BendPick initialization')
+    parser.add_argument('--support-geometry-manifest', type=Path,
+                        help='Pinned CPU-compiled target geometry required only by stable_support_v1')
     parser.add_argument("--sim-mode", choices=("mujoco", "mujoco_isaac", "isaacsim"), default="mujoco")
     parser.add_argument("--compatibility-evidence", type=Path)
     parser.add_argument("--diagnostic-unverified-sonic", action="store_true",
@@ -394,6 +452,11 @@ def parse_args():
                         default="mjcf_limits")
     parser.add_argument("--worker-task", choices=SUPPORTED_TASKS, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    stable_support = args.initialization_profile == 'stable_support_v1'
+    if stable_support != (args.support_geometry_manifest is not None) or (stable_support and not args.bend_official_protocol):
+        parser.error('Stable-support initialization requires only BendPick plus --support-geometry-manifest')
+    if args.support_geometry_manifest is not None:
+        args.support_geometry_manifest = args.support_geometry_manifest.resolve(strict=True)
     if (args.bend_official_protocol != (args.tasks == [BEND_PICK_TASK])
             or BEND_PICK_TASK in args.tasks and args.tasks != [BEND_PICK_TASK]):
         parser.error('The private BendPick task requires exactly --bend-official-protocol and no other task')
@@ -563,9 +626,15 @@ def run_worker(args):
         if args.worker_task in (MOBILE_PP_TASK, BEND_PICK_TASK):
             config["ENABLE_ELASTIC_BAND"] = False
         mode = "mujoco_isaac" if args.sim_mode == "isaacsim" else args.sim_mode
+        support_geometry = None
         if args.bend_official_protocol:
+            if args.initialization_profile == 'stable_support_v1':
+                from bend_support_initialization import load_geometry_manifest
+                support_geometry = load_geometry_manifest(args.support_geometry_manifest, args.data_root)
+            result['initialization_profile'] = args.initialization_profile
             env, result['bend_adapter'] = make_bend_environment(config, first_config, sim_mode=mode,
-                sync_observations=args.sync_observations, isaac_observation_only=args.isaac_observation_only)
+                sync_observations=args.sync_observations, isaac_observation_only=args.isaac_observation_only,
+                initialization_profile=args.initialization_profile, support_geometry=support_geometry)
         else:
             env = gym.make("simple/" + args.worker_task, sonic_config=config, sim_mode=mode,
                            headless=True, dr_level=args.dr_level,
@@ -614,13 +683,15 @@ def run_worker(args):
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
                 bend_source = None
                 if args.bend_official_protocol:
-                    from pico_bend_pick_task import adapt_official_config, bend_pick_environment_binding_receipt
+                    from pico_bend_pick_task import bend_pick_environment_binding_receipt
                     bend_source = deepcopy(env_config)
                     protocol = bend_official_protocol(bend_source)
                     if args.seconds < protocol['maximum_simulated_seconds']:
                         raise ValueError('BendPick wall budget may not shorten the original metadata step budget')
-                    derived, bend_derivation = derive_bend_eval_reset(bend_source)
-                    env_config, bend_receipt = adapt_official_config(derived)
+                    env_config, bend_derivation, bend_receipt, bend_support_receipt = prepare_bend_reset(bend_source,
+                        initialization_profile=args.initialization_profile, support_geometry=support_geometry)
+                    if bend_support_receipt is not None:
+                        raw._bend_support_pending_receipt = deepcopy(bend_support_receipt)
                     if protocol['max_episode_steps'] != result['bend_adapter']['protocol']['max_episode_steps']:
                         raise ValueError('One worker must preserve its original BendPick TimeLimit')
                 if args.mobile_official_protocol:
@@ -668,7 +739,11 @@ def run_worker(args):
                 episode.update(bend_protocol=protocol, bend_source_environment_config=bend_source,
                     bend_adaptation=bend_receipt, bend_environment_binding=actual_binding,
                     bend_reset_derivation=bend_derivation,
-                    task_id='cvpr/'+BEND_PICK_TASK)
+                    task_id='cvpr/'+BEND_PICK_TASK, initialization_profile=args.initialization_profile)
+                if bend_support_receipt is not None:
+                    episode.update(bend_support_initialization=bend_support_receipt,
+                        bend_support_geometry_manifest=deepcopy(bend_support_receipt['geometry_manifest_identity']),
+                        bend_support_model_verification=deepcopy(raw._bend_support_model_verification))
             if args.mobile_official_protocol or mobile_initial is not None:
                 episode["mobile_protocol"] = protocol
             if mobile_initial is not None:
@@ -831,6 +906,8 @@ def run_worker(args):
                 episode["warmup_control"]["actual_warmup_decoder_calls"] = episode.get("warmup_decoder_calls", controller.decoder_calls)
                 episode["body_token_projection"] = deepcopy(agent.projection_receipt)
                 episode["continue_after_official_success"] = args.continue_after_task_success
+                if args.bend_official_protocol and support_geometry is not None:
+                    episode['bend_initialization_safety'] = raw._bend_initialization_monitor.receipt()
                 episode["strategy_quality_assessment"] = (
                     "ineligible: robot already unstable before first learned action" if episode["fell_before_first_policy_command"]
                     else "ineligible: bounded integration smoke with explicit controller compatibility boundary")

@@ -32,6 +32,9 @@ TASK = BEND_PICK_TASK
 TASK_ID = 'cvpr/'+TASK
 SOURCE_TASK = BEND_PICK_SOURCE_TASK
 CONTRACT = 'cvpr-bend-pick-fixed-official30-sonic-rtc-diagnostic-v1'
+STABLE_SUPPORT_CONTRACT = 'cvpr-bend-pick-fixed30-stable-support-v1-sonic-rtc-diagnostic-v1'
+STABLE_SUPPORT_BOUNDARY = ('Uniform target XY-only minimum translation into table support with5mm margin; '
+    'all30 original cases retained; revised initialization, not the original official30 scene protocol. ')
 READY_CONTRACT = 'cvpr-bend-pick-local-deployment-v1'
 READY_STATUS = 'local_bend_pick_checkpoint_prepared'
 OFFICIAL_REVISION = 'e78fb93cc28912a3031a10b8656d32d7f0a2b867'
@@ -59,10 +62,29 @@ def evaluation_policy(args):
     return policy
 
 
+def initialization_profile(args):
+    profile = getattr(args, 'initialization_profile', 'official_original')
+    manifest = getattr(args, 'support_geometry_manifest', None)
+    prioritize = getattr(args, 'prioritize_support_adjusted', False)
+    require(profile in ('official_original', 'stable_support_v1'), 'Unknown BendPick initialization profile')
+    require((profile == 'stable_support_v1') == (manifest is not None),
+        'Only stable_support_v1 requires a support geometry manifest')
+    require(not prioritize or profile == 'stable_support_v1',
+        'Support-adjusted ordering requires stable_support_v1')
+    return profile
+
+
+def order_support_cases(cases, prioritize):
+    if not prioritize:
+        return cases
+    # Stable sort by geometry-derived receipt only; never inspect model outcomes.
+    return sorted(cases, key=lambda case: not case['bend_support_initialization']['applied'])
+
+
 def source_identities():
     sources = {name: file_identity(Path(__file__).with_name(name)) for name in (
         'evaluate_bend_pick30.py', 'evaluate_mobile_pp30.py', 'run_closed_loop.py', 'serve_evaluation.py',
-        'pico_bend_pick_task.py', 'capture_simple.py', 'video_capture.py')}
+        'pico_bend_pick_task.py', 'capture_simple.py', 'video_capture.py', 'bend_support_initialization.py', 'bend_initialization_monitor.py')}
     for relative in ('deploy/serve_psi0_simple.py', 'deploy/dual_source_runtime.py', 'models/psi0.py', 'models/dual_source_action.py'):
         sources['psi/'+relative] = file_identity(REPO/'VLMExpert/src/psi'/relative)
     spec = importlib.util.find_spec('simple')
@@ -78,6 +100,14 @@ def source_identities():
 
 def freeze_inputs(args):
     from capture_simple import remap_episode_paths
+    profile = initialization_profile(args)
+    support_geometry = support_identity = None
+    if profile == 'stable_support_v1':
+        from bend_support_initialization import load_geometry_manifest
+        support_path = Path(args.support_geometry_manifest).resolve(strict=True)
+        support_identity = file_identity(support_path)
+        support_geometry = load_geometry_manifest(support_path, args.data_root)
+        unchanged(support_identity)
     ready_path = args.deployment/'LOCAL_RUN_READY.json'
     ready = read(ready_path)
     require(ready.get('contract') == READY_CONTRACT and ready.get('status') == READY_STATUS and
@@ -93,6 +123,8 @@ def freeze_inputs(args):
     require(model['sha256'] == args.expected_model_sha256, 'Actual checkpoint bytes differ')
     sources = source_identities()
     sources['deployment_ready'] = file_identity(ready_path)
+    if support_identity is not None:
+        sources['support_geometry_manifest'] = support_identity
     artifacts = ready.get('deployment_artifacts')
     require(isinstance(artifacts, dict) and set(artifacts) == DEPLOYMENT_ARTIFACTS, 'Seven complete deployment artifacts are required')
     for name, record in artifacts.items():
@@ -119,26 +151,44 @@ def freeze_inputs(args):
             native = remap_episode_paths(original, args.data_root)
             protocol = bend_official_protocol(native)
             derived, derivation = derive_bend_eval_reset(native)
+            support_receipt = None
+            if profile == 'stable_support_v1':
+                from bend_support_initialization import derive_stable_support_reset
+                derived, support_receipt = derive_stable_support_reset(derived, support_geometry)
+                require(type(support_receipt.get('applied')) is bool, 'Support derivation must declare applied bool')
             adapted, adaptation = adapt_official_config(derived)
             cases.append({'level': level, 'case_index': row['episode_index'], 'flat_index': level*10+row['episode_index'],
                 'source_row': row, 'source_environment_config': native, 'local_environment_config': adapted,
                 'reset_derivation': derivation, 'adaptation': adaptation, 'protocol': protocol,
                 'metadata_sha256': identity['sha256'], 'environment_seed': 0,
-                'sampling_seed': args.sampling_seed+level*10+row['episode_index']})
+                'sampling_seed': args.sampling_seed+level*10+row['episode_index'],
+                'initialization_profile': profile,
+                'original_official_initialization': profile == 'official_original',
+                'bend_support_initialization': support_receipt,
+                'bend_support_geometry_manifest': support_identity})
         unchanged(identity)
         metadata_files.append(identity)
-    return {'contract': CONTRACT, 'task_id': TASK_ID, 'source_task_id': 'simple/'+SOURCE_TASK, 'prepared_utc': now(),
+    cases = order_support_cases(cases, getattr(args, 'prioritize_support_adjusted', False))
+    boundary = (STABLE_SUPPORT_BOUNDARY if profile == 'stable_support_v1' else '') + BOUNDARY
+    return {'contract': STABLE_SUPPORT_CONTRACT if profile == 'stable_support_v1' else CONTRACT, 'task_id': TASK_ID, 'source_task_id': 'simple/'+SOURCE_TASK, 'prepared_utc': now(),
         'checkpoint_step': args.checkpoint_step, 'model': model, 'deployment': str(args.deployment),
         'training_manifest': manifest, 'metadata_files': metadata_files, 'sources': sources, 'cases': cases,
         'official_repository': 'USC-PSI-Lab/psi-data', 'official_revision': OFFICIAL_REVISION,
-        'official_archive_sha256': OFFICIAL_ARCHIVE_SHA256, 'boundary': BOUNDARY, 'formal_evaluation_eligible': False,
+        'official_archive_sha256': OFFICIAL_ARCHIVE_SHA256, 'boundary': boundary, 'formal_evaluation_eligible': False,
         'maximum_steps_including_warmup': 400, 'maximum_simulated_seconds': 8., 'effective_native_success_criteria': .9,
         'source_split_labels_preserved': True, 'independent_heldout_split_proven': False,
+        'initialization_profile': profile, 'original_official_initialization': profile == 'official_original',
+        'support_geometry_manifest': support_identity,
+        'support_adjusted_cases': sum(case['bend_support_initialization']['applied'] for case in cases)
+            if profile == 'stable_support_v1' else 0,
+        'case_order': 'support_adjusted_first_stable_original_order' if getattr(args, 'prioritize_support_adjusted', False)
+            else 'original_level_case_order',
         'evaluation_policy': evaluation_policy(args)}
 
 
 def commands(args, case, directory):
     policy = evaluation_policy(args)
+    profile = initialization_profile(args)
     options = ['--rtc-mode', 'test_time', '--execute-steps', '15', '--rtc-inference-delay', '0',
         '--min-exec-horizon', '15', '--pig-mask-schedule', 'exponential', '--pig-guidance-alpha', '0.9']
     server = [str(MODEL_PY), str(REPO/'scripts/4090_simple/serve_evaluation.py'), '--run-dir', str(args.deployment),
@@ -153,6 +203,9 @@ def commands(args, case, directory):
         '--diagnostic-unverified-sonic', '--pd-profile', 'official_v1_1_ankle_pitch_1_5', '--hand-torque-profile', 'mjcf_limits',
         '--warmup-control', 'live_pose_sonic_v1_1', '--warmup-hand-policy', 'measured', '--body-token-projection', 'none',
         '--video', '--worker-wall-timeout', '1800', '--worker-task', TASK]
+    if profile == 'stable_support_v1':
+        simulator += ['--initialization-profile', profile, '--support-geometry-manifest',
+            str(Path(args.support_geometry_manifest).resolve(strict=True))]
     return {'server': server, 'simulator': simulator}
 
 
@@ -175,6 +228,99 @@ def validate_native_reward_ledger(ticks):
     require(all(value == baselines[0] for value in baselines), 'Native BendPick baseline changed')
 
 
+def validate_initialization_safety(safety):
+    require(isinstance(safety, dict) and
+        safety.get('contract') == 'cvpr-bend-pick-revised-startup-passive-verification-v1' and
+        safety.get('status') == 'passed', 'Missing or failed revised initialization safety verification')
+    for key, expected in (('observed_physics_substeps', 201), ('required_physics_substeps', 201),
+            ('warmup_control_ticks', 50), ('native_reset_physics_substeps', 1),
+            ('robot_target_contact_count', 0), ('physics_steps_added', 0)):
+        require(type(safety.get(key)) is int and safety[key] == expected,
+            'Initialization safety substep/contact/budget ledger differs: '+key)
+    require(safety.get('engineering_displacement_limit_m') == .002 and
+        safety.get('engineering_rotation_limit_degrees') == 2., 'Initialization diagnostic thresholds differ')
+    for key, limit in (('maximum_target_displacement_m', .002), ('maximum_target_rotation_degrees', 2.)):
+        value = safety.get(key)
+        require(type(value) in (int, float) and math.isfinite(value) and 0 <= value <= limit,
+            'Initialization target drift or rotation exceeds diagnostic threshold')
+    samples = safety.get('samples')
+    require(isinstance(samples, list) and len(samples) == 201 and safety.get('contacts') == [],
+        'Initialization safety lacks complete contact/sample evidence')
+    displacements, rotations = [], []
+    for index, sample in enumerate(samples, 1):
+        require(type(sample.get('substep')) is int and sample['substep'] == index,
+            'Initialization sample substep sequence differs')
+        sample_time = sample.get('sim_time_s')
+        require(type(sample_time) in (int, float) and math.isfinite(sample_time),
+            'Initialization sample timestamp is nonfinite')
+        close_number(sample_time, .005*index, 'Initialization sample time differs from actual200Hz physics')
+        for key, length in (('target_xyz_m', 3), ('target_quaternion_wxyz', 4)):
+            value = sample.get(key)
+            require(isinstance(value, list) and len(value) == length and
+                all(type(item) in (int, float) and math.isfinite(item) for item in value),
+                'Initialization sample target pose is incomplete or nonfinite')
+        close_number(sum(value*value for value in sample['target_quaternion_wxyz']), 1.,
+            'Initialization sample target quaternion is not unit length')
+        require(type(sample.get('robot_target_contacts')) is int and sample['robot_target_contacts'] == 0,
+            'Initialization sample contains robot-target contact')
+        for key, limit, values in (('target_displacement_m', .002, displacements),
+                ('target_rotation_degrees', 2., rotations)):
+            value = sample.get(key)
+            require(type(value) in (int, float) and math.isfinite(value) and 0 <= value <= limit,
+                'Initialization sample drift or rotation exceeds diagnostic threshold')
+            values.append(value)
+    close_number(max(displacements), safety['maximum_target_displacement_m'],
+        'Initialization displacement maximum disagrees with sample ledger')
+    close_number(max(rotations), safety['maximum_target_rotation_degrees'],
+        'Initialization rotation maximum disagrees with sample ledger')
+    require(safety.get('finite_states') is True and safety.get('private_FK_only') is True and
+        all(safety.get(key) is False for key in ('live_physical_state_writes', 'controller_commands_modified',
+            'policy_phase_interventions')), 'Initialization observer changed live state/control or used nonfinite states')
+
+
+def validate_support_identity(result, episode, case, frozen):
+    profile = frozen.get('initialization_profile', 'official_original')
+    require(case.get('initialization_profile', 'official_original') == profile and
+        result.get('initialization_profile', 'official_original') == profile and
+        episode.get('initialization_profile', 'official_original') == profile,
+        'BendPick initialization profile differs')
+    if profile == 'official_original':
+        require(episode.get('bend_support_initialization') is None and
+            episode.get('bend_support_model_verification') is None,
+            'Original initialization contains an undeclared support revision')
+        return
+    require(profile == 'stable_support_v1' and frozen.get('contract') == STABLE_SUPPORT_CONTRACT,
+        'Stable support must use its independent revised-initialization contract')
+    receipt = case.get('bend_support_initialization')
+    require(isinstance(receipt, dict) and receipt.get('profile') == profile and
+        receipt.get('contract') == 'cvpr-bend-pick-stable-support-initialization-v1' and
+        episode.get('bend_support_initialization') == receipt,
+        'Frozen support derivation differs from actual worker receipt')
+    identity = case.get('bend_support_geometry_manifest')
+    require(isinstance(identity, dict) and frozen.get('support_geometry_manifest') == identity,
+        'Frozen support geometry manifest identity differs')
+    minimal_identity = {key: identity[key] for key in ('path', 'sha256', 'size_bytes')}
+    require(receipt.get('geometry_manifest_identity') == minimal_identity and
+        episode.get('bend_support_geometry_manifest') == minimal_identity,
+        'Actual support geometry manifest differs')
+    validate_initialization_safety(episode.get('bend_initialization_safety'))
+    gate = episode.get('bend_support_model_verification', {})
+    receipt_sha = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(',', ':'),
+        allow_nan=False).encode()).hexdigest()
+    require(gate.get('status') == 'passed' and gate.get('profile') == profile and
+        gate.get('applied') is receipt['applied'] and gate.get('read_only') is True and
+        type(gate.get('physics_steps_taken')) is int and gate['physics_steps_taken'] == 0 and
+        gate.get('initialization_receipt_sha256') == receipt_sha,
+        'Actual support model was not verified read-only before first physics')
+    expected_com = [value+shift for value, shift in zip(receipt['after_com_xyz_m'],
+        receipt['actual_world_translation_m'])]
+    actual_com = gate.get('actual_target_com_world_m')
+    require(isinstance(actual_com, list) and len(actual_com) == len(expected_com) == 3,
+        'Missing actual target support center evidence')
+    for actual, expected in zip(actual_com, expected_com):
+        close_number(actual, expected, 'Actual target support center differs from frozen derivation')
+
+
 def validate_case(directory, case, frozen):
     """Read actual trace, both HTTP sides and decoded video; never infer success from geometry."""
     from run_closed_loop import worker_result_errors
@@ -189,6 +335,7 @@ def validate_case(directory, case, frozen):
         errors = [error for error in errors if "did not execute the real model/controller loop" not in error]
     require(not errors, "Simulator result is incomplete: " + repr(errors))
     episode = result["episodes"][0]
+    validate_support_identity(result, episode, case, frozen)
     require(episode["episode_index"] == case["case_index"] and episode["dr_level"] == case["level"]
             and episode["seed"] == 0 and episode["source_scene_reset_dr_level"] is None, "Wrong case/reset identity")
     require(episode["source_metadata_sha256"] == case["metadata_sha256"]
@@ -270,7 +417,16 @@ def validate_case(directory, case, frozen):
             "ticks": len(ticks), "warmup_ticks": episode["warmup_frames"], "policy_ticks": episode["policy_frames"],
             "simulated_seconds": episode["simulated_seconds"], "video_probe": probe[0], "video": str(video),
             "evidence": [file_identity(path) for path in paths], "formal_evaluation_eligible": False,
-            "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution}
+            "model_sha256": frozen["model"]["sha256"], "evaluation_policy": policy, "rtc_execution": rtc_execution,
+            "contract": frozen.get('contract', CONTRACT),
+            "initialization_profile": frozen.get('initialization_profile', 'official_original'),
+            "original_official_initialization": frozen.get('initialization_profile', 'official_original') == 'official_original',
+            "source_environment_config": case['source_environment_config'],
+            "reset_derivation": case['reset_derivation'],
+            "bend_support_initialization": case.get('bend_support_initialization'),
+            "bend_support_geometry_manifest": case.get('bend_support_geometry_manifest'),
+            "bend_support_model_verification": episode.get('bend_support_model_verification'),
+            "bend_initialization_safety": episode.get('bend_initialization_safety')}
 
 
 
@@ -278,7 +434,9 @@ def execute(args, case, frozen, state):
     directory = args.output / f"level{case['level']}" / f"case_{case['case_index']:02}"
     directory.mkdir(parents=True, exist_ok=False)
     row = {"level": case["level"], "case_index": case["case_index"], "status": "starting",
-           "directory": str(directory), "started_utc": now(), "sampling_seed": case["sampling_seed"]}
+           "directory": str(directory), "started_utc": now(), "sampling_seed": case["sampling_seed"],
+           "initialization_profile": frozen.get('initialization_profile', 'official_original'),
+           "bend_support_initialization": case.get('bend_support_initialization')}
     state["cases"].append(row)
     write(args.output / "state.json", state)
     command = commands(args, case, directory)
@@ -355,7 +513,12 @@ def main(argv=None):
     parser.add_argument("--sampling-seed", type=int, default=20261111)
     parser.add_argument("--rtc-mode", choices=("test_time",), default="test_time")
     parser.add_argument("--execute-steps", type=int, help="Exact15 actions with test_time RTC, consuming25 simulation ticks per window")
+    parser.add_argument('--initialization-profile', choices=('official_original', 'stable_support_v1'), default='official_original')
+    parser.add_argument('--support-geometry-manifest', type=Path)
+    parser.add_argument('--prioritize-support-adjusted', action='store_true',
+        help='Stable-support profile only: execute geometry-adjusted cases first, retaining all30 original cases/seeds')
     args = parser.parse_args(argv)
+    initialization_profile(args)
     require(len(args.expected_model_sha256) == 64 and all(char in "0123456789abcdef" for char in args.expected_model_sha256), "Expected SHA must be lowercase SHA256")
     require(args.checkpoint_step > 0 and 1024 <= args.port <= 65535 and 0 <= args.sampling_seed <= 2**32 - 30, "Invalid step/port/seed")
     policy = evaluation_policy(args)
@@ -368,10 +531,14 @@ def main(argv=None):
     frozen = json.loads(json.dumps(freeze_inputs(args), default=_json_value, allow_nan=False))
     args.output.mkdir(parents=True, exist_ok=False)
     write(args.output / "FROZEN_CAMPAIGN.json", frozen)
-    state = {"contract": CONTRACT, "status": "running", "created_utc": now(), "planned_cases": 30,
+    state = {"contract": frozen["contract"], "status": "running", "created_utc": now(), "planned_cases": 30,
              "checkpoint_step": args.checkpoint_step, "model_sha256": args.expected_model_sha256,
-             "task_id": TASK_ID, "cases": [], "formal_evaluation_eligible": False, "boundary": BOUNDARY,
-             "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": policy}
+             "task_id": TASK_ID, "cases": [], "formal_evaluation_eligible": False, "boundary": frozen["boundary"],
+             "technical_errors_are_task_failures": False, "automatic_retries": 0, "evaluation_policy": policy,
+             "initialization_profile": frozen['initialization_profile'],
+             "original_official_initialization": frozen['original_official_initialization'],
+             "support_geometry_manifest": frozen['support_geometry_manifest'],
+             "support_adjusted_cases": frozen['support_adjusted_cases'], "case_order": frozen['case_order']}
     write(args.output / "state.json", state)
     try:
         for case in frozen["cases"]:

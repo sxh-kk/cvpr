@@ -2,10 +2,11 @@
 from copy import deepcopy
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import SimpleNamespace, ModuleType
 import unittest
 from unittest.mock import patch
 
@@ -195,6 +196,166 @@ class BendCampaignTests(unittest.TestCase):
                         (epdir/'trace.jsonl').write_text('\n'.join(map(json.dumps, ticks)))
                         with self.assertRaisesRegex(ValueError, 'full official budget'):
                             evaluate.validate_case(directory, case, frozen)
+
+    def test_profile_cli_gate_keeps_original_default_and_requires_stable_manifest(self):
+        self.assertEqual(evaluate.initialization_profile(self.args), 'official_original')
+        for fields in [dict(initialization_profile='stable_support_v1'),
+            dict(support_geometry_manifest=self.root/'geometry.json'),
+            dict(prioritize_support_adjusted=True), dict(initialization_profile='foreign')]:
+            args = SimpleNamespace(**vars(self.args)); vars(args).update(fields)
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                evaluate.initialization_profile(args)
+        self.args.initialization_profile = 'stable_support_v1'
+        self.args.support_geometry_manifest = self.root/'geometry.json'
+        self.args.prioritize_support_adjusted = True
+        self.assertEqual(evaluate.initialization_profile(self.args), 'stable_support_v1')
+
+    def test_uniform_support_derivation_all30_and_geometric_priority_preserve_case_seed(self):
+        self.args.initialization_profile = 'stable_support_v1'
+        self.args.support_geometry_manifest = self.root/'geometry.json'
+        self.args.prioritize_support_adjusted = True
+        self.write(self.args.support_geometry_manifest, {'fixture': 'geometry'})
+        helper = ModuleType('bend_support_initialization')
+        calls = []
+        geometry_identity = {key: evaluate.file_identity(self.args.support_geometry_manifest)[key]
+            for key in ('path', 'sha256', 'size_bytes')}
+        helper.load_geometry_manifest = lambda path, data_root: {'manifest_identity': geometry_identity}
+        def derive(source, geometry):
+            index = len(calls); calls.append(deepcopy(source))
+            # This dispatcher fixture assigns a geometric adjustment every ten
+            # cases; no task result or previous model evidence is supplied.
+            applied = index % 10 == 1
+            corrected = deepcopy(source)
+            if applied:
+                uid = str(source['dr_state_dict']['target']['uid'])
+                corrected['dr_state_dict']['spatial'][uid]['position'][0] += .001
+                corrected['layout']['actors']['target']['pose']['position'][0] += .001
+            return corrected, {'profile': 'stable_support_v1', 'applied': applied,
+                'geometry_manifest_identity': geometry['manifest_identity']}
+        helper.derive_stable_support_reset = derive
+        with patch.dict(sys.modules, {'bend_support_initialization': helper}):
+            frozen = evaluate.freeze_inputs(self.args)
+        self.assertEqual(len(calls), 30)
+        self.assertEqual(frozen['contract'], evaluate.STABLE_SUPPORT_CONTRACT)
+        self.assertFalse(frozen['original_official_initialization'])
+        self.assertIn('not the original official30', frozen['boundary'])
+        self.assertEqual(frozen['support_adjusted_cases'], 3)
+        self.assertEqual([(c['level'], c['case_index']) for c in frozen['cases'][:3]], [(0, 1), (1, 1), (2, 1)])
+        originals = [(level, index) for level in range(3) for index in range(10)]
+        self.assertEqual(sorted((c['level'], c['case_index']) for c in frozen['cases']), originals)
+        for case in frozen['cases']:
+            flat = case['level']*10+case['case_index']
+            self.assertEqual(case['flat_index'], flat)
+            self.assertEqual(case['sampling_seed'], self.args.sampling_seed+flat)
+            self.assertEqual(case['environment_seed'], 0)
+            self.assertNotIn('99', calls[flat]['dr_state_dict']['spatial'])
+            self.assertEqual(json.loads(case['source_row']['environment_config']), case['source_environment_config'])
+        command = evaluate.commands(self.args, frozen['cases'][0], self.root/'case')['simulator']
+        self.assertEqual(command[command.index('--initialization-profile')+1], 'stable_support_v1')
+        self.assertEqual(command[command.index('--support-geometry-manifest')+1], str(self.args.support_geometry_manifest))
+        self.assertEqual(command[command.index('--seconds')+1], '8.0')
+        self.assertEqual(command[command.index('--warmup-control')+1], 'live_pose_sonic_v1_1')
+        before = deepcopy(frozen['cases'])
+        self.assertEqual(evaluate.order_support_cases(before, False), before)
+
+    def safety_fixture(self):
+        return {'contract': 'cvpr-bend-pick-revised-startup-passive-verification-v1', 'status': 'passed',
+            'observed_physics_substeps': 201, 'required_physics_substeps': 201, 'warmup_control_ticks': 50,
+            'native_reset_physics_substeps': 1, 'robot_target_contact_count': 0, 'physics_steps_added': 0,
+            'engineering_displacement_limit_m': .002, 'engineering_rotation_limit_degrees': 2.,
+            'maximum_target_displacement_m': .0003, 'maximum_target_rotation_degrees': .02,
+            'finite_states': True, 'private_FK_only': True, 'live_physical_state_writes': False,
+            'controller_commands_modified': False, 'policy_phase_interventions': False, 'contacts': [],
+            'samples': [{'substep': index, 'sim_time_s': .005*index, 'target_xyz_m': [.0003, 0., 0.],
+                'target_quaternion_wxyz': [math.cos(math.radians(.02)/2), 0., 0., math.sin(math.radians(.02)/2)],
+                'robot_target_contacts': 0, 'target_displacement_m': .0003, 'target_rotation_degrees': .02}
+                for index in range(1, 202)]}
+
+    def test_stable_initialization_requires_complete_passive_monitor_without_strengthening_native_gate(self):
+        evaluate.validate_initialization_safety(self.safety_fixture())
+        for key, value in [('status', 'failed_or_incomplete'), ('observed_physics_substeps', 200),
+            ('required_physics_substeps', 200), ('warmup_control_ticks', 49), ('native_reset_physics_substeps', 0),
+            ('robot_target_contact_count', 1), ('physics_steps_added', 1), ('physics_steps_added', False),
+            ('maximum_target_displacement_m', .00201), ('maximum_target_rotation_degrees', 2.01),
+            ('maximum_target_displacement_m', float('nan')), ('engineering_displacement_limit_m', .003),
+            ('engineering_rotation_limit_degrees', 3.), ('finite_states', False), ('private_FK_only', False),
+            ('live_physical_state_writes', True), ('controller_commands_modified', True), ('policy_phase_interventions', True)]:
+            changed = self.safety_fixture(); changed[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                evaluate.validate_initialization_safety(changed)
+        result, episode, case, frozen = self.support_identity_fixture()
+        episode.pop('bend_initialization_safety')
+        with self.assertRaisesRegex(ValueError, 'Missing or failed'):
+            evaluate.validate_support_identity(result, episode, case, frozen)
+        # Original profile keeps its existing native success, including warmup.
+        evaluate.validate_support_identity({}, {}, {}, {})
+
+    def test_startup_sample_ledger_must_match_real_substeps_pose_contacts_and_header_maxima(self):
+        evaluate.validate_initialization_safety(self.safety_fixture())
+        mutations = [lambda r: r['samples'].pop(),
+            lambda r: r['samples'][5].update(substep=5),
+            lambda r: r['samples'][5].update(sim_time_s=.035),
+            lambda r: r['samples'][5].update(sim_time_s=float('nan')),
+            lambda r: r['samples'][5].update(target_xyz_m=[0., 0.]),
+            lambda r: r['samples'][5].update(target_xyz_m=[0., 0., float('inf')]),
+            lambda r: r['samples'][5].update(target_quaternion_wxyz=[2., 0., 0., 0.]),
+            lambda r: r['samples'][5].update(target_quaternion_wxyz=[1., 0., 0.]),
+            lambda r: r['samples'][5].update(robot_target_contacts=1),
+            lambda r: r['samples'][5].update(robot_target_contacts=False),
+            lambda r: r.update(contacts=[{'substep': 6}]),
+            lambda r: r['samples'][5].update(target_displacement_m=.003),
+            lambda r: r['samples'][5].update(target_rotation_degrees=3.),
+            lambda r: r['samples'][5].update(target_displacement_m=-.001),
+            lambda r: r['samples'][5].update(target_rotation_degrees=float('nan')),
+            lambda r: r.update(maximum_target_displacement_m=.0004),
+            lambda r: r.update(maximum_target_rotation_degrees=.03)]
+        for mutate in mutations:
+            changed = self.safety_fixture(); mutate(changed)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                evaluate.validate_initialization_safety(changed)
+
+    def support_identity_fixture(self):
+        identity = {'path': str(self.root/'geometry.json'), 'sha256': 'f'*64, 'size_bytes': 10,
+            'mtime_ns': 123, 'device': 1, 'inode': 2}
+        minimal = {key: identity[key] for key in ('path', 'sha256', 'size_bytes')}
+        receipt = {'contract': 'cvpr-bend-pick-stable-support-initialization-v1',
+            'profile': 'stable_support_v1', 'applied': True, 'geometry_manifest_identity': minimal,
+            'after_com_xyz_m': [0., .1, .5], 'actual_world_translation_m': [0., 0., .405]}
+        receipt_sha = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        episode = {'initialization_profile': 'stable_support_v1', 'bend_support_initialization': deepcopy(receipt),
+            'bend_support_geometry_manifest': minimal,
+            'bend_support_model_verification': {'status': 'passed', 'profile': 'stable_support_v1', 'applied': True,
+                'read_only': True, 'physics_steps_taken': 0, 'initialization_receipt_sha256': receipt_sha,
+                'actual_target_com_world_m': [0., .1, .905]},
+            'bend_initialization_safety': self.safety_fixture()}
+        case = {'initialization_profile': 'stable_support_v1', 'bend_support_initialization': receipt,
+            'bend_support_geometry_manifest': identity}
+        frozen = {'contract': evaluate.STABLE_SUPPORT_CONTRACT, 'initialization_profile': 'stable_support_v1',
+            'support_geometry_manifest': identity}
+        return {'initialization_profile': 'stable_support_v1'}, episode, case, frozen
+
+    def test_real_model_support_gate_binds_profile_geometry_receipt_and_before_physics(self):
+        result, episode, case, frozen = self.support_identity_fixture()
+        evaluate.validate_support_identity(result, episode, case, frozen)
+        mutations = [lambda e: e.update(initialization_profile='official_original'),
+            lambda e: e['bend_support_initialization'].update(applied=False),
+            lambda e: e['bend_support_geometry_manifest'].update(sha256='0'*64),
+            lambda e: e['bend_support_model_verification'].update(status='pending'),
+            lambda e: e['bend_support_model_verification'].update(read_only=False),
+            lambda e: e['bend_support_model_verification'].update(physics_steps_taken=1),
+            lambda e: e['bend_support_model_verification'].update(physics_steps_taken=False),
+            lambda e: e['bend_support_model_verification'].update(initialization_receipt_sha256='0'*64),
+            lambda e: e['bend_support_model_verification'].update(actual_target_com_world_m=[0., .2, .905])]
+        for mutate in mutations:
+            changed = deepcopy(episode); mutate(changed)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                evaluate.validate_support_identity(result, changed, case, frozen)
+        evaluate.validate_support_identity({}, {}, {}, {})
+        with self.assertRaisesRegex(ValueError, 'undeclared'):
+            evaluate.validate_support_identity({}, {'bend_support_initialization': {}}, {}, {})
+        wrong = deepcopy(frozen); wrong['contract'] = evaluate.CONTRACT
+        with self.assertRaisesRegex(ValueError, 'independent'):
+            evaluate.validate_support_identity(result, episode, case, wrong)
 
     def test_native_reward_ledger_cannot_replace_or_strengthen_original_success(self):
         def tick(z):

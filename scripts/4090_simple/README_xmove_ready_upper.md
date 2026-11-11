@@ -1,4 +1,4 @@
-# XMovePick 通用上肢准备姿态：独立四例诊断
+# XMovePick 通用上肢准备姿态：独立诊断与实测
 
 `ready_upper_v1` 是显式预热协议实验。它保留官方原生零关节重置、桌/目标/干扰物姿态、材质、seed、原生9cm成功判据和800 tick总预算，但将原50 tick预热的后40 tick换为中性mode1参考。它不是原始zero-pose/mode0预热，结果不得混入此前13/30或RTC关闭30例分数。
 
@@ -17,9 +17,23 @@
 
 独立运行目录`/var/tmp/cvpr-xmove-failure-cpu-20261111/ready_upper_v1/`保存4代表×3对照与固定preset全30场景的201真实物理子步。全30无robot-target/table/distractor/self正力接触，无跌倒，最低pelvis高0.7882629m。目标仅原生自然沉降，最大1.0482mm；同阶段50个post-forward控制帧与原预热目标轨迹最大坐标差4.36e-10m。201未刷新派生量样本与旧private-FK样本存在时序差，不将其约0.308mm的表观差误称为场景改变。
 
-已交付99条训练episode首个packed状态的中位数仅作离线比较：上肢14关节RMSE原mode0约0.3534rad、中性mode1约0.2780rad、固定ready约0.1087rad。真实末端肘约0.584/0.625rad、肩roll约0.395/-0.407rad。该分布改善不证明模型抓取成功率改善；尚未GPU评测。
+已交付99条训练episode首个packed状态的中位数仅作离线比较：上肢14关节RMSE原mode0约0.3534rad、中性mode1约0.2780rad、固定ready约0.1087rad。真实末端肘约0.584/0.625rad、肩roll约0.395/-0.407rad。分布误差不是成功率指标，GPU结果见下节。
 
-## 准备好的四例入口（尚未启动）
+## 2026-11-12 GPU四例实测
+
+冻结源码`6a66b4e8021e7ed4e108775cc5dcb43b2eca1174`的5000步、RTC test_time/all/15试测已正常退出，**4/4成功**。按固定顺序L0c06、L0c00、L2c07、L0c04，实际控制步数312、295、418、333；原相同四例为失败、失败、失败、成功，即1/4。每例50 tick预热、总800 tick上限、原生约9cm成功判据保持，真实RTC与送入控制器的动作均核验通过；启动201物理子步无机器人正力接触，4例技术有效。
+
+证据目录`/var/tmp/cvpr-xmove-failure-fix-20261111/`：
+
+- `pilot_ready_upper_v1_001/FINAL_EVALUATION_ACCEPTANCE.json`，SHA256 `662ad3deeb6d21b3c81b1115ae648fe58d7631f8582ed7478ad55eac5287fedb`。
+- `READY_UPPER_PILOT_PAIRED_RESULT.json`与`READY_UPPER_PILOT_EXIT.json`：真实对照、exit0与owned清理证明。
+- `full30_rtcoff_001/FINAL_EVALUATION_ACCEPTANCE.json`：另一个独立实验，RTC关闭18/30（60%），三组各6/10；原RTC13/30。11例改善、6例退步，不能与ready四例混为同一因素。
+
+四例是预先固定的诊断样本，**不是完整30例成绩或独立heldout benchmark**；渲染不保证逐位确定，相同种子在此前重复测试中仍有成功翻转。完整ready30尚未启动；扩展门预先固定为四例全部技术有效且成功至少3/4、真实清理退出。另一个既有XMoveBendPick队列仍活跃且无跨campaign显卡锁，须等它真实全退出再启动，不能利用逐例加载间隙抢GPU。训练、原结果与旧队列保持不变。
+
+本文只补充已完成证据，运行树仍冻结在上述6a66提交，后续完整30例不使用文档分支替换源码。
+
+## 四例复现入口（使用全新输出目录）
 
 新worktree在`/dev/shm/cvpr-xmove-ready-upper-repo`，属于易失tmpfs，重启会丢工作文件；源码commit/push后可从分支恢复。权重、部署缓存、原数据、正运行评测均不在此新树中改写。磁盘保留给原XMoveBend权重回传。
 
@@ -50,4 +64,4 @@
 
 缺省`--ready-protocol four`仍仅允许上述固定四例；它的命令、分母和四例合同保持。显式`--ready-protocol full30`必须同时使用`--diagnostic-cases 0:0,0:1,...,2:9`的原始逐级逐case完整顺序，禁止其他子集、重排或静默补充。完整模式独立合同`cvpr-xmove-pick-ready-upper-v1-thirty-case-diagnostic-v1`、role=`fixed_ready_upper_warmup_full30_diagnostic`，分母30而`source_cases_frozen=30`、`formal_evaluation_eligible=false`、`full_official30_claim=false`、`original_official_initialization=false`。原生scene、5k权重、base seed20261105、RTC test_time/all/15、50/800预算与全部实际指令/接触门完全相同。
 
-完整GPU30必须由独立driver检查同save ready四例技术完成、真实clean exit且达到预先声明的效果门之后，才由用户安排启动；此源码能力不是立即运行授权，本文未运行GPU或声明ready成绩。
+完整GPU30必须由独立driver检查同save ready四例技术完成、真实clean exit且达到预先声明的效果门，并确认既有GPU队列全退出后才启动。四例门已通过，完整30例结果仍须等待真实运行，不把四例4/4外推为全30成功率。

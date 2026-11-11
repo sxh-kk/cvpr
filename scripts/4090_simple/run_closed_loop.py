@@ -30,7 +30,9 @@ TASKS = ("G1WholebodyXMovePickTeleop-v0", "G1WholebodyXMoveBendPickTeleop-v0",
 CARRYBOX_TASK = "G1WholebodyXMoveBendCarryBoxSonic-v0"
 LIFTBOX_TASK = "G1WholebodyLiftBoxHoldSonic-v0"
 MOBILE_PP_TASK = "G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
-SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK, MOBILE_PP_TASK)
+BEND_PICK_TASK = "G1SonicBendPickPico-v0"
+BEND_PICK_SOURCE_TASK = "G1WholebodyBendPickMP-v0"
+SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK, MOBILE_PP_TASK, BEND_PICK_TASK)
 
 
 def simulation_render_contract(raw, args):
@@ -83,11 +85,84 @@ def write_report_and_close(path: Path, result, close):
         close()
 
 
-def episode_reset_options(environment_config, dr_level, *, recorded_handover=False, recorded_mobile=False):
+def episode_reset_options(environment_config, dr_level, *, recorded_handover=False, recorded_mobile=False, recorded_bend=False):
     # SIMPLE DR0 deliberately resamples materials and distractors. A recorded
     # heldout source used dr_level=None to restore every recorded randomizer.
     return {"state_dict": environment_config,
-            "dr_level": None if recorded_handover or recorded_mobile else dr_level}
+            "dr_level": None if recorded_handover or recorded_mobile or recorded_bend else dr_level}
+
+
+def bend_official_protocol(environment_config):
+    """Original reward/time budget on the explicitly declared SONIC adaptation."""
+    metadata = environment_config['metadata']
+    steps = metadata.get('max_episode_steps')
+    if (environment_config.get('uid') != 'g1_wholebody_bend_pick_mp'
+            or metadata.get('physics_dt') != .002 or metadata.get('render_hz') != 50
+            or type(steps) is not int or steps != 400):
+        raise ValueError('BendPick requires native MP metadata with a positive exact step budget')
+    return {'task_id': 'cvpr/'+BEND_PICK_TASK, 'source_task_id': 'simple/'+BEND_PICK_SOURCE_TASK,
+        'max_episode_steps': steps, 'observation_hz': 50, 'maximum_simulated_seconds': steps/50,
+        'reset_dr_level': None, 'source_physics_dt': .002, 'physics_dt': .005,
+        'source_metadata_success_criteria': metadata.get('success_criteria'), 'effective_success_criteria': .9,
+        'source_metadata_split': metadata.get('split'), 'world_translation_m': [0., 0., .405],
+        'success_semantics': 'unchanged original check_success, target lift .1m scale, threshold .9; no contact/hold gate',
+        'initialization': 'saved official scene reset only; no teacher actions/states or PICO physical-state injection',
+        'robot_physics_equivalent': False, 'formal_evaluation_eligible': False}
+
+
+def derive_bend_eval_reset(source_config):
+    """Remove only stale spatial entries that have no real scene actor.
+
+    Official eval L0/L1 carries unused DR keys left by source generation.
+    All actual target/distractor/robot poses remain byte-value identical;
+    the unchanged training adapter still validates the complete derived reset.
+    """
+    source = deepcopy(source_config)
+    bend_official_protocol(source)
+    dr, actors = source['dr_state_dict'], source['layout']['actors']
+    selected = {str(dr['target']['uid']), *map(str, dr['distractors'])}
+    actor_uids = [str(actor['asset']['uid']) for actor in actors.values() if 'asset' in actor]
+    if (source.get('robot_cfg', {}).get('uid') != 'g1_wholebody' or len(dr['distractors']) != 3
+            or len(actor_uids) != 4 or len(set(actor_uids)) != 4 or set(actor_uids) != selected
+            or set(actors) != {'table', 'target', *[name for name in actors if name.startswith('distractor_')]}
+            or 'g1_wholebody' not in dr['spatial'] or 'g1_sonic' in dr['spatial']):
+        raise ValueError('Bend eval reset must preserve the exact selected target, three distractors, table and native robot')
+    keep = selected | {'g1_wholebody'}
+    if not keep <= set(dr['spatial']):
+        raise ValueError('Bend eval is missing an actual actor spatial pose')
+    removed = sorted(set(dr['spatial']) - keep)
+    if any(uid.startswith('g1_') for uid in removed):
+        raise ValueError('An unexpected robot spatial key may not be removed')
+    derived = deepcopy(source)
+    derived['dr_state_dict']['spatial'] = {uid: deepcopy(value) for uid, value in dr['spatial'].items() if uid in keep}
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+        allow_nan=False, default=_json_value).encode()).hexdigest()
+    return derived, {'contract': 'cvpr-bend-pick-official-eval-unused-spatial-reset-derivation-v1',
+        'source_config_sha256': digest(source), 'derived_config_sha256': digest(derived),
+        'removed_unused_spatial_uids': removed,
+        'removed_unused_spatial_entries': {uid: deepcopy(dr['spatial'][uid]) for uid in removed},
+        'preserved_real_spatial_uids': sorted(keep), 'actual_actor_poses_modified': False,
+        'metadata_split_or_dr_level_modified': False, 'reward_or_success_modified': False,
+        'reason': 'Removed only official DR spatial keys absent from every selected real actor; unchanged adapter validation still applies'}
+
+
+def make_bend_environment(sonic_config, source_config, *, sim_mode, sync_observations, isaac_observation_only):
+    from pico_bend_pick_task import adapt_official_config, make_bend_pick_task, install_frame_adapter
+    from simple.envs.sonic_loco_manip import SonicLocoManipEnv
+    import gymnasium as gym
+    protocol = bend_official_protocol(source_config)
+    derived, derivation = derive_bend_eval_reset(source_config)
+    adapted, receipt = adapt_official_config(derived)
+    task = make_bend_pick_task(sonic_config, adapted_config=adapted)
+    env = SonicLocoManipEnv(task=task, sonic_config=sonic_config, sim_mode=sim_mode, headless=True,
+        dr_level=0, sync_mujoco_observations=sync_observations, isaac_observation_only=isaac_observation_only)
+    try:
+        binding = install_frame_adapter(env)
+        env = gym.wrappers.TimeLimit(env, max_episode_steps=protocol['max_episode_steps'])
+    except BaseException:
+        env.close()
+        raise
+    return env, {'adaptation': receipt, 'reset_derivation': derivation, 'frame_binding': binding, 'protocol': protocol}
 
 
 def mobile_official_protocol(environment_config):
@@ -268,6 +343,8 @@ def parse_args():
                         help="Handover only: retain official success flag but continue to the observation time limit")
     parser.add_argument("--mobile-official-protocol", action="store_true",
                         help="Mobile only: original case DR state, native .9 success and exact1200-step TimeLimit")
+    parser.add_argument('--bend-official-protocol', action='store_true',
+                        help='BendPick private SONIC adapter: saved native scene, original reward and metadata TimeLimit')
     parser.add_argument("--sim-mode", choices=("mujoco", "mujoco_isaac", "isaacsim"), default="mujoco")
     parser.add_argument("--compatibility-evidence", type=Path)
     parser.add_argument("--diagnostic-unverified-sonic", action="store_true",
@@ -278,6 +355,14 @@ def parse_args():
                         default="mjcf_limits")
     parser.add_argument("--worker-task", choices=SUPPORTED_TASKS, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if (args.bend_official_protocol != (args.tasks == [BEND_PICK_TASK])
+            or BEND_PICK_TASK in args.tasks and args.tasks != [BEND_PICK_TASK]):
+        parser.error('The private BendPick task requires exactly --bend-official-protocol and no other task')
+    if args.bend_official_protocol and (args.worker_task not in (None, BEND_PICK_TASK)
+            or args.stop_on_fall or args.mobile_official_protocol or args.mobile_initialization_manifest is not None
+            or args.initial_physics_run is not None or args.handover_initialization is not None
+            or not args.sync_observations or not args.isaac_observation_only or args.sim_mode == 'mujoco'):
+        parser.error('BendPick requires synchronized observation-only Isaac, no fall gate or foreign initialization')
     if args.continue_after_task_success and args.tasks != ["G1WholebodyHandoverTeleop-v0"]:
         parser.error("Continuing after official success is only supported for Handover observation")
     if args.mobile_official_protocol and (args.tasks != [MOBILE_PP_TASK] or args.seconds < 24
@@ -414,7 +499,8 @@ def run_worker(args):
         result["server_info"] = server_info
         result["rtc_contract"] = validate_server_info(server_info, args)
         result["initial_metadata_get_requests"] = 2
-        metadata = args.data_root / "eval" / args.worker_task / f"dr-level-{args.dr_level}" / "meta/episodes.jsonl"
+        metadata_task = BEND_PICK_SOURCE_TASK if args.worker_task == BEND_PICK_TASK else args.worker_task
+        metadata = args.data_root / "eval" / metadata_task / f"dr-level-{args.dr_level}" / "meta/episodes.jsonl"
         mobile_initializer = None
         if matched_manifest is not None:
             from mobile_pp_initial_state import load_initialization
@@ -434,14 +520,18 @@ def run_worker(args):
             result["mobile_protocol"] = mobile_official_protocol(first_config)
         config = SimLoopConfig().load_wbc_yaml()
         config["ENV_NAME"] = "simple"
-        config["SIMULATE_DT"] = float(first_config["metadata"]["physics_dt"])
-        if args.worker_task == MOBILE_PP_TASK:
+        config["SIMULATE_DT"] = .005 if args.bend_official_protocol else float(first_config["metadata"]["physics_dt"])
+        if args.worker_task in (MOBILE_PP_TASK, BEND_PICK_TASK):
             config["ENABLE_ELASTIC_BAND"] = False
         mode = "mujoco_isaac" if args.sim_mode == "isaacsim" else args.sim_mode
-        env = gym.make("simple/" + args.worker_task, sonic_config=config, sim_mode=mode,
-                       headless=True, dr_level=args.dr_level,
-                       sync_mujoco_observations=args.sync_observations,
-                       isaac_observation_only=args.isaac_observation_only)
+        if args.bend_official_protocol:
+            env, result['bend_adapter'] = make_bend_environment(config, first_config, sim_mode=mode,
+                sync_observations=args.sync_observations, isaac_observation_only=args.isaac_observation_only)
+        else:
+            env = gym.make("simple/" + args.worker_task, sonic_config=config, sim_mode=mode,
+                           headless=True, dr_level=args.dr_level,
+                           sync_mujoco_observations=args.sync_observations,
+                           isaac_observation_only=args.isaac_observation_only)
         if args.mobile_official_protocol or mobile_initializer is not None:
             env = mobile_time_limit(env)
         raw = env.unwrapped
@@ -483,11 +573,26 @@ def run_worker(args):
                                   "task_adapter": raw.task.metadata["task_adapter"]}
             else:
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
+                bend_source = None
+                if args.bend_official_protocol:
+                    from pico_bend_pick_task import adapt_official_config, bend_pick_environment_binding_receipt
+                    bend_source = deepcopy(env_config)
+                    protocol = bend_official_protocol(bend_source)
+                    if args.seconds < protocol['maximum_simulated_seconds']:
+                        raise ValueError('BendPick wall budget may not shorten the original metadata step budget')
+                    derived, bend_derivation = derive_bend_eval_reset(bend_source)
+                    env_config, bend_receipt = adapt_official_config(derived)
+                    if protocol['max_episode_steps'] != result['bend_adapter']['protocol']['max_episode_steps']:
+                        raise ValueError('One worker must preserve its original BendPick TimeLimit')
                 if args.mobile_official_protocol:
                     protocol = mobile_official_protocol(env_config)
                 obs, info = env.reset(seed=seed, options=episode_reset_options(
                     env_config, args.dr_level, recorded_handover=args.handover_initialization is not None,
-                    recorded_mobile=args.worker_task == MOBILE_PP_TASK))
+                    recorded_mobile=args.worker_task == MOBILE_PP_TASK, recorded_bend=args.bend_official_protocol))
+                if args.bend_official_protocol:
+                    actual_binding = bend_pick_environment_binding_receipt(env_config, raw.task.state_dict())
+                    if actual_binding.get('matched') is not True or raw.task.success_criteria != .9:
+                        raise ValueError('BendPick saved environment binding/native threshold differs')
                 if args.mobile_official_protocol and not math.isclose(float(raw.task.success_criteria), .9):
                     raise ValueError("Actual Mobile native success threshold differs from upstream CLI default .9")
             initial_physics = None
@@ -519,7 +624,12 @@ def run_worker(args):
                 "fell_before_first_policy_command": False,
                 "status": "running", "instruction": raw.task.instruction}
             episode["source_scene_reset_dr_level"] = (None if args.handover_initialization is not None
-                or args.worker_task == MOBILE_PP_TASK else args.dr_level)
+                or args.worker_task == MOBILE_PP_TASK or args.bend_official_protocol else args.dr_level)
+            if args.bend_official_protocol:
+                episode.update(bend_protocol=protocol, bend_source_environment_config=bend_source,
+                    bend_adaptation=bend_receipt, bend_environment_binding=actual_binding,
+                    bend_reset_derivation=bend_derivation,
+                    task_id='cvpr/'+BEND_PICK_TASK)
             if args.mobile_official_protocol or mobile_initial is not None:
                 episode["mobile_protocol"] = protocol
             if mobile_initial is not None:
@@ -605,6 +715,10 @@ def run_worker(args):
                         record.update(next_sim_time_s=float(obs["sim_time_s"]),
                                       decoder_calls_after_step=controller.decoder_calls,
                                       terminated=bool(terminated), truncated=bool(truncated), reward=float(reward))
+                        if args.bend_official_protocol:
+                            record['bend_native_state'] = {'target_xyz_m': list(map(float, info['target'][:3])),
+                                'baseline_target_z_m': float(raw.task._init_target_height),
+                                'native_reward': float(reward), 'native_success': bool(terminated)}
                         if args.worker_task == "G1WholebodyHandoverTeleop-v0":
                             from handover_eval_runtime import measured_task_state
                             record["handover_measured_state"] = measured_task_state(raw)

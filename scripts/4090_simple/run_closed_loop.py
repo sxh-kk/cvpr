@@ -32,7 +32,8 @@ LIFTBOX_TASK = "G1WholebodyLiftBoxHoldSonic-v0"
 MOBILE_PP_TASK = "G1WholebodyLocomotionPickBetweenTablesTeleop-v0"
 BEND_PICK_TASK = "G1SonicBendPickPico-v0"
 BEND_PICK_SOURCE_TASK = "G1WholebodyBendPickMP-v0"
-SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK, MOBILE_PP_TASK, BEND_PICK_TASK)
+PICK_EVAL_TASKS = ("G1SonicXMovePickPico-v0", "G1SonicXMoveBendPickPico-v0")
+SUPPORTED_TASKS = (*TASKS, CARRYBOX_TASK, LIFTBOX_TASK, MOBILE_PP_TASK, BEND_PICK_TASK, *PICK_EVAL_TASKS)
 
 
 def simulation_render_contract(raw, args):
@@ -85,11 +86,11 @@ def write_report_and_close(path: Path, result, close):
         close()
 
 
-def episode_reset_options(environment_config, dr_level, *, recorded_handover=False, recorded_mobile=False, recorded_bend=False):
+def episode_reset_options(environment_config, dr_level, *, recorded_handover=False, recorded_mobile=False, recorded_bend=False, recorded_pick=False):
     # SIMPLE DR0 deliberately resamples materials and distractors. A recorded
     # heldout source used dr_level=None to restore every recorded randomizer.
     return {"state_dict": environment_config,
-            "dr_level": None if recorded_handover or recorded_mobile or recorded_bend else dr_level}
+            "dr_level": None if recorded_handover or recorded_mobile or recorded_bend or recorded_pick else dr_level}
 
 
 def bend_official_protocol(environment_config):
@@ -436,6 +437,9 @@ def parse_args():
                         help="Handover only: retain official success flag but continue to the observation time limit")
     parser.add_argument("--mobile-official-protocol", action="store_true",
                         help="Mobile only: original case DR state, native .9 success and exact1200-step TimeLimit")
+    parser.add_argument('--pick-official-protocol', action='store_true',
+                        help='Moving Pick private task with exact saved scene, native success and800 control ticks')
+    parser.add_argument('--pick-profile', choices=('xmove_pick', 'xmove_bend_pick'))
     parser.add_argument('--bend-official-protocol', action='store_true',
                         help='BendPick private SONIC adapter: saved native scene, original reward and metadata TimeLimit')
     parser.add_argument('--initialization-profile', choices=('official_original', 'stable_support_v1'),
@@ -452,6 +456,19 @@ def parse_args():
                         default="mjcf_limits")
     parser.add_argument("--worker-task", choices=SUPPORTED_TASKS, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    from pick_eval_protocol import profile_spec
+    if args.pick_official_protocol != (args.pick_profile is not None):
+        parser.error('Moving Pick requires both --pick-official-protocol and --pick-profile')
+    if args.pick_official_protocol:
+        pick_task = profile_spec(args.pick_profile)['task']
+        if (args.tasks != [pick_task] or args.worker_task not in (None, pick_task)
+                or args.bend_official_protocol or args.mobile_official_protocol or args.stop_on_fall
+                or args.mobile_initialization_manifest is not None or args.initial_physics_run is not None
+                or args.handover_initialization is not None or not args.sync_observations
+                or not args.isaac_observation_only or args.sim_mode == 'mujoco'):
+            parser.error('Moving Pick requires its sole private task, synchronized observation-only Isaac and no foreign initialization/fall gate')
+    elif any(task in PICK_EVAL_TASKS for task in args.tasks) or args.worker_task in PICK_EVAL_TASKS:
+        parser.error('Private moving Pick tasks require their explicit official profile')
     stable_support = args.initialization_profile == 'stable_support_v1'
     if stable_support != (args.support_geometry_manifest is not None) or (stable_support and not args.bend_official_protocol):
         parser.error('Stable-support initialization requires only BendPick plus --support-geometry-manifest')
@@ -602,6 +619,9 @@ def run_worker(args):
         result["rtc_contract"] = validate_server_info(server_info, args)
         result["initial_metadata_get_requests"] = 2
         metadata_task = BEND_PICK_SOURCE_TASK if args.worker_task == BEND_PICK_TASK else args.worker_task
+        if args.pick_official_protocol:
+            from pick_eval_protocol import profile_spec
+            metadata_task = profile_spec(args.pick_profile)['source_task']
         metadata = args.data_root / "eval" / metadata_task / f"dr-level-{args.dr_level}" / "meta/episodes.jsonl"
         mobile_initializer = None
         if matched_manifest is not None:
@@ -623,11 +643,18 @@ def run_worker(args):
         config = SimLoopConfig().load_wbc_yaml()
         config["ENV_NAME"] = "simple"
         config["SIMULATE_DT"] = .005 if args.bend_official_protocol else float(first_config["metadata"]["physics_dt"])
-        if args.worker_task in (MOBILE_PP_TASK, BEND_PICK_TASK):
+        if args.worker_task in (MOBILE_PP_TASK, BEND_PICK_TASK, *PICK_EVAL_TASKS):
             config["ENABLE_ELASTIC_BAND"] = False
         mode = "mujoco_isaac" if args.sim_mode == "isaacsim" else args.sim_mode
         support_geometry = None
-        if args.bend_official_protocol:
+        if args.pick_official_protocol:
+            from pick_eval_protocol import make_pick_environment, INITIALIZATION_PROFILE
+            result['initialization_profile'] = INITIALIZATION_PROFILE
+            result['pick_profile'] = args.pick_profile
+            env, result['pick_adapter'] = make_pick_environment(config, first_config, args.pick_profile,
+                sim_mode=mode, sync_observations=args.sync_observations,
+                isaac_observation_only=args.isaac_observation_only)
+        elif args.bend_official_protocol:
             if args.initialization_profile == 'stable_support_v1':
                 from bend_support_initialization import load_geometry_manifest
                 support_geometry = load_geometry_manifest(args.support_geometry_manifest, args.data_root)
@@ -682,6 +709,12 @@ def run_worker(args):
             else:
                 env_config, source_episode = load_fixed_episode(metadata, episode_index, args.data_root)
                 bend_source = None
+                if args.pick_official_protocol:
+                    from pick_eval_protocol import prepare_pick_reset, environment_binding_receipt
+                    pick_source = deepcopy(env_config)
+                    env_config, pick_derivation, pick_adaptation, pick_protocol = prepare_pick_reset(pick_source, args.pick_profile)
+                    if args.seconds < pick_protocol['maximum_simulated_seconds']:
+                        raise ValueError('Moving Pick budget may not shorten its native800 control ticks')
                 if args.bend_official_protocol:
                     from pico_bend_pick_task import bend_pick_environment_binding_receipt
                     bend_source = deepcopy(env_config)
@@ -698,7 +731,11 @@ def run_worker(args):
                     protocol = mobile_official_protocol(env_config)
                 obs, info = env.reset(seed=seed, options=episode_reset_options(
                     env_config, args.dr_level, recorded_handover=args.handover_initialization is not None,
-                    recorded_mobile=args.worker_task == MOBILE_PP_TASK, recorded_bend=args.bend_official_protocol))
+                    recorded_mobile=args.worker_task == MOBILE_PP_TASK, recorded_bend=args.bend_official_protocol, recorded_pick=args.pick_official_protocol))
+                if args.pick_official_protocol:
+                    pick_binding = environment_binding_receipt(env_config, raw.task.state_dict(), args.pick_profile)
+                    if pick_binding.get('matched') is not True or raw.task.success_criteria != .9:
+                        raise ValueError('Moving Pick saved scene/native success threshold differs')
                 if args.bend_official_protocol:
                     actual_binding = bend_pick_environment_binding_receipt(env_config, raw.task.state_dict())
                     if actual_binding.get('matched') is not True or raw.task.success_criteria != .9:
@@ -734,7 +771,13 @@ def run_worker(args):
                 "fell_before_first_policy_command": False,
                 "status": "running", "instruction": raw.task.instruction}
             episode["source_scene_reset_dr_level"] = (None if args.handover_initialization is not None
-                or args.worker_task == MOBILE_PP_TASK or args.bend_official_protocol else args.dr_level)
+                or args.worker_task == MOBILE_PP_TASK or args.bend_official_protocol or args.pick_official_protocol else args.dr_level)
+            if args.pick_official_protocol:
+                from pick_eval_protocol import profile_spec, CONTROL_POLICY, INITIALIZATION_PROFILE
+                episode.update(initialization_profile=INITIALIZATION_PROFILE, pick_profile=args.pick_profile, task_id=profile_spec(args.pick_profile)['task_id'],
+                    pick_protocol=pick_protocol, pick_source_environment_config=pick_source,
+                    pick_reset_derivation=pick_derivation, pick_adaptation=pick_adaptation,
+                    pick_environment_binding=pick_binding, evaluation_control_policy=CONTROL_POLICY)
             if args.bend_official_protocol:
                 episode.update(bend_protocol=protocol, bend_source_environment_config=bend_source,
                     bend_adaptation=bend_receipt, bend_environment_binding=actual_binding,
@@ -829,6 +872,10 @@ def run_worker(args):
                         record.update(next_sim_time_s=float(obs["sim_time_s"]),
                                       decoder_calls_after_step=controller.decoder_calls,
                                       terminated=bool(terminated), truncated=bool(truncated), reward=float(reward))
+                        if args.pick_official_protocol:
+                            record['pick_native_state'] = {'target_xyz_m': list(map(float, info['target'][:3])),
+                                'baseline_target_z_m': float(raw.task._init_target_height),
+                                'native_reward': float(reward), 'native_success': bool(terminated)}
                         if args.bend_official_protocol:
                             record['bend_native_state'] = {'target_xyz_m': list(map(float, info['target'][:3])),
                                 'baseline_target_z_m': float(raw.task._init_target_height),
@@ -906,6 +953,9 @@ def run_worker(args):
                 episode["warmup_control"]["actual_warmup_decoder_calls"] = episode.get("warmup_decoder_calls", controller.decoder_calls)
                 episode["body_token_projection"] = deepcopy(agent.projection_receipt)
                 episode["continue_after_official_success"] = args.continue_after_task_success
+                if args.pick_official_protocol:
+                    from pick_eval_protocol import initialization_receipt
+                    episode['pick_initialization_safety'] = initialization_receipt(raw)
                 if args.bend_official_protocol and support_geometry is not None:
                     episode['bend_initialization_safety'] = raw._bend_initialization_monitor.receipt()
                 episode["strategy_quality_assessment"] = (

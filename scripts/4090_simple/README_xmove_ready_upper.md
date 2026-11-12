@@ -31,9 +31,17 @@
 - `READY_UPPER_PILOT_PAIRED_RESULT.json`与`READY_UPPER_PILOT_EXIT.json`：真实对照、exit0与owned清理证明。
 - `full30_rtcoff_001/FINAL_EVALUATION_ACCEPTANCE.json`：另一个独立实验，RTC关闭18/30（60%），三组各6/10；原RTC13/30。11例改善、6例退步，不能与ready四例混为同一因素。
 
-四例是预先固定的诊断样本，**不是完整30例成绩或独立heldout benchmark**；渲染不保证逐位确定，相同种子在此前重复测试中仍有成功翻转。完整ready30尚未启动；扩展门预先固定为四例全部技术有效且成功至少3/4、真实清理退出。另一个既有XMoveBendPick队列仍活跃且无跨campaign显卡锁，须等它真实全退出再启动，不能利用逐例加载间隙抢GPU。训练、原结果与旧队列保持不变。
+四例是预先固定的诊断样本，**不是完整30例成绩或独立heldout benchmark**；渲染不保证逐位确定，相同种子在此前重复测试中仍有成功翻转。扩展门预先固定为四例全部技术有效且成功至少3/4、真实清理退出。一次性待机程序随后等待既有XMoveBendPick队列真实完成并清理后，才自动启动完整30例；没有利用逐例加载间隙抢GPU，没有改动训练、原结果或旧队列。
 
-本文只补充已完成证据，运行树仍冻结在上述6a66提交，后续完整30例不使用文档分支替换源码。
+## 2026-11-12 完整30例实测
+
+完整复测于北京时间05:03:08正常完成：**21/30（70%），L0/L1/L2各7/10**。原5000步RTC基线为13/30（43.3%），本轮多成功8例；仍有9例失败，不能宣称已解决全部失败。权重、原30个scene、seed、RTC test_time/all/15、50预热/800总预算和原生成功阈值均固定，变更仅为上述整体预热协议，仍明确`original_official_initialization=false`。
+
+这30例中，先前试测的四例本轮仅2/4成功：L0c06与L2c07成功，L0c00与L0c04失败。因此先前四例4/4没有被这次完整复测逐例复现，不能将试测成绩作为稳定成功率。全30相对原RTC有11例改善、3例退步，净增8例；重复波动及整体预热的多个变化仍需分别看待。
+
+30例全部技术有效，实际490次RTC、初始化机器人与目标接触总数0、30份视频齐全。campaign、driver和待机程序真实exit0且owned清理通过。独立证据目录同上：`full30_ready_upper_v1_001/FINAL_EVALUATION_ACCEPTANCE.json`（SHA256 `a2963342032c11e85a03f2c730a8bbd8f27d0db752a0662787259ef4c0340918`）、`READY_UPPER_FULL30_PAIRED_RESULT.json`、`READY_UPPER_FULL30_EXIT.json`、`READY_UPPER_FULL30_WAIT_EXIT.json`。这是修改预热后的固定30场景单轮诊断，不与原初始化或独立heldout benchmark混报，也不将四例4/4外推到全量。
+
+本文只补充已完成证据，运行树仍冻结在上述6a66提交，完整30例也没有使用文档分支替换源码。
 
 ## 四例复现入口（使用全新输出目录）
 
@@ -62,8 +70,8 @@
 
 缺省`--pick-warmup-profile native`不导入新helper、不增加planner依赖，旧任务、旧RTC和原场景路径保持不变。无自动重试，不删除旧结果，不启动或停止其他队列。
 
-## 预备完整30例能力（未启动）
+## 完整30例协议
 
 缺省`--ready-protocol four`仍仅允许上述固定四例；它的命令、分母和四例合同保持。显式`--ready-protocol full30`必须同时使用`--diagnostic-cases 0:0,0:1,...,2:9`的原始逐级逐case完整顺序，禁止其他子集、重排或静默补充。完整模式独立合同`cvpr-xmove-pick-ready-upper-v1-thirty-case-diagnostic-v1`、role=`fixed_ready_upper_warmup_full30_diagnostic`，分母30而`source_cases_frozen=30`、`formal_evaluation_eligible=false`、`full_official30_claim=false`、`original_official_initialization=false`。原生scene、5k权重、base seed20261105、RTC test_time/all/15、50/800预算与全部实际指令/接触门完全相同。
 
-完整GPU30必须由独立driver检查同save ready四例技术完成、真实clean exit且达到预先声明的效果门，并确认既有GPU队列全退出后才启动。四例门已通过，完整30例结果仍须等待真实运行，不把四例4/4外推为全30成功率。
+完整GPU30由独立driver检查同save ready四例技术完成、真实clean exit且达到预先声明的效果门，并确认既有GPU队列全退出后才启动。本轮已按此顺序实际完成，复现仍须使用新输出目录且遵守相同资源与证据门。

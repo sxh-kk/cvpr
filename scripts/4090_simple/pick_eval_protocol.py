@@ -25,6 +25,11 @@ TASKS = tuple(spec['task'] for spec in PROFILES.values())
 INITIALIZATION_CONTRACT = 'cvpr-pick-official-startup-passive-verification-v1'
 INITIALIZATION_PROFILE = 'native_saved_scene_observed_v1'
 CONTROL_POLICY = 'learned_body64_fingers14_closed_loop_no_joystick_or_scripted_navigation'
+NATIVE_BUDGET_PROFILE = 'native_16s'
+EXTENDED_BUDGET_PROFILE = 'xmove_bend_failed7_24s'
+EXTENDED_BUDGET_CONTRACT = 'cvpr-xmove-bend-pick-failed7-24s-diagnostic-v1'
+EXTENDED_BUDGET_ROLE = 'fixed_failed7_extended_time_budget_diagnostic'
+EXTENDED_BUDGET_CASES = ((0,5),(1,6),(1,7),(1,8),(2,0),(2,4),(2,9))
 
 
 def require(condition, message):
@@ -85,6 +90,38 @@ def pick_official_protocol(source, profile):
         'robot_physics_equivalent': False, 'formal_evaluation_eligible': False}
 
 
+
+def pick_evaluation_protocol(source, profile, budget_profile=NATIVE_BUDGET_PROFILE):
+    """Native bytes remain intact; a separately named diagnostic changes only time."""
+    require(budget_profile in (NATIVE_BUDGET_PROFILE, EXTENDED_BUDGET_PROFILE), 'Unknown Pick budget profile')
+    native = pick_official_protocol(source, profile)
+    if budget_profile == NATIVE_BUDGET_PROFILE:
+        return native
+    require(profile == 'xmove_bend_pick', '24s diagnostic budget is only for XMoveBendPick')
+    return dict(native, max_episode_steps=1200, maximum_simulated_seconds=24.,
+        budget_profile=EXTENDED_BUDGET_PROFILE, diagnostic_contract=EXTENDED_BUDGET_CONTRACT,
+        diagnostic_role=EXTENDED_BUDGET_ROLE, native_max_episode_steps=800,
+        native_maximum_simulated_seconds=16., additional_control_ticks=400,
+        warmup_control_ticks=50, original_official_time_budget=False, official_budget_modified=True,
+        source_metadata_modified=False, scene_or_reward_or_success_modified=False,
+        budget_override_scope='Explicit fixed failed7 diagnostic only;1200 real control ticks include original50 warmup; no full30 result claim')
+
+
+def extended_budget_runtime_receipt(env, protocol, supervisor_seconds):
+    """Read the real outer TimeLimit, not merely a requested --seconds value."""
+    require(protocol.get('budget_profile') == EXTENDED_BUDGET_PROFILE and
+        protocol.get('profile') == 'xmove_bend_pick' and protocol.get('max_episode_steps') == 1200 and
+        protocol.get('maximum_simulated_seconds') == supervisor_seconds == 24., 'Wrong explicit24s protocol/cutoff')
+    maximum, elapsed = env._max_episode_steps, env._elapsed_steps
+    require(type(maximum) is int and maximum == 1200 and type(elapsed) is int and 0 <= elapsed <= maximum,
+        'Actual environment TimeLimit is not the diagnostic1200 control ticks')
+    return {'budget_profile': EXTENDED_BUDGET_PROFILE, 'native_max_episode_steps': 800,
+        'native_maximum_simulated_seconds': 16., 'environment_time_limit_steps': maximum,
+        'supervisor_cutoff_seconds': supervisor_seconds, 'actual_environment_elapsed_control_ticks': elapsed,
+        'warmup_control_ticks': 50, 'original_official_time_budget': False, 'official_budget_modified': True,
+        'scene_or_reward_or_success_modified': False}
+
+
 def derive_pick_eval_reset(source, profile):
     """Reversible serialization compatibility only, without moving any actor."""
     pick_official_protocol(source, profile)
@@ -141,8 +178,8 @@ def adapt_pick_config(derived, profile):
     return _adapter(profile).adapt_official_config(derived)
 
 
-def prepare_pick_reset(source, profile):
-    protocol = pick_official_protocol(source, profile)
+def prepare_pick_reset(source, profile, budget_profile=NATIVE_BUDGET_PROFILE):
+    protocol = pick_evaluation_protocol(source, profile, budget_profile)
     derived, derivation = derive_pick_eval_reset(source, profile)
     adapted, adaptation = adapt_pick_config(derived, profile)
     return adapted, derivation, adaptation, protocol
@@ -224,16 +261,17 @@ def initialization_receipt(raw):
     return receipt
 
 
-def make_pick_environment(sonic_config, source, profile, *, sim_mode, sync_observations, isaac_observation_only):
+def make_pick_environment(sonic_config, source, profile, *, sim_mode, sync_observations, isaac_observation_only,
+        budget_profile=NATIVE_BUDGET_PROFILE):
     from simple.envs.sonic_loco_manip import SonicLocoManipEnv
     import gymnasium as gym
-    adapted, derivation, adaptation, protocol = prepare_pick_reset(source, profile)
+    adapted, derivation, adaptation, protocol = prepare_pick_reset(source, profile, budget_profile)
     task = getattr(_adapter(profile), profile_spec(profile)['factory'])(sonic_config, adapted_config=adapted)
     env = SonicLocoManipEnv(task=task, sonic_config=sonic_config, sim_mode=sim_mode, headless=True,
         dr_level=0, sync_mujoco_observations=sync_observations, isaac_observation_only=isaac_observation_only)
     try:
         install_pick_initialization_monitor(env, profile)
-        env = gym.wrappers.TimeLimit(env, max_episode_steps=800)
+        env = gym.wrappers.TimeLimit(env, max_episode_steps=protocol['max_episode_steps'])
     except BaseException:
         env.close()
         raise

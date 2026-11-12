@@ -594,3 +594,7 @@ BendPick5000 官方固定30例的独立部署与RTC评测见 [BendPick评测说�
 全部30任务CPU构造恢复检查、失败attempt保留及当前003入口以专门文档和实际状态凭据为准。
 
 - [XMovePick固定上肢准备姿态独立四例诊断](README_xmove_ready_upper.md)：`ready_upper_v1`显式可选，原生scene与原50tick预算保持，预热参考已变，结果独立记账；默认路径不启用。
+
+### XMoveBendPick 固定失败七例24秒诊断
+
+独立预算、严格七例入口和结果解释见[README_xmovebend_24s.md](README_xmovebend_24s.md)。默认16秒与ready模式不变；加时结果分母仅7，不与原23条合并称实测全30。

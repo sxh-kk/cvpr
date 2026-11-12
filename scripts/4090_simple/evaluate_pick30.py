@@ -25,7 +25,9 @@ from urllib.request import build_opener, ProxyHandler
 
 import evaluate_mobile_pp30 as common
 from run_closed_loop import _json_value
-from pick_eval_protocol import profile_spec, pick_official_protocol, derive_pick_eval_reset, adapt_pick_config
+from pick_eval_protocol import (profile_spec, pick_official_protocol, pick_evaluation_protocol,
+    derive_pick_eval_reset, adapt_pick_config, NATIVE_BUDGET_PROFILE, EXTENDED_BUDGET_PROFILE,
+    EXTENDED_BUDGET_CONTRACT, EXTENDED_BUDGET_ROLE, EXTENDED_BUDGET_CASES)
 REPO = Path(__file__).resolve().parents[2]
 CONTRACT = 'cvpr-pick-fixed-official30-sonic-rtc-diagnostic-v1'
 DIAGNOSTIC_CONTRACT = 'cvpr-pick-explicit-cases-rtc-single-factor-pilot-v1'
@@ -93,7 +95,13 @@ def ready_upper(args):
     return getattr(args, 'pick_warmup_profile', 'native') == 'ready_upper_v1'
 
 
+def extended_time(args):
+    return getattr(args,'pick_budget_profile',NATIVE_BUDGET_PROFILE)==EXTENDED_BUDGET_PROFILE
+
+
 def evaluation_policy(args):
+    require(getattr(args,'pick_budget_profile',NATIVE_BUDGET_PROFILE) in (NATIVE_BUDGET_PROFILE,EXTENDED_BUDGET_PROFILE),
+        'Unknown Pick diagnostic time budget')
     diagnostic=diagnostic_pairs(args) is not None
     protocol=getattr(args,'ready_protocol','four')
     require(protocol in ('four','full30') and (ready_upper(args) or protocol=='four'),
@@ -118,6 +126,12 @@ def evaluation_policy(args):
             and policy['rtc_mode']=='test_time' and scope=='all'
             and getattr(args,'pick_interaction_diagnostics',False),
             'ready_upper_v1 requires its explicit four-case or ordered complete30 protocol, XMovePick5000/base20261105/test_time/all/15 and interactions')
+    if extended_time(args):
+        require(diagnostic_pairs(args)==EXTENDED_BUDGET_CASES and getattr(args,'profile',None)=='xmove_bend_pick'
+            and getattr(args,'checkpoint_step',None)==5000 and getattr(args,'sampling_seed',None)==20261105
+            and policy['rtc_mode']=='test_time' and scope=='all' and not ready_upper(args)
+            and getattr(args,'ready_planner_model',None) is None,
+            '24s requires exactly the ordered failed7 XMoveBendPick5000/base20261105/test_time/all/15/native-warmup diagnostic')
     policy.update(rtc_guidance_action_scope=scope,guided_action_dimensions=78 if scope=='validated_repack' else 80)
     require(diagnostic or policy['rtc_mode']=='test_time',
         'Full30 production requires test_time RTC; off is only an explicit diagnostic case pilot')
@@ -133,6 +147,7 @@ def execution_cases(frozen):
             'Full30 source cannot silently select a pilot subset')
         return frozen['cases']
     require((frozen.get('contract')==DIAGNOSTIC_CONTRACT and frozen.get('experiment_role')=='same_seed_rtc_single_factor_pilot'
+        or (frozen.get('contract'),frozen.get('experiment_role')) == (EXTENDED_BUDGET_CONTRACT,EXTENDED_BUDGET_ROLE)
         or (frozen.get('contract'),frozen.get('experiment_role')) in ((READY_UPPER_CONTRACT,READY_UPPER_ROLE),(READY_UPPER30_CONTRACT,READY_UPPER30_ROLE))
         and frozen.get('warmup_profile')=='ready_upper_v1' and frozen.get('original_official_initialization') is False
         and frozen.get('native_saved_scene_initialization_preserved') is True)
@@ -151,9 +166,49 @@ def execution_cases(frozen):
         require(tuple((c['level'],c['case_index']) for c in result)==(READY_UPPER_ALL_CASES if full else READY_UPPER_CASES)
             and frozen.get('ready_protocol','four')==('full30' if full else 'four'),
             'Ready diagnostic case order/protocol cannot be cherry-picked or silently expanded')
+    if frozen.get('contract')==EXTENDED_BUDGET_CONTRACT:
+        validate_extended_scope(frozen)
+        require(tuple((c['level'],c['case_index']) for c in result)==EXTENDED_BUDGET_CASES,
+            '24s diagnostic may not cherry-pick or reorder the fixed failed7')
     require(type(frozen.get('evaluation_denominator')) is int and frozen['evaluation_denominator']==len(result)
         and frozen.get('planned_cases')==len(result),'Pilot denominator differs from explicit selection')
     return result
+
+
+
+def validate_extended_scope(frozen):
+    require(frozen.get('contract')==EXTENDED_BUDGET_CONTRACT and frozen.get('experiment_role')==EXTENDED_BUDGET_ROLE
+        and frozen.get('pick_budget_profile')==EXTENDED_BUDGET_PROFILE and frozen.get('profile')=='xmove_bend_pick'
+        and frozen.get('checkpoint_step')==5000 and frozen.get('maximum_steps_including_warmup')==1200
+        and frozen.get('maximum_simulated_seconds')==24. and frozen.get('native_maximum_steps_including_warmup')==800
+        and frozen.get('native_maximum_simulated_seconds')==16. and frozen.get('warmup_control_ticks')==50
+        and frozen.get('original_official_time_budget') is False and frozen.get('official_budget_modified') is True
+        and frozen.get('original_official_initialization') is True
+        and frozen.get('full_official30_claim') is False and frozen.get('formal_evaluation_eligible') is False
+        and frozen.get('source_cases_frozen')==30 and frozen.get('evaluation_denominator')==frozen.get('planned_cases')==7
+        and frozen.get('effective_native_success_criteria')==.9 and frozen.get('warmup_profile','native')=='native',
+        '24s diagnostic identity, original scene, budget or denominator differs')
+    selected=frozen.get('diagnostic_selected_cases',[])
+    require(tuple((c['level'],c['case_index'])for c in selected)==EXTENDED_BUDGET_CASES
+        and all(c.get('sampling_seed')==20261105+10*c['level']+c['case_index']for c in selected),
+        '24s diagnostic cases/seeds differ')
+    policy=frozen.get('evaluation_policy',{})
+    require(policy.get('rtc_mode')=='test_time' and policy.get('rtc_guidance_action_scope')=='all'
+        and policy.get('execute_steps')==15 and policy.get('control_ticks_per_window')==25,
+        '24s diagnostic changed the original RTC/action window')
+
+
+def extended_outcome(ticks):
+    successes=[(i,t)for i,t in enumerate(ticks)if t['terminated']]
+    require(len(successes)<=1,'24s diagnostic continued after native success')
+    first=(successes[0][1]['next_sim_time_s']-ticks[0]['sim_time_s'])if successes else None
+    if first is not None:
+        close_number(first,(successes[0][0]+1)*.02,'First actual native success clock differs')
+        label='native_success_within_original_16s' if successes[0][0]+1<=800 else 'native_success_during_extra_8s'
+    else:label='no_native_success_by_24s'
+    return {'extended_budget_outcome':label,'first_native_success_elapsed_s':first,
+        'first_native_success_control_tick':successes[0][0]+1 if successes else None,
+        'extra_8s_causal_gain_claim':False}
 
 
 def all_guidance_proof():
@@ -322,7 +377,7 @@ def freeze_inputs(args):
         for row in sorted(rows, key=lambda value: value['episode_index']):
             original = json.loads(row['environment_config'])
             native = remap_episode_paths(original, args.data_root)
-            protocol = pick_official_protocol(native, profile)
+            protocol = pick_evaluation_protocol(native, profile, getattr(args,'pick_budget_profile',NATIVE_BUDGET_PROFILE))
             derived, derivation = derive_pick_eval_reset(native, profile)
             adapted, adaptation = adapt_pick_config(derived, profile)
             cases.append({'level': level, 'case_index': row['episode_index'], 'flat_index': level*10+row['episode_index'],
@@ -364,6 +419,13 @@ def freeze_inputs(args):
         for case in cases:
             case.update(warmup_profile='ready_upper_v1',original_official_initialization=False,
                 native_saved_scene_initialization_preserved=True,warmup_protocol_modified=True)
+    if extended_time(args):
+        frozen.update(contract=EXTENDED_BUDGET_CONTRACT,experiment_role=EXTENDED_BUDGET_ROLE,
+            pick_budget_profile=EXTENDED_BUDGET_PROFILE,maximum_steps_including_warmup=1200,maximum_simulated_seconds=24.,
+            native_maximum_steps_including_warmup=800,native_maximum_simulated_seconds=16.,warmup_control_ticks=50,
+            original_official_time_budget=False,official_budget_modified=True,full_official30_claim=False,
+            boundary=BOUNDARY+'; fixed failed7 rerun with explicit24s total budget, not a measured30 result or proof that extra8s caused success')
+        for case in cases:case['pick_budget_profile']=EXTENDED_BUDGET_PROFILE
     execution_cases(frozen)
     return frozen
 
@@ -386,6 +448,7 @@ def commands(args, case, directory):
         '--diagnostic-unverified-sonic', '--pd-profile', 'official_v1_1_ankle_pitch_1_5', '--hand-torque-profile', 'mjcf_limits',
         '--warmup-control', 'live_pose_sonic_v1_1', '--warmup-hand-policy', 'measured', '--body-token-projection', 'none',
         '--video', '--worker-wall-timeout', '1800', '--worker-task', task]
+    if extended_time(args):simulator.extend(['--pick-budget-profile',EXTENDED_BUDGET_PROFILE])
     if getattr(args,'pick_interaction_diagnostics',False):simulator.append('--pick-interaction-diagnostics')
     if ready_upper(args):simulator.extend(['--pick-warmup-profile','ready_upper_v1',
         '--pick-ready-planner-model',str(args.ready_planner_model)])
@@ -500,7 +563,7 @@ def validate_pick_identity(result, episode, case, frozen):
     spec = profile_spec(frozen['profile'])
     require(any(item['level']==case['level'] and item['case_index']==case['case_index'] for item in execution_cases(frozen)),
         'Case was not selected by this campaign')
-    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
+    require(frozen.get('contract') in (CONTRACT,DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT,EXTENDED_BUDGET_CONTRACT) and frozen.get('task_id') == spec['task_id'] and
         frozen.get('source_task_id') == spec['source_task_id'] and case.get('profile') == frozen['profile'] and
         case.get('task_id') == spec['task_id'] and case.get('source_task_id') == spec['source_task_id'],
         'Pick frozen profile/task identity differs')
@@ -756,7 +819,9 @@ def validate_case(directory, case, frozen):
                 "Actual simulator environment source differs from frozen source")
     episode_dir = base / f"episode-{case['case_index']}"
     ticks = json_lines(episode_dir / "trace.jsonl")
-    require(0 < len(ticks) <= 800 and len(ticks) == episode["frames"] == episode["warmup_frames"] + episode["policy_frames"],
+    maximum_steps = 1200 if frozen.get('contract')==EXTENDED_BUDGET_CONTRACT else 800
+    require(protocol['max_episode_steps']==maximum_steps, 'Wrong effective Pick TimeLimit protocol')
+    require(0 < len(ticks) <= maximum_steps and len(ticks) == episode["frames"] == episode["warmup_frames"] + episode["policy_frames"],
             "Incomplete tick ledger")
     require(episode["warmup_frames"] == min(len(ticks), 50), "Causal warmup was removed or extended beyond the official budget")
     require(all(type(tick["terminated"]) is bool and type(tick["truncated"]) is bool for tick in ticks), "Native flags are not bool")
@@ -773,8 +838,20 @@ def validate_case(directory, case, frozen):
     native = ticks[-1]["terminated"]
     require(native == episode["task_success_observed"] and (episode["status"] == "task_terminated") == native, "Native success mismatch")
     if not native:
-        require(episode["status"] == "env_truncated" and len(ticks) == 800 and ticks[-1]["truncated"], "Unsuccessful case lacks full official budget")
+        require(episode["status"] == "env_truncated" and len(ticks) == maximum_steps and ticks[-1]["truncated"], "Unsuccessful case lacks full official budget")
     close_number(episode["simulated_seconds"], len(ticks) * .02, "Wrong total time including warmup")
+    if frozen.get('contract')==EXTENDED_BUDGET_CONTRACT:
+        validate_extended_scope(frozen)
+        require((case['level'],case['case_index']) in EXTENDED_BUDGET_CASES and
+            case.get('pick_budget_profile')==EXTENDED_BUDGET_PROFILE,'Actual24s case is outside fixed failed7')
+        expected={'budget_profile':EXTENDED_BUDGET_PROFILE,'native_max_episode_steps':800,
+            'native_maximum_simulated_seconds':16.,'environment_time_limit_steps':1200,'supervisor_cutoff_seconds':24.,
+            'actual_environment_elapsed_control_ticks':len(ticks),'warmup_control_ticks':50,
+            'original_official_time_budget':False,'official_budget_modified':True,'scene_or_reward_or_success_modified':False}
+        require(result.get('pick_budget_profile')==EXTENDED_BUDGET_PROFILE and episode.get('pick_extended_budget')==expected
+            and protocol.get('budget_profile')==EXTENDED_BUDGET_PROFILE and protocol.get('native_max_episode_steps')==800
+            and protocol.get('maximum_simulated_seconds')==24. and protocol.get('source_metadata_modified') is False,
+            'Actual environment1200 TimeLimit/supervisor24/unchanged native source proof differs')
     # Native success even during warmup is retained; policy execution is not an extra success gate.
     requests = json_lines(directory / "server/requests.jsonl")
     http = read(episode_dir / "http.json")
@@ -837,6 +914,9 @@ def validate_case(directory, case, frozen):
             'pick_initialization_safety': episode['pick_initialization_safety'],
             'interaction_observation_acceptance':interaction,
             'pick_interaction_observer':episode.get('pick_interaction_observer'),
+            **(dict(extended_outcome(ticks),pick_budget_profile=EXTENDED_BUDGET_PROFILE,
+                original_official_time_budget=False,official_budget_modified=True,maximum_steps_including_warmup=1200,maximum_simulated_seconds=24.,
+                pick_extended_budget=episode['pick_extended_budget']) if frozen.get('contract')==EXTENDED_BUDGET_CONTRACT else {}),
             **({'warmup_profile':'ready_upper_v1','ready_upper_acceptance':ready_acceptance,
                 'native_saved_scene_initialization_preserved':True,'warmup_protocol_modified':True}
                if ready_acceptance is not None else {})}
@@ -921,7 +1001,7 @@ def finish_diagnostic(state):
     require(expected and len(expected)==len(set(expected)) and all(0<=a<=2 and 0<=b<=9 for a,b in expected),
         'Diagnostic final state has no valid unique explicit selection')
     require(state.get('planned_cases')==state.get('evaluation_denominator')==len(expected) and
-        state.get('full_official30_claim') is False and state.get('experiment_role') in ('same_seed_rtc_single_factor_pilot',READY_UPPER_ROLE,READY_UPPER30_ROLE),
+        state.get('full_official30_claim') is False and state.get('experiment_role') in ('same_seed_rtc_single_factor_pilot',READY_UPPER_ROLE,READY_UPPER30_ROLE,EXTENDED_BUDGET_ROLE),
         'Diagnostic final denominator/role differs')
     if state.get('contract') in (READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT):
         full=state['contract']==READY_UPPER30_CONTRACT
@@ -929,6 +1009,8 @@ def finish_diagnostic(state):
             and state.get('ready_protocol','four')==('full30' if full else 'four')
             and state.get('experiment_role')==(READY_UPPER30_ROLE if full else READY_UPPER_ROLE),
             'Ready final4/30 denominator/order/role differs from its explicit protocol')
+    if state.get('contract')==EXTENDED_BUDGET_CONTRACT:
+        validate_extended_scope(state)
     rows=state['cases'];complete=[row for row in rows if row.get('status')=='complete' and type(row.get('native_success')) is bool]
     actual=[(row['level'],row['case_index']) for row in rows]
     full=(actual==expected and len(complete)==len(expected) and
@@ -947,7 +1029,20 @@ def finish_diagnostic(state):
 
 def finish(state):
     """Keep all30 native outcomes; initialization warnings do not filter cases."""
-    code=finish_diagnostic(state) if state.get('contract') in (DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT) else common.finish(state)
+    code=finish_diagnostic(state) if state.get('contract') in (DIAGNOSTIC_CONTRACT,READY_UPPER_CONTRACT,READY_UPPER30_CONTRACT,EXTENDED_BUDGET_CONTRACT) else common.finish(state)
+    if state.get('contract')==EXTENDED_BUDGET_CONTRACT:
+        complete=[row for row in state['cases'] if row.get('status')=='complete']
+        for row in complete:
+            label=row.get('extended_budget_outcome');first=row.get('first_native_success_elapsed_s')
+            expected=('native_success_within_original_16s' if row['ticks']<=800 else 'native_success_during_extra_8s') if row['native_success'] else 'no_native_success_by_24s'
+            require(label==expected and row.get('first_native_success_control_tick')==(row['ticks'] if row['native_success'] else None),
+                '24s native outcome classification differs from the actual first terminal')
+            if row['native_success']:close_number(first,row['ticks']*.02,'24s first native success time differs')
+            else:require(first is None and row['ticks']==1200,'24s failure lacks full1200 ticks')
+        state.update(within_original_16s_successes=sum(row.get('extended_budget_outcome')=='native_success_within_original_16s'for row in complete),
+            extra_8s_successes=sum(row.get('extended_budget_outcome')=='native_success_during_extra_8s'for row in complete),
+            no_native_success_by_24s=sum(row.get('extended_budget_outcome')=='no_native_success_by_24s'for row in complete),
+            extra_8s_causal_gain_claim=False,can_combine_with_original23_as_measured30=False)
     state['initialization_profile']=INITIALIZATION_PROFILE
     warnings=[{'level':row['level'],'case_index':row['case_index'],
         'warnings':list(row['initialization_warnings'])} for row in state['cases'] if row.get('initialization_warnings')]
@@ -971,6 +1066,8 @@ def main(argv=None):
         help="Explicit pilot only, e.g.0:6,0:0,2:7,0:4; independent contract/denominator, not a full30 result")
     parser.add_argument("--rtc-guidance-action-scope",choices=("all","validated_repack"),default="all")
     parser.add_argument("--pick-interaction-diagnostics",action="store_true")
+    parser.add_argument('--pick-budget-profile',choices=(NATIVE_BUDGET_PROFILE,EXTENDED_BUDGET_PROFILE),default=NATIVE_BUDGET_PROFILE,
+        help='Explicit fixed failed7 XMoveBendPick5000 rerun at1200 total ticks/24s; source default remains800/16s')
     parser.add_argument('--pick-warmup-profile',choices=('native','ready_upper_v1'),default='native')
     parser.add_argument('--ready-planner-model',type=Path)
     parser.add_argument('--ready-protocol',choices=('four','full30'),default='four',
@@ -1003,6 +1100,11 @@ def main(argv=None):
     if ready_upper(args):
         state.update(warmup_profile='ready_upper_v1',ready_protocol=frozen['ready_protocol'],native_saved_scene_initialization_preserved=True,
             warmup_protocol_modified=True)
+    if extended_time(args):
+        for key in ('pick_budget_profile','maximum_steps_including_warmup','maximum_simulated_seconds',
+                'native_maximum_steps_including_warmup','native_maximum_simulated_seconds','warmup_control_ticks',
+                'original_official_time_budget','official_budget_modified','effective_native_success_criteria'):
+            state[key]=frozen[key]
     write(args.output / "state.json", state)
     try:
         for case in execution_cases(frozen):

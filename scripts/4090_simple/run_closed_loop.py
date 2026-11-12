@@ -385,6 +385,8 @@ def validate_server_info(server_info, args):
         raise ValueError(f"Actual service RTC configuration differs: expected={expected}, actual={actual}")
     if getattr(args,'pick_warmup_profile','native')=='ready_upper_v1' and server_info.get('rtc_guidance_action_scope')!='all':
         raise ValueError('ready_upper_v1 requires actual legacy all80 RTC guidance; do not mix a guidance-mask change')
+    if getattr(args,'pick_budget_profile','native_16s')=='xmove_bend_failed7_24s' and server_info.get('rtc_guidance_action_scope')!='all':
+        raise ValueError('24s diagnostic requires actual original all80 RTC guidance')
     return {"status": "passed", "requested": expected, "actual": actual,
             "action_exec_horizon": args.execute_steps, "action_chunk_size": 30,
             "synchronization": "synchronous HTTP pauses simulation; no asynchronous latency compensation claim"}
@@ -446,6 +448,8 @@ def parse_args():
     parser.add_argument('--pick-official-protocol', action='store_true',
                         help='Moving Pick private task with exact saved scene, native success and800 control ticks')
     parser.add_argument('--pick-profile', choices=('xmove_pick', 'xmove_bend_pick'))
+    parser.add_argument('--pick-budget-profile', choices=('native_16s','xmove_bend_failed7_24s'), default='native_16s',
+                        help='Explicit XMoveBendPick failed7 diagnostic only:1200 total control ticks/24s including50 warmup')
     parser.add_argument('--pick-interaction-diagnostics', action='store_true',
                         help='Read solved200Hz contacts and actual sent actions; no physical intervention')
     parser.add_argument('--bend-official-protocol', action='store_true',
@@ -493,6 +497,17 @@ def parse_args():
                 or args.pig_mask_schedule != 'exponential' or args.pig_guidance_alpha != .9):
             parser.error('ready_upper_v1 is an explicit XMovePick5000 test_time/15-action diagnostic with all physical contacts recorded')
         args.pick_ready_planner_model = args.pick_ready_planner_model.resolve(strict=True)
+    if args.pick_budget_profile == 'xmove_bend_failed7_24s':
+        from pick_eval_protocol import EXTENDED_BUDGET_CASES
+        if (not args.pick_official_protocol or args.pick_profile != 'xmove_bend_pick'
+                or args.seconds != 24. or args.seed != 0 or args.episodes_per_task != 1 or (args.dr_level,args.episode_start) not in EXTENDED_BUDGET_CASES
+                or args.pick_warmup_profile != 'native' or args.expected_checkpoint_step != 5000
+                or args.warmup_control != 'live_pose_sonic_v1_1' or args.warmup_hand_policy != 'measured'
+                or args.rtc_mode != 'test_time' or args.execute_steps != 15 or args.body_token_projection != 'none'
+                or args.pd_profile != 'official_v1_1_ankle_pitch_1_5' or args.hand_torque_profile != 'mjcf_limits'
+                or args.rtc_inference_delay != 0 or args.min_exec_horizon not in (None,15)
+                or args.pig_mask_schedule != 'exponential' or args.pig_guidance_alpha != .9):
+            parser.error('24s requires only the fixed failed7 XMoveBendPick5000 native warmup/test_time/15-action diagnostic')
     stable_support = args.initialization_profile == 'stable_support_v1'
     if stable_support != (args.support_geometry_manifest is not None) or (stable_support and not args.bend_official_protocol):
         parser.error('Stable-support initialization requires only BendPick plus --support-geometry-manifest')
@@ -677,7 +692,7 @@ def run_worker(args):
             result['pick_profile'] = args.pick_profile
             env, result['pick_adapter'] = make_pick_environment(config, first_config, args.pick_profile,
                 sim_mode=mode, sync_observations=args.sync_observations,
-                isaac_observation_only=args.isaac_observation_only)
+                isaac_observation_only=args.isaac_observation_only, budget_profile=args.pick_budget_profile)
         elif args.bend_official_protocol:
             if args.initialization_profile == 'stable_support_v1':
                 from bend_support_initialization import load_geometry_manifest
@@ -744,9 +759,9 @@ def run_worker(args):
                 if args.pick_official_protocol:
                     from pick_eval_protocol import prepare_pick_reset, environment_binding_receipt
                     pick_source = deepcopy(env_config)
-                    env_config, pick_derivation, pick_adaptation, pick_protocol = prepare_pick_reset(pick_source, args.pick_profile)
+                    env_config, pick_derivation, pick_adaptation, pick_protocol = prepare_pick_reset(pick_source, args.pick_profile, args.pick_budget_profile)
                     if args.seconds < pick_protocol['maximum_simulated_seconds']:
-                        raise ValueError('Moving Pick budget may not shorten its native800 control ticks')
+                        raise ValueError('Moving Pick budget may not shorten its declared control ticks')
                 if args.bend_official_protocol:
                     from pico_bend_pick_task import bend_pick_environment_binding_receipt
                     bend_source = deepcopy(env_config)
@@ -810,6 +825,10 @@ def run_worker(args):
                     pick_protocol=pick_protocol, pick_source_environment_config=pick_source,
                     pick_reset_derivation=pick_derivation, pick_adaptation=pick_adaptation,
                     pick_environment_binding=pick_binding, evaluation_control_policy=CONTROL_POLICY)
+            if args.pick_budget_profile == 'xmove_bend_failed7_24s':
+                from pick_eval_protocol import extended_budget_runtime_receipt
+                result['pick_budget_profile'] = args.pick_budget_profile
+                episode['pick_extended_budget'] = extended_budget_runtime_receipt(env,pick_protocol,args.seconds)
             if args.pick_warmup_profile == 'ready_upper_v1':
                 episode.update(pick_warmup_profile='ready_upper_v1', native_saved_scene_initialization_preserved=True,
                     original_official_initialization=False, warmup_protocol_modified=True)
@@ -999,6 +1018,9 @@ def run_worker(args):
                 if args.pick_official_protocol:
                     from pick_eval_protocol import initialization_receipt
                     episode['pick_initialization_safety'] = initialization_receipt(raw)
+                if args.pick_budget_profile == 'xmove_bend_failed7_24s':
+                    from pick_eval_protocol import extended_budget_runtime_receipt
+                    episode['pick_extended_budget'] = extended_budget_runtime_receipt(env,pick_protocol,args.seconds)
                 if args.pick_interaction_diagnostics:
                     observer = raw._pick_interaction_observer
                     episode['pick_interaction_observer'] = observer.receipt()

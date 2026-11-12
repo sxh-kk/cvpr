@@ -128,10 +128,11 @@ def evaluation_policy(args):
             'ready_upper_v1 requires its explicit four-case or ordered complete30 protocol, XMovePick5000/base20261105/test_time/all/15 and interactions')
     if extended_time(args):
         require(diagnostic_pairs(args)==EXTENDED_BUDGET_CASES and getattr(args,'profile',None)=='xmove_bend_pick'
-            and getattr(args,'checkpoint_step',None)==5000 and getattr(args,'sampling_seed',None)==20261105
+            and type(getattr(args,'checkpoint_step',None)) is int and args.checkpoint_step in (5000,5500)
+            and getattr(args,'sampling_seed',None)==20261105
             and policy['rtc_mode']=='test_time' and scope=='all' and not ready_upper(args)
             and getattr(args,'ready_planner_model',None) is None,
-            '24s requires exactly the ordered failed7 XMoveBendPick5000/base20261105/test_time/all/15/native-warmup diagnostic')
+            '24s requires exactly the ordered failed7 XMoveBendPick5000-or-5500/base20261105/test_time/all/15/native-warmup diagnostic')
     policy.update(rtc_guidance_action_scope=scope,guided_action_dimensions=78 if scope=='validated_repack' else 80)
     require(diagnostic or policy['rtc_mode']=='test_time',
         'Full30 production requires test_time RTC; off is only an explicit diagnostic case pilot')
@@ -179,7 +180,8 @@ def execution_cases(frozen):
 def validate_extended_scope(frozen):
     require(frozen.get('contract')==EXTENDED_BUDGET_CONTRACT and frozen.get('experiment_role')==EXTENDED_BUDGET_ROLE
         and frozen.get('pick_budget_profile')==EXTENDED_BUDGET_PROFILE and frozen.get('profile')=='xmove_bend_pick'
-        and frozen.get('checkpoint_step')==5000 and frozen.get('maximum_steps_including_warmup')==1200
+        and type(frozen.get('checkpoint_step')) is int and frozen['checkpoint_step'] in (5000,5500)
+        and frozen.get('maximum_steps_including_warmup')==1200
         and frozen.get('maximum_simulated_seconds')==24. and frozen.get('native_maximum_steps_including_warmup')==800
         and frozen.get('native_maximum_simulated_seconds')==16. and frozen.get('warmup_control_ticks')==50
         and frozen.get('original_official_time_budget') is False and frozen.get('official_budget_modified') is True
@@ -1067,7 +1069,7 @@ def main(argv=None):
     parser.add_argument("--rtc-guidance-action-scope",choices=("all","validated_repack"),default="all")
     parser.add_argument("--pick-interaction-diagnostics",action="store_true")
     parser.add_argument('--pick-budget-profile',choices=(NATIVE_BUDGET_PROFILE,EXTENDED_BUDGET_PROFILE),default=NATIVE_BUDGET_PROFILE,
-        help='Explicit fixed failed7 XMoveBendPick5000 rerun at1200 total ticks/24s; source default remains800/16s')
+        help='Explicit fixed failed7 XMoveBendPick5000/5500 rerun at1200 total ticks/24s; source default remains800/16s')
     parser.add_argument('--pick-warmup-profile',choices=('native','ready_upper_v1'),default='native')
     parser.add_argument('--ready-planner-model',type=Path)
     parser.add_argument('--ready-protocol',choices=('four','full30'),default='four',

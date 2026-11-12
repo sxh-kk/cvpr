@@ -27,9 +27,9 @@ class Counter(gym.Env):
 
 
 class ExtendedPickTests(unittest.TestCase):
- def fixture(self):
+ def fixture(self,step=5000):
   f=base.PickCampaignTests();f.setUp();self.addCleanup(f.doCleanups)
-  a=f.args;a.profile='xmove_bend_pick';a.checkpoint_step=5000;f.prepare()
+  a=f.args;a.profile='xmove_bend_pick';a.checkpoint_step=step;f.prepare()
   a.pick_budget_profile=protocol.EXTENDED_BUDGET_PROFILE;a.diagnostic_cases=protocol.EXTENDED_BUDGET_CASES
   a.rtc_guidance_action_scope='all';a.pick_warmup_profile='native'
   return f
@@ -123,8 +123,8 @@ class ExtendedPickTests(unittest.TestCase):
   bad=deepcopy(extended);bad['diagnostic_selected_cases'].reverse()
   with self.assertRaises(ValueError):e.execution_cases(bad)
 
- def evidence(self,native,count):
-  f=self.fixture();a=f.args;extended=e.freeze_inputs(a)
+ def evidence(self,native,count,step=5000):
+  f=self.fixture(step);a=f.args;extended=e.freeze_inputs(a)
   # Reuse the existing real RTC/HTTP/schema fixture producer without changing its native defaults.
   native_args=deepcopy(a);native_args.pick_budget_profile=protocol.NATIVE_BUDGET_PROFILE
   native_frozen=e.freeze_inputs(native_args)
@@ -201,6 +201,54 @@ class ExtendedPickTests(unittest.TestCase):
   final=e.read(a.output/'FINAL_EVALUATION_ACCEPTANCE.json')
   self.assertEqual(final['contract'],protocol.EXTENDED_BUDGET_CONTRACT);self.assertEqual(final['evaluation_denominator'],7)
   self.assertFalse(final['full_official30_claim']);self.assertEqual(final['maximum_steps_including_warmup'],1200)
+
+
+ def test_5500_campaign_freeze_accepts_only5000_or5500_same7_budget_and_native_seed(self):
+  runs=[]
+  for step in (5000,5500):
+   f=self.fixture(step);a=f.args;frozen=e.freeze_inputs(a);e.validate_extended_scope(frozen)
+   self.assertEqual(frozen['checkpoint_step'],step)
+   self.assertEqual((frozen['maximum_steps_including_warmup'],frozen['maximum_simulated_seconds'],frozen['warmup_control_ticks']),(1200,24.,50))
+   selected=e.execution_cases(frozen)
+   self.assertEqual(tuple((c['level'],c['case_index'])for c in selected),protocol.EXTENDED_BUDGET_CASES)
+   command=e.commands(a,selected[0],f.root/'command')['simulator']
+   self.assertEqual(command[command.index('--expected-checkpoint-step')+1],str(step))
+   self.assertEqual(command[command.index('--seconds')+1],'24.0');runs.append(frozen)
+   for wrong in (4500,6000,10000,5500.,True,None):
+    bad=deepcopy(a);bad.checkpoint_step=wrong
+    with self.subTest(wrong=wrong),self.assertRaises(ValueError):e.evaluation_policy(bad)
+    badf=deepcopy(frozen);badf['checkpoint_step']=wrong
+    with self.subTest(frozen_wrong=wrong),self.assertRaises(ValueError):e.validate_extended_scope(badf)
+  self.assertNotEqual(runs[0]['model']['sha256'],runs[1]['model']['sha256'])
+  for old,new in zip(runs[0]['cases'],runs[1]['cases']):
+   for field in ('source_environment_config','local_environment_config','protocol','sampling_seed'):
+    self.assertEqual(old[field],new[field])
+
+ def test_5500_worker_acceptance_and_other_checkpoint_rejection_keep_native16_and_ready5000_guards(self):
+  f=self.fixture(5500);a=f.args;frozen=e.freeze_inputs(a)
+  (a.runtime_root/'resources/sonic_v1_1').mkdir(parents=True)
+  command=e.commands(a,e.execution_cases(frozen)[0],f.root/'command')['simulator'][1:]
+  with patch.object(sys,'argv',command):args=worker.parse_args()
+  self.assertEqual(args.expected_checkpoint_step,5500);self.assertEqual(args.seconds,24.)
+  for wrong in ('4500','6000','10000'):
+   bad=command.copy();bad[bad.index('--expected-checkpoint-step')+1]=wrong
+   with self.subTest(wrong=wrong),patch.object(sys,'argv',bad),contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):worker.parse_args()
+  # The new allowance is scoped to24s; legacy native16 still supports its existing saves.
+  native=deepcopy(a);native.pick_budget_profile=protocol.NATIVE_BUDGET_PROFILE;native.checkpoint_step=10000;f.args=native;f.prepare()
+  self.assertEqual(e.freeze_inputs(native)['maximum_steps_including_warmup'],800)
+  ready=deepcopy(a);ready.profile='xmove_pick';ready.pick_warmup_profile='ready_upper_v1';ready.diagnostic_cases=e.READY_UPPER_CASES
+  ready.pick_interaction_diagnostics=True;ready.ready_planner_model=Path('/pinned/planner.onnx')
+  with self.assertRaises(ValueError):e.evaluation_policy(ready)
+
+ def test_5500_real_case_audit_binds_dynamic_model_step_and_rejects_old5000_service(self):
+  f,directory,case,frozen,result,probe,ep=self.evidence(True,900,step=5500)
+  with patch.object(e.subprocess,'check_output',return_value=json.dumps(probe).encode()):
+   row=e.validate_case(directory,case,frozen)
+   self.assertEqual(row['checkpoint_step'],5500);self.assertEqual(row['model_sha256'],f.args.expected_model_sha256)
+   self.assertEqual(row['extended_budget_outcome'],'native_success_during_extra_8s')
+   self.assertAlmostEqual(row['first_native_success_elapsed_s'],18.)
+   result['server_info']['ckpt_step']=5000;f.write(ep.parent/'result.json',result)
+   with self.assertRaisesRegex(ValueError,'checkpoint step/deployment'):e.validate_case(directory,case,frozen)
 
 
 if __name__=='__main__':unittest.main()

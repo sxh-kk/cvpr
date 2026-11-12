@@ -501,13 +501,13 @@ def parse_args():
         from pick_eval_protocol import EXTENDED_BUDGET_CASES
         if (not args.pick_official_protocol or args.pick_profile != 'xmove_bend_pick'
                 or args.seconds != 24. or args.seed != 0 or args.episodes_per_task != 1 or (args.dr_level,args.episode_start) not in EXTENDED_BUDGET_CASES
-                or args.pick_warmup_profile != 'native' or args.expected_checkpoint_step != 5000
+                or args.pick_warmup_profile != 'native' or args.expected_checkpoint_step not in (5000,5500)
                 or args.warmup_control != 'live_pose_sonic_v1_1' or args.warmup_hand_policy != 'measured'
                 or args.rtc_mode != 'test_time' or args.execute_steps != 15 or args.body_token_projection != 'none'
                 or args.pd_profile != 'official_v1_1_ankle_pitch_1_5' or args.hand_torque_profile != 'mjcf_limits'
                 or args.rtc_inference_delay != 0 or args.min_exec_horizon not in (None,15)
                 or args.pig_mask_schedule != 'exponential' or args.pig_guidance_alpha != .9):
-            parser.error('24s requires only the fixed failed7 XMoveBendPick5000 native warmup/test_time/15-action diagnostic')
+            parser.error('24s requires only the fixed failed7 XMoveBendPick5000-or-5500 native warmup/test_time/15-action diagnostic')
     stable_support = args.initialization_profile == 'stable_support_v1'
     if stable_support != (args.support_geometry_manifest is not None) or (stable_support and not args.bend_official_protocol):
         parser.error('Stable-support initialization requires only BendPick plus --support-geometry-manifest')

@@ -27,7 +27,27 @@
 
 FINAL分别汇总`within_original_16s_successes`、`extra_8s_successes`、`no_native_success_by_24s`。`extra_8s_causal_gain_claim=False`；随机/渲染等重跑差异仍在，不能仅凭重跑声称因果。`can_combine_with_original23_as_measured30=False`，不能将原23个成功加新七例成功称为重新实测完整30例。
 
-## 命令入口（由独立已审runtime驱动调用，不会自动启动）
+## 2026-11-12 GPU实测
+
+北京时间11:13:49，冻结源码`764b395d877f45c98f7545e187a9295abf79b4d0`完成七例实际闭环，**成功3/7**：
+
+- L1 case07：第981控制步、19.62秒成功；本次前800步最大正抬升为0，属于本次16秒后成功。
+- L1 case08：第645步、12.90秒成功；L2 case00：第509步、10.18秒成功。两者均在本次原16秒预算内完成，不计为额外8秒收益。
+- L0 case05、L1 case06、L2 case04、L2 case09均真实运行1200步/24秒后失败。
+
+四个失败中，L0 case05、L2 case04、L2 case09的目标在policy阶段最大3D位移分别约1.004、0.832、0.852毫米，且最大正抬升为0，属于目标几乎静止；不能据此证明没有触碰。L1 case06本次目标水平最大位移约177毫米但未抬起。L2 case04没有复现原16秒运行末端抬高约58毫米的过程，本次全24秒无正净抬升，不能将旧轨迹直接续算。这些重复差异也说明延长预算与策略稳定性须分别判断。
+
+全部七例技术有效，原50步预热/RTC test_time all80/15/原场景和seed保持；实际258次RTC，七份视频齐全，初始化机器人碰目标计数总和0。campaign与driver真实exit0，owned进程清理通过。原16秒完整结果23/30不改写，不将本次3/7合并成另一次全30实测。
+
+证据目录`/var/tmp/cvpr-xmovebend-24s-20261112/`：
+
+- `diagnostic_001/FINAL_EVALUATION_ACCEPTANCE.json`，SHA256 `4293d0d6650844b34d2e1a37129254ac6ce6d4ab5ae6337e9f80e5265a3b1fc6`。
+- `PAIRED_RESULT.json`：逐例原视频/新视频、首成功时间、前800步与全24秒目标高度对照。
+- `EXIT.json`：真实退出与清理；`SOURCE_CPU_VALIDATION.json`、`DRIVER_CPU_VALIDATION.json`和两份review分别保留CPU与独立审核范围。
+
+本文在独立结果分支归档，实际运行树保持上述764b395冻结状态。
+
+## 命令入口（复现须选全新output目录）
 
 ```bash
 python -B scripts/4090_simple/evaluate_pick30.py \
@@ -35,8 +55,8 @@ python -B scripts/4090_simple/evaluate_pick30.py \
   --deployment /var/tmp/cvpr-xmove5000-eval-20261111/xmove_bend_pick_ckpt5000/deployment \
   --data-root /home/zxc/CVPR_Evaluation_runtime/resources/simple_local_usd_v1 \
   --training-manifest /var/tmp/cvpr-xmove5000-eval-20261111/xmove_bend_pick_ckpt5000/transfer/source/release_metadata/dino/manifest.json \
-  --runtime-root /home/zxc/CVPR_Evaluation_runtime --expected-model-sha256 "$MODEL_SHA" \
-  --output /var/tmp/cvpr-xmovebend-24s-20261112/diagnostic_001 \
+  --runtime-root /home/zxc/CVPR_Evaluation_runtime --expected-model-sha256 2de53a97cffb388327a46e2a5fe4661065c49e623e8c04f2e583b49452cd6691 \
+  --output /var/tmp/cvpr-xmovebend-24s-reproduction/diagnostic_new \
   --pick-budget-profile xmove_bend_failed7_24s \
   --diagnostic-cases 0:5,1:6,1:7,1:8,2:0,2:4,2:9 \
   --sampling-seed 20261105 --rtc-mode test_time --rtc-guidance-action-scope all \

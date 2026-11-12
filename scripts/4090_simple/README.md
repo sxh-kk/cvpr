@@ -597,4 +597,4 @@ BendPick5000 官方固定30例的独立部署与RTC评测见 [BendPick评测说�
 
 ### XMoveBendPick 固定失败七例24秒诊断
 
-独立预算、严格七例入口和结果解释见[README_xmovebend_24s.md](README_xmovebend_24s.md)。默认16秒与ready模式不变；加时结果分母仅7，不与原23条合并称实测全30。
+独立预算、严格七例入口和结果解释见[README_xmovebend_24s.md](README_xmovebend_24s.md)。本次七例成功3例，其中1例19.62秒成功、2例在原16秒内成功；4例24秒仍失败。默认16秒与ready模式不变；加时结果分母仅7，不与原23条合并称实测全30。

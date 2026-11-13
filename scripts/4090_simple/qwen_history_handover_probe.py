@@ -47,7 +47,6 @@ def probe_configuration(config, plan, output):
             'Require six-image fresh state-keep production configuration')
     probe_config, probe_plan = deepcopy(config), deepcopy(plan)
     probe_config.train.output_dir = str(output / 'disposable_trainer')
-    probe_config.exp = 'qwen_history6_disposable_probe'
     probe_plan.update(gpu_count=1, gpus=[0], effective_global_batch=4)
     require(config.model_dump(mode='json') == original_config and plan == original_plan,
             'Formal configuration mutated while making probe copies')

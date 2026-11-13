@@ -2,6 +2,8 @@
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+import json
+import os
 import unittest
 
 import numpy as np
@@ -12,19 +14,28 @@ import qwen_history_handover_probe as probe
 
 class ProbeConfigurationTests(unittest.TestCase):
     def test_formal_plan_and_config_are_unchanged(self):
-        class Config(SimpleNamespace):
-            def model_dump(self, **kwargs):
-                return {'frames': self.data.transform.model.vlm_history_frames,
-                        'output': self.train.output_dir, 'exp': self.exp}
-        config = Config(data=SimpleNamespace(transform=SimpleNamespace(model=SimpleNamespace(vlm_history_frames=6))),
-                        train=SimpleNamespace(train_batch_size=4, output_dir='/formal', resume_from_checkpoint=None),
-                        model=SimpleNamespace(state_drop_prob=0), exp='formal')
+        from pydantic import ValidationError
+        from psi.config.train.posttrain_sonic_psi0_config import DynamicLaunchConfig
+        baseline = Path(os.environ.get('HANDOVER_BASELINE_CONFIG',
+            '/home/zxc/CVPR_Evaluation_runtime/handover_qwen_history6_20261113/baseline/prepared_config.json'))
+        if not baseline.is_file():
+            self.skipTest('Set HANDOVER_BASELINE_CONFIG to the actual preserved Handover149 prepared config')
+        values = json.loads(baseline.read_text())
+        values['data']['transform']['model']['vlm_history_frames'] = 6
+        parsed = DynamicLaunchConfig.model_validate(values)
+        config = parsed.model_copy(deep=True)
+        with self.assertRaises(ValidationError):
+            config.exp = 'probe_must_not_modify_the_real_frozen_field'
         plan = dict(gpu_count=8, per_gpu_batch=4, effective_global_batch=32, source_step=38000)
-        original, old_plan = deepcopy(config.model_dump()), deepcopy(plan)
+        original, old_plan = deepcopy(config.model_dump(mode='json')), deepcopy(plan)
         new_config, new_plan = probe.probe_configuration(config, plan, Path('/probe'))
-        self.assertEqual(config.model_dump(), original); self.assertEqual(plan, old_plan)
+        self.assertEqual(config.model_dump(mode='json'), original); self.assertEqual(plan, old_plan)
         self.assertEqual(new_plan['gpu_count'], 1); self.assertEqual(new_plan['effective_global_batch'], 4)
         self.assertEqual(new_config.train.output_dir, '/probe/disposable_trainer')
+        self.assertEqual(new_config.exp, parsed.exp)
+        expected = deepcopy(original)
+        expected['train']['output_dir'] = '/probe/disposable_trainer'
+        self.assertEqual(new_config.model_dump(mode='json'), expected)
         plan['per_gpu_batch'] = 8
         with self.assertRaises(ValueError): probe.probe_configuration(config, plan, Path('/probe'))
 

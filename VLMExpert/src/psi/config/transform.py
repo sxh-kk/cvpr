@@ -112,10 +112,22 @@ class DataTransform(BaseModel):
         # supplied Psi0 motion history, whose RGB alignment is the provider's contract.
         keep_motion = isinstance(self.model, Psi0ModelTransform) and "motion_img_embs" in data
         motion_history = data["motion_img_embs"] if keep_motion else None
+        six_rgb = isinstance(self.model, Psi0ModelTransform) and getattr(self.model, "vlm_history_frames", 1) == 6
+        if six_rgb:
+            rgb = data.get("vlm_history_rgb")
+            metadata = data.get("vlm_history_metadata")
+            if not keep_motion or not isinstance(rgb, torch.Tensor) or rgb.ndim != 4 or tuple(rgb.shape[:2]) != (6, 3):
+                raise ValueError("Qwen history6 requires six real RGB frames from the MotionHistoryIndex provider")
+            if not isinstance(metadata, dict) or metadata.get("contract") != "psi-qwen-motion-aligned-rgb-history-v1":
+                raise ValueError("Qwen history6 requires episode-local source metadata")
         data = self.repack(data, **kwargs)
         data = self.field(data, **kwargs)
         if keep_motion:
             data["motion_img_embs"] = motion_history
+        if six_rgb:
+            # Replace only Qwen observations after repack/field: no state-history or action-query change.
+            data["observations"] = [pt_to_pil(frame, normalized=False) for frame in rgb]
+            data["vlm_history_metadata"] = metadata
         data = self.model(data, **kwargs)
         return data
     
@@ -1054,6 +1066,14 @@ class Psi0ModelTransform(ModelTransform):
     # branches share geometry; the explicit color policy permits VLM-only jitter.
     shared_image_profile: str | None = None
     motion_image_policy: Literal["shared_rgb", "vlm_color_clean_motion"] = "shared_rgb"
+    # Independent Qwen RGB history only; proprio/action horizons remain unchanged.
+    vlm_history_frames: int = Field(default=1, strict=True)
+
+    @model_validator(mode="after")
+    def check_vlm_history_frames(self):
+        if type(self.vlm_history_frames) is not int or self.vlm_history_frames not in (1, 6):
+            raise ValueError("vlm_history_frames must be the exact integer1 or6")
+        return self
     resize: ResizeImage = Field(default_factory=lambda: ResizeImage(size=(224)))
     center_crop: CenterCrop = Field(default_factory=lambda: CenterCrop(size=224))
     color_jitter: ColorJitter = Field(default_factory=lambda: ColorJitter())
@@ -1090,8 +1110,11 @@ class Psi0ModelTransform(ModelTransform):
             if self.shared_image_profile is None:
                 raise ValueError("vlm_color_clean_motion requires an explicit shared_image_profile")
             images = data["observations"]
-            if len(images) != 1:
-                raise ValueError("vlm_color_clean_motion requires exactly one raw current RGB image")
+            frames = getattr(self, "vlm_history_frames", 1)
+            if len(images) != frames:
+                if frames == 1:
+                    raise ValueError("vlm_color_clean_motion requires exactly one raw current RGB image")
+                raise ValueError("vlm_color_clean_motion history6 requires exactly six real chronological RGB images")
             from ImageProcess import SharedImageProcessor
 
             # The reader restores raw decoded bytes without applying geometry.
@@ -1148,11 +1171,33 @@ class Psi0ModelTransform(ModelTransform):
             ])
 
             images = [t1(img) for img in data["observations"]]
+        if getattr(self, "vlm_history_frames", 1) == 6 and (len(images) != 6 or "motion_img_embs" not in data):
+            raise ValueError("Qwen history6 must accompany the same real six-frame Motion history")
         instruction = data["instruction"]
 
         inputs: dict = self.build_qwenvl_inputs(
             vlm_processor, images, instruction,
         ) # type: ignore
+        if getattr(self, "vlm_history_frames", 1) == 6:
+            grid = inputs.get("image_grid_thw")
+            image_token = vlm_processor.image_token
+            token_id = vlm_processor.tokenizer.convert_tokens_to_ids(image_token)
+            merge = vlm_processor.image_processor.merge_size
+            if (not isinstance(grid, torch.Tensor) or tuple(grid.shape) != (6, 3)
+                    or type(merge) is not int or merge < 1 or type(token_id) is not int):
+                raise ValueError("Qwen history6 requires six actual image grids and a known image token")
+            if grid.dtype not in (torch.int32, torch.int64) or torch.any(grid <= 0):
+                raise ValueError("Qwen history6 image grids must be positive integer patch counts")
+            patches = grid.to(torch.long).prod(dim=-1)
+            if torch.any(patches % (merge * merge)):
+                raise ValueError("Qwen image grids do not divide into complete merged visual tokens")
+            expected = int((patches // (merge * merge)).sum().item())
+            if int((inputs["input_ids"] == token_id).sum().item()) != expected:
+                raise ValueError("Qwen history6 visual placeholders do not match the six image grids")
+            inputs.update(vlm_history_frames=6, vlm_image_token_id=token_id,
+                vlm_image_merge_size=merge, vlm_image_token_count=expected)
+            if "vlm_history_metadata" in data:
+                inputs["vlm_history_metadata"] = data["vlm_history_metadata"]
         inputs["dataset_name"] = data.get("dataset", "unknown")
         inputs["raw_actions"] = data["raw_actions"]
         if "actions_mask" in data:

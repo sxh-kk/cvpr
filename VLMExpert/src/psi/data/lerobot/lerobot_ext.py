@@ -86,6 +86,11 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
         )
         self._cache = {}
         self.motion_history = None
+        self.vlm_history_frames = getattr(data_cfg.transform.model, "vlm_history_frames", 1)
+        if type(self.vlm_history_frames) is not int or self.vlm_history_frames not in (1, 6):
+            raise ValueError("vlm_history_frames must be integer1 or6")
+        if self.vlm_history_frames == 6 and data_cfg.dino_cache_root is None:
+            raise ValueError("Qwen history6 cannot synthesize or pad missing Motion history")
         self._defer_current_geometry = False
         if data_cfg.dino_cache_root is not None:
             from pathlib import Path
@@ -130,6 +135,17 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
         if "motion_img_embs" in sample:
             raise ValueError("Source dataset already supplies motion_img_embs; do not mix two history providers")
         sample["motion_img_embs"] = self.motion_history.get_history(idx)
+        if self.vlm_history_frames == 6:
+            packs = getattr(self.base_dataset, "_datasets", None) or [self.base_dataset]
+            frames, metadata = self.motion_history.get_rgb_history(idx, packs)
+            current = sample[self.motion_history.image_key]
+            if (not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(frames[-1].shape)
+                    or not torch.equal(torch.round(current * 255), torch.round(frames[-1] * 255))):
+                raise ValueError("Qwen history current frame differs from the original current RGB query")
+            processed = [self.motion_history.process_current_rgb({self.motion_history.image_key: frame},
+                apply_geometry=not self._defer_current_geometry)[self.motion_history.image_key] for frame in frames]
+            sample["vlm_history_rgb"] = torch.stack(processed)
+            sample["vlm_history_metadata"] = metadata
         return self.motion_history.process_current_rgb(sample, apply_geometry=not self._defer_current_geometry)
 
     def __len__(self):

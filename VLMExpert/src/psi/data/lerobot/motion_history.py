@@ -167,6 +167,38 @@ class MotionHistoryIndex:
             raise ValueError("Selected DINO history must be finite [6,5,1024]")
         return features
 
+    def get_rgb_history(self, index, datasets):
+        """Decode only video, at the exact six episode-local cache rows used by Motion.
+
+        Do not call historical dataset items: their action/state queries may read
+        future targets or consume state-jitter RNG. LeRobot's video decoder is
+        called once for these six real selected video PTS, without padding.
+        """
+        import torch
+        pack_id, episode_id = int(self.pack_ids[index]), int(self.episode_ids[index])
+        episode = self._episode(pack_id, episode_id)
+        selected = self.selected_cache_rows(index)
+        if (selected.shape != (6,) or not np.all(np.diff(selected) > 0)
+                or selected[0] < 0 or selected[-1] >= len(episode.timestamp)):
+            raise ValueError("Qwen RGB history requires six strictly chronological real cache rows")
+        times = np.asarray(episode.video_timestamp[selected], dtype=np.float64)
+        offsets = np.linspace(-1., 0., 6)
+        if not np.all(np.abs((times - times[-1]) - offsets) <= .25 / 30):
+            raise ValueError("Qwen RGB history times differ from Motion's real5Hz history")
+        pack = datasets[pack_id]
+        frames = pack._query_videos({self.image_key: times.tolist()}, episode_id)[self.image_key]
+        if (not isinstance(frames, torch.Tensor) or frames.ndim != 4 or tuple(frames.shape[:2]) != (6, 3)
+                or not frames.is_floating_point() or not torch.isfinite(frames).all()
+                or torch.any(frames < 0) or torch.any(frames > 1)):
+            raise ValueError("Video decoder must return six real floating RGB frames [6,3,H,W] in[0,1]")
+        metadata = dict(contract="psi-qwen-motion-aligned-rgb-history-v1", pack_id=pack_id,
+            episode_index=episode_id, selected_cache_rows=selected.tolist(),
+            frame_indices=episode.frame_index[selected].tolist(),
+            source_frame_indices=episode.source_frame_index[selected].tolist(),
+            timestamps_s=episode.timestamp[selected].tolist(), video_timestamps_s=times.tolist(),
+            relative_time_offsets_s=offsets.tolist(), current_is_last=True)
+        return frames, metadata
+
     def process_current_rgb(self, sample, *, apply_geometry=True):
         """Restore decoded RGB bytes, optionally applying clean cache geometry.
 

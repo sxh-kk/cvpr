@@ -17,7 +17,8 @@ from numpy.lib.format import descr_to_dtype, dtype_to_descr
 from torchvision.transforms import v2
 
 from psi.deploy.helpers import *
-from psi.deploy.dual_source_runtime import (SimulationHistory, LocalDinoEncoder, HistoryError)
+from psi.deploy.dual_source_runtime import (SimulationHistory, LocalDinoEncoder, HistoryError,
+                                          validate_vlm_history_frames, vlm_history_contract)
 from psi.config.config import LaunchConfig, ServerConfig
 from psi.config.transform import SimpleRepackTransform, Psi0ModelTransform, ActionStateTransform
 import json
@@ -81,6 +82,11 @@ class Server:
         self.maxmin:ActionStateTransform = launch_config.data.transform.field # type:ignore
         self.repack_transform:SimpleRepackTransform = launch_config.data.transform.repack # type:ignore
         self.model_transform:Psi0ModelTransform = launch_config.data.transform.model # type:ignore
+        self.vlm_history_frames = validate_vlm_history_frames(getattr(self.model_transform, "vlm_history_frames", 1))
+        if self.vlm_history_frames == 6 and not self.uses_dual_source:
+            raise ValueError("Six-frame VLM deployment requires the real dual-source Motion history")
+        self.vlm_history_metadata = vlm_history_contract(self.vlm_history_frames) if self.uses_dual_source else {"frames": 1}
+        self.last_policy_history = None
 
         """ compatible for the psix dataloader & transforms """
         if hasattr(self.maxmin, "state_transform"):
@@ -423,7 +429,9 @@ class Server:
                 snapshot = None
                 if self.uses_dual_source:
                     snapshot = self.motion_history.snapshot(history_dict)
-                    images = [[Image.fromarray(snapshot.rgb[-1])]]
+                    frames = getattr(self, "vlm_history_frames", 1)
+                    images = [[Image.fromarray(rgb) for rgb in snapshot.vlm_rgb(frames)]]
+                    self.last_policy_history = snapshot.vlm_receipt(frames)
                     previous_action = snapshot.previous_action
                 else:
                     previous_action = self.previous_action
@@ -548,6 +556,7 @@ class Server:
             "num_inference_steps": self.num_inference_steps,
         }
         if self.uses_dual_source:
+            content["vlm_history"] = vlm_history_contract(getattr(self, "vlm_history_frames", 1))
             content["transforms"] = [{"name": "ImageProcess", "profile": self.online_dino.contract["shared_image_profile"],
                                        "augmentation": "none", "shared_current_rgb": True}]
             content["expected_keys"]["history"] = {

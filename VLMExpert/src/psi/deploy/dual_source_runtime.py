@@ -30,6 +30,20 @@ class HistoryWarmingUp(HistoryError):
                        "missing_sim_times_s": missing, "available_sim_times_s": available}
 
 
+def validate_vlm_history_frames(value: Any) -> int:
+    if type(value) is not int or value not in (1, 6):
+        raise ValueError("Checkpoint data.transform.model.vlm_history_frames must be integer1 or6")
+    return value
+
+
+def vlm_history_contract(frames: int) -> dict:
+    frames = validate_vlm_history_frames(frames)
+    return {"contract": "cvpr-qwen-motion-aligned-rgb-history-v1", "frames": frames,
+            "fps": 5, "offsets_s": [-1., -.8, -.6, -.4, -.2, 0.] if frames == 6 else [0.],
+            "order": "oldest_to_current", "current_index": frames - 1,
+            "source": "same_episode_motion_history_snapshot", "padding_or_replication": False}
+
+
 @dataclass(frozen=True)
 class Observation:
     sim_time_s: float
@@ -59,6 +73,26 @@ class HistorySnapshot:
     @property
     def rgb(self) -> list[np.ndarray]:
         return [frame.rgb for frame in self.observations]
+
+    def vlm_rgb(self, frames: int) -> list[np.ndarray]:
+        frames = validate_vlm_history_frames(frames)
+        # Both branches use this immutable, already admitted six-frame snapshot.
+        # Never construct VLM history from a previous request or repeat current RGB.
+        if len(self.observations) != 6:
+            raise HistoryError("VLM requires the complete real Motion history snapshot")
+        return self.rgb[-frames:]
+
+    def vlm_receipt(self, frames: int) -> dict:
+        rgb = self.vlm_rgb(frames)
+        observations = self.observations[-frames:]
+        return {**vlm_history_contract(frames), "session_id": self.session_id,
+                "episode_id": self.episode_id, "generation": self.generation,
+                "snapshot_sim_time_s": self.sim_time_s,
+                "target_sim_times_s": list(self.target_times_s[-frames:]),
+                "selected_sim_times_s": [frame.sim_time_s for frame in observations],
+                "source_rgb_sha256": [frame.source_sha256 for frame in observations],
+                "processed_rgb_sha256": [hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
+                                         for value in rgb], "same_snapshot_as_motion": True}
 
 
 class SimulationHistory:

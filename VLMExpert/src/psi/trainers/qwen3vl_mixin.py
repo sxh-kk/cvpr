@@ -183,6 +183,32 @@ class PaddedCollatorForTogether:
         # Only support right padding for now
         assert self.padding_side == "right", f"Invalid Tokenizer padding_side={self.padding_side}"
 
+        # Explicit history6 samples may never lose a visual placeholder/current image
+        # through the legacy right-truncation below. Single-frame behavior is unchanged.
+        six_rgb = any("vlm_history_frames" in instance for instance in instances)
+        if six_rgb:
+            for instance, ids in zip(instances, input_ids):
+                if type(instance.get("vlm_history_frames")) is not int or instance["vlm_history_frames"] != 6:
+                    raise ValueError("Cannot mix six-frame Qwen histories with current-only samples")
+                if ids.numel() > self.model_max_length:
+                    raise ValueError("Qwen history6 prompt exceeds model_max_length; truncation would drop real visual context")
+                grid = instance["image_grid_thw"]
+                merge = instance.get("vlm_image_merge_size")
+                token = instance.get("vlm_image_token_id")
+                if (not isinstance(grid, torch.Tensor) or tuple(grid.shape) != (6, 3)
+                        or grid.dtype not in (torch.int32, torch.int64) or torch.any(grid <= 0)
+                        or type(merge) is not int or merge < 1 or type(token) is not int or token == self.pad_token_id):
+                    raise ValueError("Six real Qwen grids and their image-token identity are required")
+                patches = grid.to(torch.long).prod(dim=-1)
+                if torch.any(patches % (merge * merge)):
+                    raise ValueError("Invalid Qwen merged image-token geometry")
+                count = int((patches // (merge * merge)).sum().item())
+                if (type(instance.get("vlm_image_token_count")) is not int or instance["vlm_image_token_count"] != count
+                        or int((ids == token).sum().item()) != count
+                        or not isinstance(instance["pixel_values"], torch.Tensor)
+                        or instance["pixel_values"].shape[0] != int(patches.sum().item())):
+                    raise ValueError("Qwen history6 pixels/placeholders do not cover every oldest-to-current image")
+
         # Pad sequences
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
 
@@ -212,6 +238,14 @@ class PaddedCollatorForTogether:
         }
         if motion_history is not None:
             output["motion_img_embs"] = motion_history
+        if six_rgb:
+            if motion_history is None:
+                raise ValueError("Qwen history6 requires the aligned real Motion DINO history in every sample")
+            output["vlm_history_frames"] = torch.full((B,), 6, dtype=torch.long)
+            metadata = [instance.get("vlm_history_metadata", {}) for instance in instances]
+            if all("selected_cache_rows" in item and "video_timestamps_s" in item for item in metadata):
+                output["vlm_history_cache_rows"] = torch.tensor([item["selected_cache_rows"] for item in metadata], dtype=torch.long)
+                output["vlm_history_video_timestamps_s"] = torch.tensor([item["video_timestamps_s"] for item in metadata], dtype=torch.float64)
         # see also:  batch_str_to_tensor in src/psi/data/gear/transform/base.py for similar encoding of string metadata
         if dataset_names is not None:
             # encode as padded uint8 tensor so accelerate can concatenate across processes

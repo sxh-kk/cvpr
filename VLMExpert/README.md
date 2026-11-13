@@ -1,5 +1,9 @@
 ## 本仓库扩展：双来源 Action Expert
 
+Handover的Qwen六帧消融见[五张历史RGB加当前帧](../docs/HANDOVER_QWEN_HISTORY6.md)：
+唯一开关为`data.transform.model.vlm_history_frames=6`，与Motion使用相同5Hz真实历史，
+缺省单帧不变；保留原Handover149数据、38000步起点、batch4×8和10000步训练配方。
+
 A100的Handover任务适配见[38k联合权重初始化、任务微调20k步](../docs/A100_SIMPLE_TASK50_FINETUNE.md)：
 保留已训练动作头、VLM及Motion，八卡batch32，每4k保存，沿用原归一化并记录本地损失和实测ETA。
 融合AdamW的完整状态对照、checkpoint边界暂停及数据流恢复规则也记录在该文档中；

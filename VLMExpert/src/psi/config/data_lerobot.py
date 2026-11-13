@@ -61,6 +61,10 @@ class LerobotDataConfig(DataConfig):
 
     @model_validator(mode="after")
     def check_dino_history(self) -> "LerobotDataConfig":
+        frames = getattr(self.transform.model, "vlm_history_frames", 1)
+        if frames == 6 and (self.dino_cache_root is None
+                or getattr(self.transform.model, "motion_image_policy", None) != "vlm_color_clean_motion"):
+            raise ValueError("Qwen history6 requires the existing clean DINO cache and vlm_color_clean_motion policy")
         if self.dino_cache_root is None:
             return self
         from ImageProcess import SharedImageProcessor

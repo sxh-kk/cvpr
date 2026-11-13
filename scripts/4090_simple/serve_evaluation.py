@@ -41,16 +41,31 @@ def audited_server(factory, seed, seed_function, output, source_sha):
                "rtc_min_exec_horizon": server.min_exec_horizon if server.enable_rtc else None,
                "pig_mask_schedule": server.pig_mask_schedule if server.rtc_mode == "test_time" else None,
                "pig_guidance_alpha": server.pig_guidance_alpha if server.rtc_mode == "test_time" else None}
+    receipt["vlm_history_frames"] = getattr(server, "vlm_history_frames", 1)
+    if getattr(server, "vlm_history_metadata", None) is not None:
+        receipt["vlm_history"] = dict(server.vlm_history_metadata)
     # Count the sampler methods actually invoked by the production handler. The
     # dual-source previous plan lives in SimulationHistory, not previous_action.
     sampler_names = ("predict_action", "predict_action_with_rtc_flow", "predict_action_with_training_rtc_flow")
     sampler_paths = dict(zip(sampler_names, ("plain", "test_time", "train")))
     sampler_counts = {name: 0 for name in sampler_names}
+    sampler_observations = []
     for name in sampler_names:
         method = getattr(server.model, name, None)
         if callable(method):
             def wrap(original, sampler_name):
                 def call(*args, **kwargs):
+                    observations = kwargs.get("observations")
+                    counts = [len(images) for images in observations] if observations is not None else None
+                    history = getattr(server, "last_policy_history", None)
+                    if getattr(server, "vlm_history_frames", 1) == 6:
+                        if counts != [6] or not isinstance(history, dict) or history.get("frames") != 6:
+                            raise ValueError("Six-frame checkpoint did not receive its actual six-image snapshot")
+                        hashes = [hashlib.sha256(np.ascontiguousarray(np.asarray(image)).tobytes()).hexdigest()
+                                  for image in observations[0]]
+                        if hashes != history.get("processed_rgb_sha256"):
+                            raise ValueError("Actual Qwen images differ from the admitted Motion RGB snapshot")
+                    sampler_observations.append({"image_counts": counts, "history": history})
                     sampler_counts[sampler_name] += 1
                     return original(*args, **kwargs)
                 return call
@@ -89,6 +104,7 @@ def audited_server(factory, seed, seed_function, output, source_sha):
             row = {"ordinal": ordinal, "episode_id": history.get("episode_id"), "session_id": history.get("session_id"),
                    "sim_time_s": str(history.get("sim_time_s")), "rng_before": rng_sha(), "status": "exception"}
             before_samplers = sampler_counts.copy()
+            before_observations = len(sampler_observations)
             started = time.monotonic()
             try:
                 claim(history)
@@ -108,6 +124,8 @@ def audited_server(factory, seed, seed_function, output, source_sha):
             finally:
                 calls = {sampler_paths[name]: sampler_counts[name] - before_samplers[name] for name in sampler_names}
                 row["sampler_calls"] = calls
+                row["vlm_history_frames"] = getattr(server, "vlm_history_frames", 1)
+                row["vlm_observations"] = sampler_observations[before_observations:]
                 paths = [name for name, count in calls.items() if count]
                 row["sampling_path"] = paths[0] if len(paths) == 1 else None
                 row["parameter_gradient_tensor_count"] = sum(value.grad is not None for value in parameters)

@@ -375,6 +375,17 @@ def requested_rtc_contract(args):
 def validate_server_info(server_info, args):
     expected = requested_rtc_contract(args)
     action = server_info.get("action", {})
+    expected_vlm_frames = getattr(args, "expected_vlm_history_frames", 1)
+    vlm_history = server_info.get("vlm_history", {"frames": 1})
+    if (type(expected_vlm_frames) is not int or expected_vlm_frames not in (1, 6)
+            or not isinstance(vlm_history, dict) or type(vlm_history.get("frames")) is not int
+            or vlm_history["frames"] != expected_vlm_frames):
+        raise ValueError("Actual checkpoint VLM history differs from requested one/six-frame evaluation")
+    if expected_vlm_frames == 6 and any(vlm_history.get(key) != value for key, value in {
+            "contract": "cvpr-qwen-motion-aligned-rgb-history-v1", "fps": 5,
+            "offsets_s": [-1., -.8, -.6, -.4, -.2, 0.], "order": "oldest_to_current", "current_index": 5,
+            "source": "same_episode_motion_history_snapshot", "padding_or_replication": False}.items()):
+        raise ValueError("Six-frame evaluation requires the complete causal, unpadded Motion-aligned VLM contract")
     if (server_info.get("ckpt_step") != args.expected_checkpoint_step or
             action.get("action_dim") != 80 or action.get("action_chunk_size") != 30 or
             action.get("action_exec_horizon") != args.execute_steps or
@@ -395,6 +406,7 @@ def parse_args():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=21074)
     parser.add_argument("--expected-checkpoint-step", type=int, default=20000)
+    parser.add_argument("--expected-vlm-history-frames", type=int, choices=(1, 6), default=1)
     parser.add_argument("--video", action="store_true", help="Record every genuine camera frame to a checked ffmpeg MP4")
     parser.add_argument("--sync-observations", action="store_true",
                         help="Opt in to synchronized integrated MuJoCo qpos/derived state/render observations")

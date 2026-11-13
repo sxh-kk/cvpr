@@ -1,5 +1,8 @@
 # cvpr
 
+Handover受控实验：[Qwen五张历史RGB加当前帧](docs/HANDOVER_QWEN_HISTORY6.md)。
+训练与部署共同使用与Motion对齐的真实六帧，原单帧配置和Handover训练预算保留。
+
 MotionExpert、共享图像处理和DINO特征提取代码；VLMExpert同步官方Ψ₀工程。
 
 A100任务适配见[Handover50条、38k三专家初始化后微调20k步及损失/ETA记录](docs/A100_SIMPLE_TASK50_FINETUNE.md)。

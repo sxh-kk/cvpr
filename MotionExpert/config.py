@@ -60,14 +60,14 @@ def smplh_motion_expert_config():
         WARM_START_EXPECTED_COMPLETED_EPOCHS=None, WARM_START_SHA256=None,
         GENERATIVE_TYPE="flow", LEARN_TRAJ=False, ENCODER_TSFM=None,
         MOTION_EXPERT=expert, OUTPUT_BRANCH_MODE="single", ZERO_MASK_TOKEN=False,
-        PREDICT_XSTART=True, GLOBAL_TOKEN_COUNT=0,
+        PREDICT_XSTART=False, GLOBAL_TOKEN_COUNT=0,
         GLOBAL_READOUT=GLOBAL_READOUT, ATTENTION_NORM_VERSION=ATTENTION_NORM_VERSION,
         INPUT_FEATS=MOTION_DIM, TRAJ_DIM=TRAJECTORY_DIM,
         IMAGE_TOKENS=IMAGE_TOKEN_COUNT, IMAGE_DIM=IMAGE_FEATURE_DIM,
     )
     flow = _ns(
         NUM_STEPS=10, SOLVER="euler", BETA_ALPHA=1.5, BETA_BETA=1.0,
-        T_MIN=0.001, PREDICTION_TYPE="x0", GLOBAL_WEIGHT=8.0,
+        T_MIN=0.001, PREDICTION_TYPE="velocity", GLOBAL_WEIGHT=8.0,
         GLOBAL_FEATURE_START=108, GLOBAL_FEATURE_END=117,
     )
     train = _ns(
@@ -124,7 +124,7 @@ def validate_architecture(cfg):
         "MODEL.MODEL_NAME": "uem", "MODEL.GENERATIVE_TYPE": "flow",
         "MODEL.LEARN_TRAJ": False, "MODEL.ENCODER_TSFM": None,
         "MODEL.OUTPUT_BRANCH_MODE": "single", "MODEL.ZERO_MASK_TOKEN": False,
-        "MODEL.PREDICT_XSTART": True, "MODEL.INPUT_FEATS": dim,
+        "MODEL.PREDICT_XSTART": False, "MODEL.INPUT_FEATS": dim,
         "MODEL.TRAJ_DIM": TRAJECTORY_DIM, "MODEL.IMAGE_TOKENS": IMAGE_TOKEN_COUNT,
         "MODEL.IMAGE_DIM": IMAGE_FEATURE_DIM,
         "MODEL.GLOBAL_READOUT": GLOBAL_READOUT,
@@ -135,7 +135,7 @@ def validate_architecture(cfg):
         "MODEL.MOTION_EXPERT.TOP_K": 2, "MODEL.MOTION_EXPERT.SHARED_EXPERT": True,
         "MODEL.MOTION_EXPERT.CHUNK_SIZE": 4,
         "MODEL.MOTION_EXPERT.CONDITIONED_ROUTER": True,
-        "FLOW.PREDICTION_TYPE": "x0", "FLOW.SOLVER": "euler", "FLOW.NUM_STEPS": 10,
+        "FLOW.PREDICTION_TYPE": "velocity", "FLOW.SOLVER": "euler", "FLOW.NUM_STEPS": 10,
         "FLOW.GLOBAL_FEATURE_START": global_start, "FLOW.GLOBAL_FEATURE_END": global_end,
     }
     for path, value in expected.items():
@@ -205,7 +205,12 @@ def architecture_metadata(cfg):
         "target_joint_basis": cfg.DATA.TARGET_JOINT_BASIS,
         "feature_slices": {"body": [0,108], "global": [108,117],
                            "left_hand": [117,180], "right_hand": [180,243], "contacts": [243,245]},
-        "feature_t": 1.0, "prediction_type": cfg.FLOW.PREDICTION_TYPE,
+        "feature_t": 1.0 - 1.0 / cfg.FLOW.NUM_STEPS,
+        "feature_extraction": {"version": "lamp_one_update_hidden_v1",
+                               "initial_t": 1.0, "euler_updates": 1,
+                               "model_evaluations": 2,
+                               "joint_update_autograd": True},
+        "prediction_type": cfg.FLOW.PREDICTION_TYPE,
         "num_steps": cfg.FLOW.NUM_STEPS, "solver": cfg.FLOW.SOLVER,
     }
     metadata["body_model"] = {"type": "smplh", "betas": 16,

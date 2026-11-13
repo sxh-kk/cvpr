@@ -35,7 +35,8 @@ class _TinyGroupedModel(torch.nn.Module):
     def forward(self, x, t, y, cond_scale=None, **kwargs):
         self.last_y = y
         self.calls += 1
-        return _identity_motion(x.shape[1]).to(x)[None].expand_as(x)
+        clean = _identity_motion(x.shape[1]).to(x)[None].expand_as(x)
+        return (x - clean) / t.to(x)[:, None, None]
 
 
 @pytest.fixture

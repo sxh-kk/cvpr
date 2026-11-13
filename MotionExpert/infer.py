@@ -46,7 +46,8 @@ def main():
     parser.add_argument("--seed", type=int, default=62)
     parser.add_argument("--unnormalized-traj", action="store_true")
     parser.add_argument("--all-steps", action="store_true")
-    parser.add_argument("--features-only", action="store_true", help="Extract t=1 hidden/global with one model call")
+    parser.add_argument("--features-only", action="store_true",
+                        help="Take one Euler update from t=1 to t=0.9, then extract second-call hidden/global")
     parser.add_argument("--decode", action="store_true", help="Also decode physical body/hand/floor trajectories")
     parser.add_argument("--allow-visual-adaptation", action="store_true",
                         help="Explicitly allow a different shared-RGB size profile; DINO weight and normalization identities must match")

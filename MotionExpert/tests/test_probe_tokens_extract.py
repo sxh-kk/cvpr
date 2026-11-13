@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from MotionExpert import probe_tokens
-from MotionExpert.probe_prior import file_stamp
+from MotionExpert.probe_prior import FEATURE_PROTOCOL, file_stamp
 from MotionExpert.tests.test_prior_probe_reuse import baseline_job
 
 
@@ -18,7 +18,8 @@ def token_baseline(tmp_path):
     (base / "sources").mkdir()
     (base / "sources/probe_prior-extraction.py").write_bytes(source.read_bytes())
     plan = json.loads((base / "plan.json").read_text())
-    plan["input"] = "six historical DINO frames only; all245 Gaussian channels; t=1; no trajectory"
+    plan["input"] = "six historical DINO frames only; all245 Gaussian channels at t=1; " \
+                    "one Euler update to t=0.9; no trajectory"
     plan["source_files"]["MotionExpert/probe_prior.py"] = hashlib.sha256(source.read_bytes()).hexdigest()
     (base / "plan.json").write_text(json.dumps(plan))
     return base, cache, job
@@ -29,6 +30,7 @@ def test_prepare_preserves_baseline_and_allows_one_physical_gpu(tmp_path):
     before = {str(path.relative_to(base)): file_stamp(path) for path in base.rglob("*") if path.is_file()}
     plan, entries = probe_tokens.prepare(base, cache, job, gpus=[3], batch_size=128, sleep_seconds=1)
     assert plan["epoch"] == 100 and plan["gpus"] == [3]
+    assert plan["feature_protocol"] == FEATURE_PROTOCOL
     assert plan["logical_shards"] == [0]  # Fixture baseline uses one logical shard.
     assert len(entries) == plan["windows"]
     for name in ("selection.json", "targets.npz", "dino.npy", "epoch100.npy", "dino-linear-probe.pt"):
@@ -60,6 +62,22 @@ def test_prepare_rejects_baseline_mismatches_without_creating_output(tmp_path, m
     with pytest.raises(ValueError):
         probe_tokens.prepare(base, cache, job, gpus=[0])
     assert not list(job.iterdir())
+
+
+@pytest.mark.parametrize("protocol", [None, {"version": "single_forward_t1_v1"}])
+def test_token_extraction_refuses_legacy_hidden_baseline_before_linking(tmp_path, protocol):
+    base, cache, job = token_baseline(tmp_path)
+    plan = json.loads((base / "plan.json").read_text())
+    if protocol is None:
+        plan.pop("feature_protocol")
+    else:
+        plan["feature_protocol"] = protocol
+    (base / "plan.json").write_text(json.dumps(plan))
+    before = {str(path.relative_to(base)): file_stamp(path) for path in base.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError, match="legacy single-forward readouts"):
+        probe_tokens.prepare(base, cache, job, gpus=[0])
+    assert not list(job.iterdir())
+    assert before == {str(path.relative_to(base)): file_stamp(path) for path in base.rglob("*") if path.is_file()}
 
 
 @pytest.mark.parametrize("kwargs", ({"gpus": []}, {"gpus": [0, 0]}, {"gpus": [-1]},

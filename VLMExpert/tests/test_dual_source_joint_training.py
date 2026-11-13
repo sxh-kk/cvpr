@@ -68,8 +68,8 @@ class _MotionNetwork(nn.Module):
         super().__init__()
         self.backbone = nn.Linear(1, 768)
         self.dropout = nn.Dropout(0.1)
-        # Production one-step hidden extraction also leaves the SMPL-H output
-        # projection unread; it must not become an unused trainable parameter.
+        # The first velocity head updates the second call's state even though
+        # the action head consumes hidden features rather than motion outputs.
         self.output_process = nn.Linear(768, 245)
 
     def forward(self, value):
@@ -80,6 +80,25 @@ class _JointMotionExpert(_MotionExpert):
     def __init__(self):
         super().__init__()
         self.model = _MotionNetwork()
+
+    def forward_features(self, conditioning, **kwargs):
+        self.calls.append(dict(conditioning=conditioning, grad_enabled=torch.is_grad_enabled(),
+                               training=self.model.training, **kwargs))
+        image = conditioning["img_embs"].to(device=self.device, dtype=self.dtype)
+        summary = image.mean(dim=(1, 2, 3)).reshape(-1, 1, 1)
+        generator = torch.Generator(device=self.device).manual_seed(kwargs["seed"])
+        state = torch.randn((image.shape[0], 11, 1), generator=generator,
+                            device=self.device, dtype=self.dtype)
+        first_hidden = self.model(state + summary)
+        velocity = self.model.output_process(first_hidden)
+        self.first_velocity = velocity
+        if velocity.requires_grad:
+            velocity.retain_grad()
+        # This producer double exercises the two-call gradient path; the real
+        # MotionExpert tests own the precise time convention and update rule.
+        updated_state = state - velocity.mean(dim=-1, keepdim=True)
+        hidden = self.model(updated_state + summary)
+        return {"one_step_hidden": hidden, "one_step_global": hidden.mean(1)}
 
 
 @pytest.fixture(scope="module")
@@ -109,13 +128,14 @@ def test_joint_forward_reaches_both_experts_final_vlm_norm_and_both_pooled_summa
     motion = model.motion_conditioner.model
     assert vlm.training and motion.training and model.action_header.training
     assert not vlm.lm_head.weight.requires_grad
-    assert not motion.output_process.weight.requires_grad
+    assert motion.output_process.weight.requires_grad
     assert vlm.model.language_model.norm.weight.requires_grad
     updated = [vlm.get_input_embeddings().weight, vlm.model.visual.patch_embed.weight,
                vlm.model.visual.merger.weight, vlm.model.language_model.norm.weight,
-               motion.backbone.weight, model.action_header.action_proj_out.linear.weight]
+               motion.backbone.weight, motion.output_process.weight, motion.output_process.bias,
+               model.action_header.action_proj_out.linear.weight]
     before = [parameter.detach().clone() for parameter in updated]
-    unused = [vlm.lm_head.weight, motion.output_process.weight]
+    unused = [vlm.lm_head.weight]
     unused_before = [parameter.detach().clone() for parameter in unused]
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-3, weight_decay=0)
     images = _images().requires_grad_()
@@ -135,6 +155,7 @@ def test_joint_forward_reaches_both_experts_final_vlm_norm_and_both_pooled_summa
     _nonzero_finite(result.motion_features.p_m.grad)
     _nonzero_finite(result.motion_features.tokens.grad[:, :6])
     _nonzero_finite(result.motion_features.tokens.grad[:, 6:])
+    _nonzero_finite(model.test_motion_expert.first_velocity.grad)
     torch.testing.assert_close(result.vlm_features.tokens.grad[0, 0, -1], torch.zeros(4))
     assert images.grad is None  # Frozen DINO features are observation constants.
     for parameter in updated:
@@ -319,7 +340,7 @@ def test_real_trainer_optimizer_covers_each_trainable_parameter_once_with_source
     assert trainer.apply_vlm_trainability() == {"lang_backbone", "vision_tower", "mm_projector"}
     assert not model.vlm_model.model.language_model.norm.weight.requires_grad
     assert not model.vlm_model.lm_head.weight.requires_grad
-    assert not model.motion_conditioner.model.output_process.weight.requires_grad
+    assert model.motion_conditioner.model.output_process.weight.requires_grad
     trainer.create_optimizers()
     optimizer = trainer.optimizer
     grouped_ids = Counter(id(parameter) for group in optimizer.param_groups for parameter in group["params"])
@@ -329,6 +350,10 @@ def test_real_trainer_optimizer_covers_each_trainable_parameter_once_with_source
     assert id(model.vlm_model.model.language_model.norm.weight) not in grouped_ids
     assert optimizer.param_groups[0]["group_name"] == "action_header"
     groups = {group["group_name"]: group for group in optimizer.param_groups}
+    motion_group_ids = {id(parameter) for parameter in groups["motion_expert"]["params"]}
+    velocity_parameters = list(model.motion_conditioner.model.output_process.parameters())
+    assert all(id(parameter) in motion_group_ids for parameter in velocity_parameters)
+    velocity_before = [parameter.detach().clone() for parameter in velocity_parameters]
     expected = {
         "action_header": (model.action_header.action_proj_out.linear.weight, 1e-4),
         "lang_backbone": (model.vlm_model.get_input_embeddings().weight, 1e-6),
@@ -348,6 +373,9 @@ def test_real_trainer_optimizer_covers_each_trainable_parameter_once_with_source
     for name, (parameter, _) in expected.items():
         _nonzero_finite(parameter.grad)
         assert not torch.equal(parameter, before[name])
+    for parameter, previous in zip(velocity_parameters, velocity_before):
+        _nonzero_finite(parameter.grad)
+        assert not torch.equal(parameter, previous)
 
 
 @pytest.mark.parametrize("tune_vlm", [True, False])
@@ -461,3 +489,12 @@ def test_actual_pretrained_loader_preserves_untied_weights_and_restores_only_a_t
                                original.action_header.action_proj_out.linear.weight, rtol=0, atol=0)
     torch.testing.assert_close(restored.motion_conditioner.model.backbone.weight,
                                original.motion_conditioner.model.backbone.weight, rtol=0, atol=0)
+
+    # The real loader extracts and loads only the MotionConditioner subtree.
+    # Matching tensor names/shapes must not let an old x0 joint checkpoint
+    # overwrite the newly constructed velocity model through that path.
+    state.pop("motion_conditioner._feature_protocol_signature")
+    save_file(state, str(checkpoint))
+    with pytest.raises(RuntimeError, match="velocity/LaMP two-call feature protocol"):
+        namespace["from_pretrained"](
+            joint_harness, str(tmp_path), 1, SimpleNamespace(model=config), torch.device("cpu"))

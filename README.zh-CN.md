@@ -181,7 +181,7 @@ python -m MotionExpert.evaluate \
   --output "$HOME/sigma0/runs/evaluation/motion-val.json"
 ```
 
-增大正整数 `--max-samples` 可评估更多窗口，也可通过 `--split` 和 `--checkpoint` 更换评估对象。该命令输出位置、旋转等运动误差。[MotionExpert API](MotionExpert/README.md#一步hidden与在线共享图像)还提供运动预测和特征提取。
+增大正整数 `--max-samples` 可评估更多窗口，也可通过 `--split` 和 `--checkpoint` 更换评估对象。该命令输出位置、旋转等运动误差。[MotionExpert API](MotionExpert/README.md#一步hidden与在线共享图像)采用速度场 flow matching，并按 LaMP 流程在一次 Euler 更新后的第二次前向中提取 hidden 特征。
 
 ### SIMPLE 策略评估
 

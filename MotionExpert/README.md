@@ -98,17 +98,19 @@ python -m MotionExpert.validate_window_cache \
 
 架构版本为 `e7_smplh12_hands21_meanpool_qkvnorm_v2`。模型不使用可学习 GLOBAL token；flow-time prefix 不参与 pooling，全部 11 个 motion token 参与均值。Self-attention 对 Q/K/V 共用归一化后的 motion；cross-attention 的 Q 与图像／时间 context 分别归一化。
 
-归一化使用完整训练集统计，并与 checkpoint 中的表示、分割和数据身份保持一致。不同架构的 checkpoint 不能直接恢复或初始化到本模型。
+训练直接预测速度场：`x_t = (1-t) x_0 + t ε`，目标为 `v = ε - x_0`。损失仍使用原有有效帧／通道 mask、Global 权重和时间采样分布；完整运动预测仍以十步 Euler 从 `t=1` 积分至 `t=0`。诊断中的干净动作估计为 `x_t - t v_pred`。
+
+归一化使用完整训练集统计，并与 checkpoint 中的表示、分割和数据身份保持一致。不同架构的 checkpoint 不能直接恢复或初始化到本模型。旧 x₀ 预测 checkpoint 也不能当作速度预测模型恢复或推理；请保留旧权重并开始新的速度训练，不能只改 checkpoint 元数据。
 
 训练在反向传播前检查非有限预测、loss 和激活，在优化器更新前检查 unscale 后、clip 前的梯度；DDP 各卡一致停止。异常 batch、mask、来源与 RNG 写入训练目录的 `anomalies/`。保护阈值由默认配置中的 `TRAIN.SAFETY_*` 控制，关闭幅值保护仍拒绝 NaN／Inf。
 
 ## 一步hidden与在线共享图像
 
-`forward_features()` 在完整高斯输入 `t=1` 上前向一次，保留 autograd 和调用方的 train／eval 模式，不执行完整流采样：
+`forward_features()` 按 [LaMP 的单步特征提取流程](https://arxiv.org/html/2603.25399v1#S3.SS4)，先在完整高斯输入 `t=1` 上预测速度，更新 `x_next = ε - 0.1 v_pred`，再在 `t=0.9` 前向并取第二次 hidden。LaMP 使用相反的时间方向，其 `τ=0→0.1` 与这里的 `t=1→0.9` 等价。这是一次状态更新、两次前向，不执行完整流采样：
 
 | 返回值 | 形状 | 含义 |
 | --- | --- | --- |
-| `one_step_hidden` | `[B,11,768]` | 全部 11 个运动时刻的最后一层 hidden |
+| `one_step_hidden` | `[B,11,768]` | 一次 Euler 更新后，第二次前向的全部 11 个运动时刻的最后一层 hidden |
 | `one_step_global` | `[B,768]` | 严格等于 `one_step_hidden.mean(dim=1)` |
 
 调用方提供 `img_embs [B,6,5,1024]`。该接口不输入干净人体目标或未来标签 mask；缺失标签不能将高斯噪声通道清零。
@@ -125,7 +127,7 @@ features = expert.forward_features({"img_embs": img_embs}, seed=0)
 prior = features["one_step_hidden"]  # [B,11,768]
 ```
 
-`seed` 固定初始噪声；训练模式下 dropout 仍由调用方 RNG 决定。外部 `nn.Module`／DDP 应将 `expert.model` 注册为子模块；仅使用 hidden 时，DDP 需处理未参与梯度的输出 head，例如设置 `find_unused_parameters=True`。
+`seed` 固定初始噪声；训练模式下 dropout 仍由调用方 RNG 决定。保留调用方的 train／eval 模式和现有联合训练 autograd：下游损失经过第二次 hidden、状态更新和第一次速度输出头反传；冻结接口则在两次前向上均使用 `no_grad`。外部 `nn.Module`／DDP 应将 `expert.model` 注册为子模块；MoE 的未使用专家仍需由 DDP 处理，例如设置 `find_unused_parameters=True`。
 
 - 冻结特征：使用 `extract_features()`。
 - 完整预测：使用 `predict_future()`，返回完整 `motion [B,11,245]`、未来 `future_motion [B,5,245]`，以及默认启用的对应反归一化结果。

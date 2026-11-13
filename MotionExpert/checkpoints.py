@@ -53,6 +53,10 @@ def checkpoint_config(checkpoint):
         raise ValueError("Checkpoint uses a legacy GLOBAL-token/attention architecture; "
                          "ordinary resume, weight initialization and warm start are incompatible "
                          "with mean-pooled qkv_prenorm_v2. Preserve the source and start a new run.")
+    if metadata.get("prediction_type") != "velocity":
+        raise ValueError("Checkpoint uses a legacy x0 prediction objective, not velocity prediction. "
+                         "Preserve its weights and start a new velocity-training run; "
+                         "do not resume or reinterpret x0 outputs as velocities.")
     cfg = config_from_dict(checkpoint["hyper_parameters"])
     validate_architecture(cfg)
     expected = architecture_metadata(cfg)

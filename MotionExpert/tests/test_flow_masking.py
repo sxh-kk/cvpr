@@ -79,7 +79,7 @@ def test_masked_nan_targets_preserve_finite_loss_and_gradients():
     torch.testing.assert_close(model.gain.grad, reference.gain.grad, rtol=0, atol=0)
 
 
-def test_fully_valid_channels_keep_original_flow_and_weighted_objective():
+def test_fully_valid_channels_keep_interpolation_and_weighted_velocity_objective():
     target, noise, y = inputs()
     y["feature_valid_mask"][:] = True
     t = torch.tensor([0.3, 0.65])
@@ -91,5 +91,5 @@ def test_fully_valid_channels_keep_original_flow_and_weighted_objective():
     torch.testing.assert_close(result["target_velocity"], noise - target, rtol=0, atol=0)
     weights = torch.ones(245)
     weights[108:117] = 8
-    expected = ((interpolated * model.gain - target).square() * weights).sum((1, 2)) / (11 * weights.sum())
+    expected = ((interpolated * model.gain - (noise - target)).square() * weights).sum((1, 2)) / (11 * weights.sum())
     torch.testing.assert_close(result["loss"], expected)

@@ -19,9 +19,11 @@
 - 运动表示为 245 维，另有 18 维相机轨迹；保留既定 K12 身体关节和左右各 21 点手部监督。
 - 使用相机地面投影参考系，单位为米，世界坐标 Z-up；6D 旋转取旋转矩阵前两行。
 - 架构为 `e7_smplh12_hands21_meanpool_qkvnorm_v2`，没有可学习 GLOBAL token；self-attention 的 Q/K/V 全归一化，cross context 独立归一化。
-- `forward_features()` 在 `t=1` 完整高斯输入上前向一次，返回 `one_step_hidden [B,11,768]`，并保留 autograd；缺失标签不能将噪声通道清零。
+- MotionExpert 直接预测速度 `ε-x₀`，路径为 `x_t=(1-t)x₀+tε`；监督 mask、Global 权重和归一化保持原约定。
+- `forward_features()` 在 `t=1` 完整高斯输入上预测速度，Euler 更新至 `t=0.9`，第二次前向返回 `one_step_hidden [B,11,768]`；保留联合训练 autograd，包括第一次速度输出头。缺失标签不能将噪声通道清零。
 - `one_step_global = one_step_hidden.mean(1)` 为可选摘要。双来源 Action Expert 使用完整 11 个 hidden。
-- 旧 GLOBAL／旧注意力 checkpoint 与当前架构不直接兼容；`psi0_joint` 和 `dual_source_v1` 也有独立的动作头 checkpoint 边界。
+- 旧 x₀ 目标 checkpoint 与当前速度目标不兼容，不能修改元数据后直接恢复或推理；旧 GLOBAL／旧注意力 checkpoint 与当前架构也不直接兼容。`psi0_joint` 和 `dual_source_v1` 有独立的动作头 checkpoint 边界。
+- 联合 checkpoint 中的 MotionConditioner 保存无参数的特征协议签名；完整模型或 Motion 子模块加载均拒绝缺失／不匹配的旧签名，`strict=False` 也不能跳过。
 
 各通道的切片、归一化和质量规则见 [运动表示](../../MotionExpert/README.md#运动表示)。
 

@@ -70,10 +70,14 @@ class MotionConditioner(nn.Module):
     # is one of the six valid historical observations. The trajectory embedding
     # is replaced by mask_tokens.traj, and mask_tokens.clip appears only in
     # future image slots excluded by both visual attention and the ego router.
-    # output_process produces body parameters, not the hidden features consumed
-    # by the action loss. Keep these known inactive parameters out of optimizers.
-    _INACTIVE_PREFIXES = ("output_process.", "embed_traj_cond.", "embed_traj_valid.")
+    # The first velocity prediction updates the state consumed by the second
+    # hidden-feature call, so output_process participates in the action loss.
+    # Only the unused trajectory branches stay out of the optimizer.
+    _INACTIVE_PREFIXES = ("embed_traj_cond.", "embed_traj_valid.")
     _INACTIVE_NAMES = frozenset(("mask_tokens.clip",))
+    # Checkpoint metadata only: magic/version, velocity target, two model calls,
+    # ten-step Euler schedule, and hidden readout at t=9/10.
+    _FEATURE_PROTOCOL_SIGNATURE = (0x4D464C57, 1, 1, 2, 10, 9, 10)
 
     def __init__(self, expert, *, seed: int = 0, trainable: bool = True):
         super().__init__()
@@ -83,8 +87,10 @@ class MotionConditioner(nn.Module):
             raise TypeError("MotionExpert must expose its network as .model")
         if not callable(getattr(expert, "forward_features", None)):
             raise TypeError("MotionExpert must expose forward_features()")
+        self.register_buffer("_feature_protocol_signature", torch.tensor(
+            self._FEATURE_PROTOCOL_SIGNATURE, dtype=torch.int64))
         self.model = expert.model
-        # Only .model is registered even if an injected facade is an nn.Module;
+        # Only .model is registered as a child even if the facade is an nn.Module;
         # preserve the historical motion_conditioner.model.* checkpoint layout.
         object.__setattr__(self, "_expert", expert)
         self.seed = int(seed)
@@ -101,6 +107,27 @@ class MotionConditioner(nn.Module):
             name for name, _ in self.model.named_parameters() if self._inactive_parameter(name)
         )
         self.train(trainable)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # A joint safetensors checkpoint bypasses the standalone expert's
+        # metadata validator. Reject before it can overwrite Motion weights,
+        # including during a parent module's strict=False load.
+        self.validate_feature_protocol_signature(
+            state_dict.get(prefix + "_feature_protocol_signature"), checkpoint=prefix or "MotionConditioner")
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+
+    @classmethod
+    def validate_feature_protocol_signature(cls, signature, *, checkpoint="MotionConditioner"):
+        """Check serialization metadata without allocating a motion network."""
+        expected = torch.tensor(cls._FEATURE_PROTOCOL_SIGNATURE, dtype=torch.int64, device="cpu")
+        if (not isinstance(signature, torch.Tensor) or signature.dtype != torch.int64
+                or not torch.equal(signature.detach().cpu(), expected)):
+            raise RuntimeError(
+                f"{checkpoint} requires the velocity/LaMP two-call feature protocol; "
+                "legacy x0/single-forward or incompatible Motion checkpoints cannot be loaded, "
+                "including with strict=False")
 
     @classmethod
     def _inactive_parameter(cls, name):

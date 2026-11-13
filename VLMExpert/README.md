@@ -131,7 +131,7 @@ p_m = output.motion_features.p_m
 
 `extract_vlm_features(input_ids, attention_mask, pixel_values, image_grid_thw)` returns `tokens [B,1,N,Dv]`, `pooled_tokens [B,1,Dv]` and `p_v [B,Dv]` for the dual-source model. Padding is excluded from pooling, and each sample must contain at least one valid token. FP16/BF16 pooling accumulates in FP32 and returns the input dtype. `psi0_joint` additionally supports explicitly selected VLM layers, returning `[B,V,N,Dv]` tokens and `[B,V,Dv]` pooled features.
 
-`extract_motion_features(motion_img_embs=...)` returns `tokens [B,11,768]` and `p_m [B,768]`. `motion_feature_seed` controls the initial motion noise (default `0`); training dropout still follows the training RNG. A fixed seed is reproducible for the same batch layout.
+`extract_motion_features(motion_img_embs=...)` returns `tokens [B,11,768]` and `p_m [B,768]`. MotionExpert predicts velocity at noise time `t=1`, takes one Euler update to `t=0.9`, then supplies hidden tokens from a second forward pass. Joint training retains gradients through the update and the velocity output head; the Action Expert architecture is unchanged. `motion_feature_seed` controls the initial motion noise (default `0`); training dropout still follows the training RNG. A fixed seed is reproducible for the same batch layout. Use newly trained velocity Motion weights; old x0 weights are incompatible, and an old joint optimizer state must not be reused with the newly active Motion output head.
 
 `forward` accepts reusable `vlm_features` and `motion_features` from the same observation. With trainable sources, keep the feature computation graph and re-extract after each optimizer update; detached or stale features cannot replace fresh source forwards.
 

@@ -57,7 +57,8 @@ class UniEgoMotion(nn.Module):
         self._last_moe_aux_loss = None
         self._safety_activation_rms = None
         # The only prefix is flow time. Global motion features are read out
-        # from the eleven motion states after the first denoising call.
+        # from the eleven motion states; feature extraction reads the second
+        # call after one Euler update without changing any network layers.
         self.num_prefix_tokens = 1
 
     def get_moe_auxiliary_loss(self):

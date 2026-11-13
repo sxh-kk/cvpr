@@ -1,4 +1,4 @@
-"""Differentiable one-call features using real condition assembly and tiny decoders."""
+"""Differentiable one-update features using real condition assembly and tiny decoders."""
 
 from unittest.mock import patch
 
@@ -8,6 +8,7 @@ import torch
 from MotionExpert.model import uniegomotion as model_module
 from MotionExpert.tests.fixtures import conditioning, tiny_expert
 from MotionExpert.tests.fixtures import InspectDecoder
+from MotionExpert.mydiffusion.flow_matching import FlowMatching
 
 
 @pytest.fixture
@@ -25,18 +26,25 @@ def test_forward_features_updates_motion_parameters_and_observed_images(expert):
     expert.train()
     optimizer = torch.optim.AdamW(expert.parameters(), lr=1e-3)
     previous = expert.model.embed_clip_cond.weight.detach().clone()
+    previous_output = expert.model.output_process.weight.detach().clone()
     with patch.object(expert.model, "forward", wraps=expert.model.forward) as forward:
         output = expert.forward_features({"img_embs": images}, seed=62)
-    assert forward.call_count == 1
+    assert forward.call_count == 2
     assert expert.training
     assert output["one_step_hidden"].shape == (1, 11, 768)
     assert output["one_step_global"].shape == (1, 768)
     torch.testing.assert_close(output["one_step_global"], output["one_step_hidden"].mean(1),
                                rtol=0, atol=0)
     assert not any("global_token" in name for name, _ in expert.model.named_parameters())
-    noise, time, y = forward.call_args.args
+    noise, time = forward.call_args_list[0].args
+    y = forward.call_args_list[0].kwargs["y"]
     assert noise.shape == (1, 11, 245)
     torch.testing.assert_close(time, torch.ones(1))
+    updated_state, updated_time = forward.call_args_list[1].args
+    torch.testing.assert_close(updated_time, torch.full((1,), 0.9))
+    assert updated_state.requires_grad
+    assert output["metadata"]["feature_t"] == 0.9
+    assert output["metadata"]["feature_extraction"]["model_evaluations"] == 2
     assert y["img_mask"][:, 6:].bool().all()
     assert not y["valid_img_embs"][:, 6:].any()
     assert not y["img_embs"][:, 6:].any()
@@ -47,8 +55,11 @@ def test_forward_features_updates_motion_parameters_and_observed_images(expert):
     assert images.grad is not None and torch.isfinite(images.grad).all()
     assert images.grad.abs().sum() > 0
     assert expert.model.embed_clip_cond.weight.grad.abs().sum() > 0
+    assert torch.isfinite(expert.model.output_process.weight.grad).all()
+    assert expert.model.output_process.weight.grad.abs().sum() > 0
     optimizer.step()
     assert not torch.equal(expert.model.embed_clip_cond.weight, previous)
+    assert not torch.equal(expert.model.output_process.weight, previous_output)
 
 
 def test_future_images_and_ground_truth_are_hidden_and_have_zero_gradient(expert):
@@ -102,6 +113,49 @@ def test_frozen_interface_matches_one_step_without_retaining_gradients(expert):
     head(frozen["one_step_global"]).sum().backward()
     assert head.weight.grad is not None
     assert all(parameter.grad is None for parameter in expert.parameters())
+
+
+def test_lamp_reads_updated_state_instead_of_initial_noise():
+    expert = tiny_expert()
+    images = conditioning(batch=1, frames=6)["img_embs"]
+    with patch.object(expert.model, "forward", wraps=expert.model.forward) as forward:
+        output = expert.forward_features({"img_embs": images}, seed=62)
+    assert forward.call_count == 2
+    noise, initial_t = forward.call_args_list[0].args
+    state, feature_t = forward.call_args_list[1].args
+    torch.testing.assert_close(initial_t, torch.ones(1), rtol=0, atol=0)
+    torch.testing.assert_close(feature_t, torch.full((1,), 0.9), rtol=0, atol=0)
+    dt = feature_t - initial_t
+    expected_state = noise + dt[:, None, None] * expert.model.level
+    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+    # Future images are hidden, so these five hidden tokens contain only the
+    # updated generated state and prove which of the two evaluations was read.
+    torch.testing.assert_close(output["one_step_hidden"][:, 6:, :245],
+                               expected_state[:, 6:], rtol=0, atol=0)
+    assert not torch.equal(output["one_step_hidden"][:, 6:, :245], noise[:, 6:])
+    output["one_step_hidden"].square().mean().backward()
+    assert torch.isfinite(expert.model.level.grad) and expert.model.level.grad.abs() > 0
+
+
+@pytest.mark.parametrize("steps", [1, 10])
+@pytest.mark.parametrize("hidden_only", [False, True])
+def test_sampler_and_feature_api_read_the_same_updated_state(steps, hidden_only):
+    expert = tiny_expert()
+    y, noise = expert._sampling_inputs(
+        {"img_embs": conditioning(batch=1, frames=6)["img_embs"]}, seed=62,
+        task="fore", forecast_prefix=6, normalized=True, output_frames=11)
+    flow = FlowMatching(num_steps=steps)
+    with torch.no_grad():
+        _, expected, expected_global = flow.forward_features(expert.model, noise, {"y": y})
+        expert.model.calls = 0
+        result = flow.sample_loop(
+            expert.model, noise.shape, noise=noise, model_kwargs={"y": y},
+            return_one_step_hidden=hidden_only, return_one_step_features=not hidden_only)
+    assert expert.model.calls == max(steps, 2)
+    hidden = result[1] if hidden_only else result["one_step_hidden"]
+    torch.testing.assert_close(hidden, expected, rtol=0, atol=0)
+    if not hidden_only:
+        torch.testing.assert_close(result["one_step_global"], expected_global, rtol=0, atol=0)
 
 
 def test_mode_parameter_and_state_delegation_preserves_model_keys(expert):

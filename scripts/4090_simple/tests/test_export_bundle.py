@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -14,6 +15,76 @@ SPEC.loader.exec_module(export)
 
 
 class ExportTests(unittest.TestCase):
+    @staticmethod
+    def motion_export_inputs(root):
+        """Real metadata/serialization with only the large network factory replaced."""
+        import torch
+        from safetensors.torch import save_file
+        from MotionExpert.config import architecture_metadata, as_dict, smplh_motion_expert_config
+        from MotionExpert.tests.fixtures import smplh_stats
+        from MotionExpert.tests.test_visual_compatibility import visual
+        from psi.models.frozen_motion import MotionConditioner
+
+        class TinyMotion(torch.nn.Module):
+            def __init__(self, cfg=None):
+                super().__init__()
+                self.fixture = torch.nn.Parameter(torch.tensor([.2]))
+
+        cfg = smplh_motion_expert_config()
+        source = root / "velocity_metadata.ckpt"
+        contract = visual(local=True)
+        state = TinyMotion().state_dict()
+        torch.save({"state_dict": state, "hyper_parameters": as_dict(cfg),
+                    "motionexpert_architecture": architecture_metadata(cfg),
+                    "motionexpert_normalization": smplh_stats(cfg),
+                    "motionexpert_visual_conditioning": contract}, source)
+        joint = root / "joint.safetensors"
+        signature_key = "motion_conditioner._feature_protocol_signature"
+        weights = {export.MOTION_PREFIX + name: value.clone() for name, value in state.items()}
+        weights[signature_key] = torch.tensor(MotionConditioner._FEATURE_PROTOCOL_SIGNATURE, dtype=torch.int64)
+        save_file(weights, str(joint))
+        return source, joint, weights, contract["encoder"], TinyMotion
+
+    def test_motion_export_rejects_legacy_joint_before_rewrapping_velocity_metadata(self):
+        import torch
+        from safetensors.torch import save_file
+
+        for mismatch in ("missing", "wrong_value", "wrong_dtype"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, joint, weights, encoder, factory = self.motion_export_inputs(root)
+                key = "motion_conditioner._feature_protocol_signature"
+                if mismatch == "missing":
+                    weights.pop(key)
+                elif mismatch == "wrong_value":
+                    weights[key][1] += 1
+                else:
+                    weights[key] = weights[key].to(torch.float32)
+                save_file(weights, str(joint))
+                output = root / "exported/new_motion.ckpt"
+                with patch("MotionExpert.model.UniEgoMotion", factory) as model_factory:
+                    with self.assertRaisesRegex(RuntimeError, "velocity/LaMP two-call feature protocol"):
+                        export.export_motion(source, joint, output, 20000, encoder)
+                self.assertFalse(output.exists())
+                self.assertFalse(output.parent.exists())
+
+    def test_motion_export_roundtrips_new_protocol_and_exact_weights(self):
+        import torch
+        from MotionExpert.checkpoints import checkpoint_config, read_checkpoint
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, joint, weights, encoder, factory = self.motion_export_inputs(root)
+            output = root / "exported/new_motion.ckpt"
+            with patch("MotionExpert.model.UniEgoMotion", factory):
+                report = export.export_motion(source, joint, output, 20000, encoder)
+            exported = read_checkpoint(output)
+            self.assertEqual(checkpoint_config(exported).FLOW.PREDICTION_TYPE, "velocity")
+            self.assertEqual(report["strict_meta_load"], "passed")
+            self.assertEqual(report["exact_serialization_comparison"], "passed")
+            for name, value in exported["state_dict"].items():
+                torch.testing.assert_close(value, weights[export.MOTION_PREFIX + name], rtol=0, atol=0)
+
     def test_redundant_dino_identity_is_derived_and_conflicts_rejected(self):
         original = {"encoder": {"local_file_sha256": {"model.safetensors": "a" * 64}}}
         canonical = export.canonical_visual_identity(original)

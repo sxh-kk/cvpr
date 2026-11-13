@@ -242,17 +242,21 @@ def export_motion(source_metadata, joint_weights, output, step, actual_encoder):
     from MotionExpert.model import UniEgoMotion
     from MotionExpert.visual_contract import checkpoint_visual_contract, compare_visual_contracts
     from psi.models.checkpoint_aliases import restore_shared_tensor_aliases
+    from psi.models.frozen_motion import MotionConditioner
 
     torch.set_num_threads(2)
-    checkpoint = read_checkpoint(source_metadata)
-    cfg = checkpoint_config(checkpoint)
-    with torch.device("meta"):
-        model = UniEgoMotion(cfg)
     with safe_open(joint_weights, framework="pt", device="cpu") as joint:
+        signature_key = "motion_conditioner._feature_protocol_signature"
+        signature = joint.get_tensor(signature_key) if signature_key in joint.keys() else None
+        MotionConditioner.validate_feature_protocol_signature(signature, checkpoint="Joint Motion export")
         state = {name.removeprefix(MOTION_PREFIX): joint.get_tensor(name)
                  for name in joint.keys() if name.startswith(MOTION_PREFIX)}
     if not state:
         raise ValueError("No Motion weights in the joint checkpoint")
+    checkpoint = read_checkpoint(source_metadata)
+    cfg = checkpoint_config(checkpoint)
+    with torch.device("meta"):
+        model = UniEgoMotion(cfg)
     original_keys = set(state)
     state = restore_shared_tensor_aliases(model, state)
     model.load_state_dict(state, strict=True, assign=True)

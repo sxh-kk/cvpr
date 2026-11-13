@@ -181,7 +181,7 @@ python -m MotionExpert.evaluate \
   --output "$HOME/sigma0/runs/evaluation/motion-val.json"
 ```
 
-Increase the positive `--max-samples` value for a larger selection, or change `--split` and `--checkpoint`. This command reports motion metrics such as position and rotation error. The [MotionExpert API](MotionExpert/README.md#一步hidden与在线共享图像) also provides prediction and feature extraction.
+Increase the positive `--max-samples` value for a larger selection, or change `--split` and `--checkpoint`. This command reports motion metrics such as position and rotation error. The [MotionExpert API](MotionExpert/README.md#一步hidden与在线共享图像) uses velocity flow matching and provides LaMP-style hidden features from a second forward pass after one Euler update.
 
 ### SIMPLE policy evaluation
 

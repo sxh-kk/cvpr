@@ -1,4 +1,4 @@
-"""Image-only SMPL-H245 forecasting and differentiable first-call features."""
+"""Image-only SMPL-H245 forecasting and differentiable one-update features."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .utils.task_conditioning import apply_task_conditioning
 
 
 class MotionExpert:
-    """Generate versioned motion and expose first-call 768D expert features.
+    """Generate versioned motion and expose one-update 768D expert features.
 
     Forecasting accepts only the observed camera/image prefix. Set
     ``output_frames`` to request the complete generated sequence; its future
@@ -304,8 +304,8 @@ class MotionExpert:
             conditioning, seed=seed, task=task, forecast_prefix=forecast_prefix,
             normalized=normalized, output_frames=output_frames,
         )
-        t = torch.ones(noise.shape[0], device=self.device, dtype=torch.float32)
-        _, hidden, global_hidden = self.model(noise, t, y, cond_scale=cond_scale, return_features=True)
+        _, hidden, global_hidden = self.flow.forward_features(
+            self.model, noise, model_kwargs={"y": y, "cond_scale": cond_scale})
         output = {"one_step_hidden": hidden, "one_step_global": global_hidden}
         output.update(self._feature_metadata(y, task=task, seed=seed, cond_scale=cond_scale))
         return output
@@ -313,7 +313,7 @@ class MotionExpert:
     def forward_features(self, conditioning: Mapping[str, torch.Tensor], *, seed=None,
                          task=None, forecast_prefix=None, output_frames=None,
                          cond_scale=None, normalized=True):
-        """Differentiable first flow call at t=1 for downstream post-training.
+        """Read the second flow call after one Euler update, retaining autograd.
 
         The current 5Hz forecasting profile defaults to six observed images
         and eleven generated-state tokens. A full eleven-frame archive input
@@ -342,7 +342,7 @@ class MotionExpert:
     @torch.no_grad()
     def extract_features(self, conditioning: Mapping[str, torch.Tensor], *, seed=None, task="fore",
                          forecast_prefix=None, output_frames=None, cond_scale=None, normalized=True):
-        """Run one frozen flow call; these features do not update MotionExpert.
+        """Run one Euler update and a frozen second-call hidden readout.
 
         The six-frame forecasting prefix is padded to the fixed eleven-frame window.
         Use ``forward_features`` when the downstream loss must update this model.

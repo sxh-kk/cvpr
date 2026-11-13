@@ -1,4 +1,4 @@
-"""Extract immutable epoch-100 t=1 motion tokens for token-subset probes.
+"""Extract immutable epoch-100 LaMP-style motion tokens for token-subset probes.
 
 This diagnostic never constructs a Trainer, an optimizer or a source archive.
 It reuses the accepted 20/100 probe population and inputs and writes only to a
@@ -20,7 +20,8 @@ import traceback
 
 import numpy as np
 
-from .probe_prior import (atomic_json, condition_inputs, event, file_stamp,
+from .probe_prior import (FEATURE_PROTOCOL, assert_feature_protocol, atomic_json,
+                          checked_forward_hidden, condition_inputs, event, file_stamp,
                           forward_hidden, make_noise, make_shards,
                           _expert_from_snapshot)
 
@@ -39,6 +40,7 @@ def _function_ast(source, name):
 
 def assert_bindings(plan):
     """Metadata hashes and payload stamps only; do not hash cached payloads."""
+    assert_feature_protocol(plan)
     base = Path(plan["reuse_job"]["job_dir"])
     for name, expected in plan["reuse_job"]["artifact_stamps"].items():
         if file_stamp(base / name) != expected:
@@ -47,6 +49,7 @@ def assert_bindings(plan):
         if hashlib.sha256((base / name).read_bytes()).hexdigest() != expected:
             raise ValueError(f"Read-only baseline metadata changed: {name}")
     original = json.loads((base / "plan.json").read_text())
+    assert_feature_protocol(original)
     if plan["batch_size"] != original["batch_size"] or plan["logical_shards"] != original["gpus"]:
         raise ValueError("Paired token extraction must retain original baseline batch shapes and logical shards")
     if file_stamp(plan["checkpoint"]) != plan["checkpoint_stamp"]:
@@ -76,6 +79,7 @@ def prepare(base_dir, cache, job_dir, *, gpus, batch_size=128, sleep_seconds=12.
     initial = {name: file_stamp(base / name) for name in names}
     raw = {name: (base / name).read_bytes() for name in names}
     old = json.loads(raw["plan.json"])
+    assert_feature_protocol(old)
     if (json.loads(raw["review.json"]).get("passed") is not True
             or json.loads(raw["extraction-complete.json"]).get("passed") is not True
             or old.get("format") != "motionexpert-frozen-prior-probe-v1"
@@ -139,6 +143,7 @@ def prepare(base_dir, cache, job_dir, *, gpus, batch_size=128, sleep_seconds=12.
     source_names = ("MotionExpert/probe_tokens.py", "MotionExpert/probe_prior.py",
                     "MotionExpert/dataset/probe_cache.py", "MotionExpert/prior_probe_math.py")
     plan = {"format": FORMAT, "job_dir": str(job), "epoch": 100,
+        "feature_protocol": dict(FEATURE_PROTOCOL),
         "checkpoint": checkpoint, "checkpoint_stamp": file_stamp(checkpoint),
         "cache_root": old["cache_root"], "vision_root": old["vision_root"],
         "cache_manifest_sha256": old["cache_manifest_sha256"],
@@ -184,13 +189,14 @@ def _gpu_acceptance(expert, conditions, plan):
     with torch.inference_mode():
         _, official_noise = expert._sampling_inputs(small, seed=plan["seed"], task="fore",
             forecast_prefix=6, normalized=True, output_frames=11)
-        pooled, hidden, prediction = forward_hidden(expert, small, official_noise.cpu())
+        pooled, hidden, prediction = checked_forward_hidden(expert, small, official_noise.cpu())
         official = expert.forward_features(small, seed=plan["seed"])
     torch.testing.assert_close(official["one_step_hidden"], hidden, rtol=PAIRED_RTOL, atol=PAIRED_ATOL)
     if (not torch.isfinite(hidden).all() or not torch.isfinite(prediction).all()
             or expert.model.training or any(p.requires_grad or p.grad is not None for p in expert.parameters())):
         raise AssertionError("Frozen expert GPU acceptance failed")
     return {"passed": True, "batch": len(official_noise), "hidden_shape": list(hidden.shape),
+        "feature_protocol": dict(FEATURE_PROTOCOL),
         "public_hidden_max_abs_error": float((official["one_step_hidden"] - hidden).abs().max()),
         "global_equals_mean": bool(torch.equal(pooled, hidden.mean(1))),
         "expert_trainable_parameters": 0, "expert_gradients": False,

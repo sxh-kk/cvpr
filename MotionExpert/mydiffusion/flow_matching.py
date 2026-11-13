@@ -1,7 +1,7 @@
-"""E7 x0 Flow Matching loss and Euler sampling.
+"""E7 velocity Flow Matching loss and Euler sampling.
 
-t=0 denotes clean motion and t=1 Gaussian noise. The model predicts x0;
-sampling converts it to velocity (x_t - x0) / t and integrates toward t=0.
+t=0 denotes clean motion and t=1 Gaussian noise. The model directly predicts
+the path velocity epsilon - x0 and sampling integrates toward t=0.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ def _append_dims(value, ndim):
 
 class FlowMatching:
     def __init__(self, num_steps=10, solver="euler", beta_alpha=1.5, beta_beta=1.0,
-                 t_min=0.001, prediction_type="x0", global_weight=8.0,
+                 t_min=0.001, prediction_type="velocity", global_weight=8.0,
                  global_feature_start=None, global_feature_end=None):
         if not isinstance(num_steps, int) or num_steps <= 0:
             raise ValueError("num_steps must be positive")
-        if solver != "euler" or prediction_type != "x0":
-            raise ValueError("E7 uses x0 prediction and Euler sampling")
+        if solver != "euler" or prediction_type != "velocity":
+            raise ValueError("E7 uses velocity prediction and Euler sampling")
         if (not all(math.isfinite(value) for value in (beta_alpha, beta_beta, t_min))
                 or beta_alpha <= 0 or beta_beta <= 0 or not 0 <= t_min < 1):
             raise ValueError("Invalid flow timestep distribution")
@@ -113,22 +113,18 @@ class FlowMatching:
         return (1.0 - t_view) * x_start + t_view * noise
 
     @staticmethod
-    def target_to_velocity(x_t: Tensor, t: Tensor, pred_xstart: Tensor) -> Tensor:
-        """Convert a clean-target prediction to the current-convention velocity.
+    def velocity_to_target(x_t: Tensor, t: Tensor, velocity: Tensor) -> Tensor:
+        """Recover the diagnostic clean estimate ``x_t - t * velocity``.
 
-        Along ``x_t = (1-t) x_0 + t epsilon``, the corresponding velocity is
-        ``(x_t - x_0) / t``. Sampling never calls this conversion at ``t=0``;
-        the final Euler interval ends at zero without a model call there.
+        No division by time is needed, including at the clean endpoint t=0.
         """
-        if x_t.shape != pred_xstart.shape:
+        if x_t.shape != velocity.shape:
             raise ValueError(
-                f"x_t and pred_xstart must have identical shapes, got "
-                f"{tuple(x_t.shape)} and {tuple(pred_xstart.shape)}."
+                f"x_t and velocity must have identical shapes, got "
+                f"{tuple(x_t.shape)} and {tuple(velocity.shape)}."
             )
-        if bool(torch.any(t <= 0.0)):
-            raise ValueError("Target-predictive velocity conversion requires t > 0.")
         t_view = _append_dims(t.to(device=x_t.device, dtype=x_t.dtype), x_t.ndim)
-        return (x_t - pred_xstart) / t_view
+        return x_t - t_view * velocity
 
     def _model_prediction(
         self,
@@ -139,7 +135,7 @@ class FlowMatching:
         return_hidden: bool = False,
         return_features: bool = False,
     ) -> Tuple[Tensor, Tensor]:
-        """Return ``(velocity, clean_prediction)`` for either parameterization."""
+        """Return the direct velocity and its diagnostic clean prediction."""
         if return_hidden and return_features:
             raise ValueError("return_hidden and return_features are mutually exclusive")
         if return_features:
@@ -154,8 +150,8 @@ class FlowMatching:
                 f"The model must output shape {tuple(x_t.shape)}, got "
                 f"{tuple(model_output.shape)}."
             )
-        pred_xstart = model_output
-        velocity = self.target_to_velocity(x_t, t, pred_xstart)
+        velocity = model_output
+        pred_xstart = self.velocity_to_target(x_t, t, velocity)
         if return_features:
             return velocity, pred_xstart, hidden, global_hidden
         if return_hidden:
@@ -362,12 +358,12 @@ class FlowMatching:
                 f"got {tuple(model_output.shape)}."
             )
 
-        pred_xstart = model_output
-        pred_velocity = self.target_to_velocity(x_t, t, pred_xstart)
+        pred_velocity = model_output
+        pred_xstart = self.velocity_to_target(x_t, t, pred_velocity)
         if generation_mask is not None:
             pred_velocity = torch.where(generation_mask, pred_velocity,
                                         torch.zeros_like(pred_velocity))
-        target = x_start
+        target = target_velocity
 
         mse, local_mse, global_mse = self._valid_frame_mse(
             model_output - target,
@@ -400,6 +396,28 @@ class FlowMatching:
             return next(model.parameters()).device
         except (AttributeError, StopIteration):
             return torch.device("cpu")
+
+    def forward_features(self, model: Any, noise: Tensor,
+                         model_kwargs: Optional[Dict[str, Any]] = None) -> Tuple[Tensor, Tensor, Tensor]:
+        """Take one Euler step, then read hidden states from a second call.
+
+        LaMP's noise-to-data time 0 -> 0.1 is 1 -> 0.9 here with ten steps.
+        Preserve the caller's grad state so joint post-training can backpropagate
+        through both the state update and the second hidden-state evaluation.
+        """
+        model_kwargs = {} if model_kwargs is None else model_kwargs
+        self._check_no_repaint(model_kwargs)
+        times = torch.linspace(1.0, 0.0, self.num_steps + 1,
+                               device=noise.device, dtype=torch.float32)
+        t, next_t = times[0].expand(noise.shape[0]), times[1].expand(noise.shape[0])
+        velocity, _ = self._model_prediction(model, noise, t, model_kwargs)
+        state = noise + (times[1] - times[0]).to(noise.dtype) * velocity
+        generation_mask = self._generation_mask(noise, model_kwargs.get("y", {}))
+        if generation_mask is not None:
+            state = torch.where(generation_mask, state, noise)
+        velocity, _, hidden, global_hidden = self._model_prediction(
+            model, state, next_t, model_kwargs, return_features=True)
+        return velocity, hidden, global_hidden
 
     @torch.no_grad()
     def sample_loop_progressive(
@@ -464,18 +482,20 @@ class FlowMatching:
         for index in indices:
             t_scalar, next_t_scalar = times[index], times[index + 1]
             t = t_scalar.expand(batch_size)
-            first_features = return_one_step_features and index == 0
+            feature_call = index == 1
+            return_features = return_one_step_features and feature_call
+            return_hidden = return_one_step_hidden and feature_call
             prediction = self._model_prediction(
                 model,
                 x,
                 t,
                 model_kwargs,
-                return_hidden=return_one_step_hidden,
-                return_features=first_features,
+                return_hidden=return_hidden,
+                return_features=return_features,
             )
-            if first_features:
+            if return_features:
                 velocity, pred_xstart, hidden, global_hidden = prediction
-            elif return_one_step_hidden:
+            elif return_hidden:
                 velocity, pred_xstart, hidden = prediction
             else:
                 velocity, pred_xstart = prediction
@@ -486,15 +506,29 @@ class FlowMatching:
             if generation_mask is not None:
                 next_x = torch.where(generation_mask, next_x, context_noise)
 
+            # A one-interval motion sample still needs a second endpoint
+            # evaluation when hidden states are requested.
+            if steps == 1 and (return_one_step_hidden or return_one_step_features):
+                feature_prediction = self._model_prediction(
+                    model, next_x, next_t_scalar.expand(batch_size), model_kwargs,
+                    return_hidden=return_one_step_hidden,
+                    return_features=return_one_step_features)
+                if return_one_step_features:
+                    _, _, hidden, global_hidden = feature_prediction
+                    return_features = True
+                else:
+                    _, _, hidden = feature_prediction
+                    return_hidden = True
+
             output = {
                 "sample": next_x,
                 "pred_xstart": pred_xstart,
                 "t": t,
                 "next_t": next_t_scalar.expand(batch_size),
             }
-            if return_one_step_hidden or first_features:
+            if return_hidden or return_features:
                 output["one_step_hidden"] = hidden
-            if first_features:
+            if return_features:
                 output["one_step_global"] = global_hidden
             yield output
             x = next_x

@@ -229,6 +229,7 @@ def test_complete_model_checkpoint_roundtrip_contains_frozen_experts_and_archite
     arguments = _forward_args()
     state = model.state_dict()
     assert "action_header._architecture_signature" in state
+    assert "motion_conditioner._feature_protocol_signature" in state
     assert "vlm_model.embedding.weight" in state
     assert "motion_conditioner.model.0.weight" in state
     restored = _build_model(dual_harness).eval()
@@ -241,6 +242,46 @@ def test_complete_model_checkpoint_roundtrip_contains_frozen_experts_and_archite
     legacy = {key: value for key, value in state.items() if key != "action_header._architecture_signature"}
     with pytest.raises(RuntimeError, match="legacy joint-attention"):
         restored.load_state_dict(legacy, strict=False)
+
+
+@pytest.mark.parametrize("strict", [True, False])
+@pytest.mark.parametrize("scope", ["joint", "motion_only"])
+@pytest.mark.parametrize("mismatch", ["missing", "wrong_value", "wrong_dtype", "wrong_shape"])
+def test_motion_protocol_rejects_legacy_joint_and_partial_motion_weights(
+    dual_harness, strict, scope, mismatch,
+):
+    model = _build_model(dual_harness).eval()
+    target = model if scope == "joint" else model.motion_conditioner
+    signature_key = ("motion_conditioner." if scope == "joint" else "") + "_feature_protocol_signature"
+    state = {name: value.clone() for name, value in target.state_dict().items()}
+    if mismatch == "missing":
+        state.pop(signature_key)
+    elif mismatch == "wrong_value":
+        state[signature_key][1] += 1
+    elif mismatch == "wrong_dtype":
+        state[signature_key] = state[signature_key].float()
+    else:
+        state[signature_key] = state[signature_key][1:]
+    # A failed load must not replace the already validated velocity network.
+    weight_key = ("motion_conditioner." if scope == "joint" else "") + "model.0.weight"
+    state[weight_key].fill_(123)
+    previous = model.motion_conditioner.model[0].weight.detach().clone()
+    with pytest.raises(RuntimeError, match="velocity/LaMP two-call feature protocol"):
+        target.load_state_dict(state, strict=strict)
+    torch.testing.assert_close(model.motion_conditioner.model[0].weight, previous, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("strict", [True, False])
+@pytest.mark.parametrize("scope", ["joint", "motion_only"])
+def test_motion_protocol_roundtrips_without_adding_parameters(dual_harness, strict, scope):
+    source = _build_model(dual_harness).eval()
+    restored = _build_model(dual_harness).eval()
+    source_module = source if scope == "joint" else source.motion_conditioner
+    target_module = restored if scope == "joint" else restored.motion_conditioner
+    assert not any("_feature_protocol_signature" in name for name, _ in source.named_parameters())
+    target_module.load_state_dict(source_module.state_dict(), strict=strict)
+    for name, value in source_module.state_dict().items():
+        torch.testing.assert_close(target_module.state_dict()[name], value, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("override, message", [

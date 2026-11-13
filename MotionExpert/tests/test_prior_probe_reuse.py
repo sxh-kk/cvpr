@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from MotionExpert import prior_probe_fit as fitting
-from MotionExpert.probe_prior import assert_reuse_current, file_stamp, prepare_reuse
+from MotionExpert.probe_prior import FEATURE_PROTOCOL, assert_reuse_current, file_stamp, prepare_reuse
 
 
 def write_json(path, value):
@@ -69,6 +69,7 @@ def baseline_job(tmp_path):
         checkpoints[str(epoch)] = str(path)
     repo = Path(__file__).resolve().parents[2]
     plan = {"format": "motionexpert-frozen-prior-probe-v1", "windows": count,
+            "feature_protocol": dict(FEATURE_PROTOCOL),
             "seed": 620017, "gpus": [0], "batch_size": 128, "precision": "float32", "weights": "ema",
             "checkpoints": checkpoints, "checkpoint_stamps": {epoch: file_stamp(path) for epoch, path in checkpoints.items()},
             "cache_root": str(tmp_path / "cache"), "vision_root": str(tmp_path / "vision"),
@@ -116,6 +117,7 @@ def test_reuse_inherits_rows_targets_and_artifacts_without_touching_baseline(tmp
     before = {path.name: file_stamp(path) for path in base.iterdir()}
     plan, entries = prepare_reuse(base, cache, checkpoint, job, [0], 4)
     assert plan["extract_epochs"] == [160] and plan["fit_models"] == ["epoch160"]
+    assert plan["feature_protocol"] == FEATURE_PROTOCOL
     assert plan["seed"] == 620017 and len(entries) == plan["windows"]
     assert (job / "targets.npz").resolve() == base / "targets.npz"
     assert not (job / "plan.json").exists()
@@ -124,6 +126,22 @@ def test_reuse_inherits_rows_targets_and_artifacts_without_touching_baseline(tmp
     (base / "epoch20.npy").touch()
     with pytest.raises(ValueError, match="artifact changed"):
         assert_reuse_current(plan)
+
+
+@pytest.mark.parametrize("protocol", [None, {"version": "single_forward_t1_v1"}])
+def test_reuse_rejects_legacy_hidden_readouts_without_linking(tmp_path, protocol):
+    base, cache, checkpoint, job, _ = baseline_job(tmp_path)
+    plan = json.loads((base / "plan.json").read_text())
+    if protocol is None:
+        plan.pop("feature_protocol")
+    else:
+        plan["feature_protocol"] = protocol
+    write_json(base / "plan.json", plan)
+    before = {str(path.relative_to(base)): file_stamp(path) for path in base.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError, match="legacy single-forward readouts"):
+        prepare_reuse(base, cache, checkpoint, job, [0], 4)
+    assert not list(job.iterdir())
+    assert before == {str(path.relative_to(base)): file_stamp(path) for path in base.rglob("*") if path.is_file()}
 
 
 @pytest.mark.parametrize("mismatch", ("cache", "selection", "acceptance", "layout"))

@@ -29,6 +29,7 @@ MODEL:
   INIT_CKPT_PATH: null
   CKPT_PATH: null
 FLOW:
+  PREDICTION_TYPE: velocity
   GLOBAL_WEIGHT: 8.0
 TRAIN:
   EXP_PATH: ~/sigma0/runs/motion/smplh_k12_psi0_256x480_5hz_camera_quality_v4_meanpool_from_scratch

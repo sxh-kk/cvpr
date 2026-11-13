@@ -1,4 +1,4 @@
-"""Frozen t=1 mean-pooled motion-prior diagnostics against historical DINO.
+"""Frozen LaMP-style mean-pooled motion-prior diagnostics against historical DINO.
 
 Only the independent linear readouts are fitted. MotionExpert and DINO remain
 frozen; this entry point never imports a Trainer or resumes motion training.
@@ -20,6 +20,17 @@ import time
 import traceback
 
 import numpy as np
+
+
+FEATURE_PROTOCOL = {"version": "lamp_one_update_hidden_v1", "prediction_type": "velocity",
+                    "initial_t": 1.0, "hidden_t": 0.9, "model_evaluations": 2,
+                    "euler_updates": 1}
+
+
+def assert_feature_protocol(plan):
+    if plan.get("feature_protocol") != FEATURE_PROTOCOL:
+        raise ValueError("Probe feature protocol differs: legacy single-forward readouts cannot "
+                         "be reused with LaMP two-call hidden features; prepare a new baseline")
 
 
 def atomic_json(path, value):
@@ -142,6 +153,7 @@ def assert_reuse_current(plan):
     reuse = plan.get("reuse_job")
     if not reuse:
         return
+    assert_feature_protocol(plan)
     base = Path(reuse["job_dir"])
     for name, expected in reuse["artifact_stamps"].items():
         if file_stamp(base / name) != expected:
@@ -165,6 +177,7 @@ def prepare_reuse(base_dir, cache, checkpoint160, job, gpus, batch_size):
     initial = {name: file_stamp(base / name) for name in metadata}
     raw = {name: (base / name).read_bytes() for name in metadata}
     old = json.loads(raw["plan.json"])
+    assert_feature_protocol(old)
     metrics = json.loads(raw["metrics.json"])
     if (json.loads(raw["review.json"]).get("passed") is not True
             or json.loads(raw["extraction-complete.json"]).get("passed") is not True):
@@ -283,9 +296,9 @@ def forward_hidden(expert, conditions, noise):
         raise AssertionError("Future images entered frozen prior")
     if {"motion", "motion_valid", "feature_valid_mask"} & set(y):
         raise AssertionError("Ground-truth motion/masks entered prior input")
-    t = torch.ones(noise.shape[0], device=expert.device, dtype=torch.float32)
-    prediction, hidden, global_hidden = expert.model(noise.to(expert.device), t, y,
-                                                    cond_scale=None, return_features=True)
+    prediction, hidden, global_hidden = expert.flow.forward_features(
+        expert.model, noise.to(device=expert.device, dtype=expert.dtype),
+        model_kwargs={"y": y, "cond_scale": None})
     if hidden.shape[1:] != (11, 768) or global_hidden.shape[1:] != (768,):
         raise AssertionError("Frozen prior feature shape differs")
     if not torch.equal(global_hidden, hidden.mean(1)) or not torch.isfinite(global_hidden).all():
@@ -293,11 +306,43 @@ def forward_hidden(expert, conditions, noise):
     return global_hidden, hidden, prediction
 
 
+def checked_forward_hidden(expert, conditions, noise):
+    """Check both calls and the Euler state used by frozen-feature acceptance."""
+    import torch
+    calls, first_velocity = [], []
+
+    def capture_input(module, args):
+        calls.append((args[0].detach().clone(), args[1].detach().clone()))
+
+    def capture_output(module, args, output):
+        if len(calls) == 1:
+            velocity = output[0] if isinstance(output, tuple) else output
+            first_velocity.append(velocity.detach().clone())
+
+    before = expert.model.register_forward_pre_hook(capture_input)
+    after = expert.model.register_forward_hook(capture_output)
+    try:
+        result = forward_hidden(expert, conditions, noise)
+    finally:
+        before.remove()
+        after.remove()
+    if len(calls) != 2 or len(first_velocity) != 1:
+        raise AssertionError("LaMP frozen features require two model calls and one Euler state update")
+    expected_noise = noise.to(device=expert.device, dtype=expert.dtype)
+    torch.testing.assert_close(calls[0][0], expected_noise, rtol=0, atol=0)
+    for (_, actual_t), expected_t in zip(calls, (FEATURE_PROTOCOL["initial_t"], FEATURE_PROTOCOL["hidden_t"])):
+        torch.testing.assert_close(actual_t, torch.full_like(actual_t, expected_t), rtol=0, atol=0)
+    dt = (calls[1][1] - calls[0][1]).to(expected_noise.dtype).view(-1, 1, 1)
+    torch.testing.assert_close(calls[1][0], expected_noise + dt * first_velocity[0], rtol=0, atol=0)
+    return result
+
+
 def _expert_from_snapshot(cfg, normalizer, visual, checkpoint_path, checkpoint, device):
     import torch
     from .motion_expert import MotionExpert
     from .model import UniEgoMotion
     from .checkpoints import model_state
+    from .mydiffusion.flow_matching import FlowMatching
     expert = MotionExpert.__new__(MotionExpert)
     expert.cfg, expert.normalizer = cfg, normalizer
     expert.device, expert.dtype = device, torch.float32
@@ -306,6 +351,13 @@ def _expert_from_snapshot(cfg, normalizer, visual, checkpoint_path, checkpoint, 
     # Keep requires_grad=True until the original EMA ordering has been resolved.
     expert.model.load_state_dict(model_state(expert.model, checkpoint, use_ema=True), strict=True)
     expert.model.requires_grad_(False)
+    expert.flow = FlowMatching(
+        num_steps=cfg.FLOW.NUM_STEPS, solver=cfg.FLOW.SOLVER,
+        beta_alpha=cfg.FLOW.BETA_ALPHA, beta_beta=cfg.FLOW.BETA_BETA,
+        t_min=cfg.FLOW.T_MIN, prediction_type=cfg.FLOW.PREDICTION_TYPE,
+        global_weight=cfg.FLOW.GLOBAL_WEIGHT,
+        global_feature_start=cfg.FLOW.GLOBAL_FEATURE_START,
+        global_feature_end=cfg.FLOW.GLOBAL_FEATURE_END)
     return expert
 
 
@@ -314,15 +366,8 @@ def gpu_acceptance(expert, conditions, entries, plan):
     small = {key: value[:4] for key, value in conditions.items()}
     entries = entries[:4]
     noise = make_noise(entries, plan["seed"], plan["archive_fingerprint"])
-    first_calls = []
-    def check_input(module, args):
-        first_calls.append(bool(torch.equal(args[0], noise.to(expert.device))) and bool((args[1] == 1).all()))
-    hook = expert.model.register_forward_pre_hook(check_input)
-    try:
-        with torch.inference_mode():
-            global_hidden, hidden, prediction = forward_hidden(expert, small, noise)
-    finally:
-        hook.remove()
+    with torch.inference_mode():
+        global_hidden, hidden, prediction = checked_forward_hidden(expert, small, noise)
     # Compare the explicit paired-noise path to the public feature interface,
     # using that interface's own deterministic CUDA generator.
     y, official_noise = expert._sampling_inputs(small, seed=plan["seed"], task="fore", forecast_prefix=6,
@@ -331,7 +376,7 @@ def gpu_acceptance(expert, conditions, entries, plan):
         expected, _, _ = forward_hidden(expert, small, official_noise.cpu())
         official = expert.forward_features(small, seed=plan["seed"])["one_step_global"]
     torch.testing.assert_close(official, expected, rtol=2e-5, atol=2e-5)
-    if first_calls != [True] or expert.model.training or any(p.requires_grad for p in expert.parameters()):
+    if expert.model.training or any(p.requires_grad for p in expert.parameters()):
         raise AssertionError("Frozen extraction mode/noise violated")
     head = torch.nn.Linear(768, 2, device=expert.device)
     old = head.weight.detach().clone()
@@ -344,6 +389,7 @@ def gpu_acceptance(expert, conditions, entries, plan):
     if torch.equal(old, head.weight) or any(p.grad is not None for p in expert.parameters()):
         raise AssertionError("Probe head update changed or attached to frozen expert")
     return {"passed": True, "batch": len(entries), "hidden_shape": list(hidden.shape),
+            "feature_protocol": dict(FEATURE_PROTOCOL),
             "global_equals_hidden_mean": True, "pure_gaussian_t1": True,
             "public_interface_max_abs_error": float((official - expected).abs().max()),
             "head_parameters_updated": True, "expert_requires_grad": False, "expert_gradients": False,
@@ -438,6 +484,7 @@ def extract(plan, cache, entries):
     from .checkpoints import read_checkpoint, checkpoint_config, validate_checkpoint_statistics
     from .dataset.normalization import MotionNormalizer
     from .visual_contract import checkpoint_visual_contract, compare_visual_contracts
+    assert_feature_protocol(plan)
     job = Path(plan["job_dir"])
     count = len(entries)
     epochs = plan.get("extract_epochs", [20, 100])
@@ -618,6 +665,7 @@ def main():
                            "100": str(Path(args.checkpoint100).resolve(strict=True))}
             counts = Counter((row["split"], row["source"]) for row in entries)
             plan = {"format": "motionexpert-frozen-prior-probe-v1", "job_dir": str(job), "seed": args.seed,
+                "feature_protocol": dict(FEATURE_PROTOCOL),
                 "checkpoints": checkpoints, "checkpoint_stamps": {key: file_stamp(path) for key, path in checkpoints.items()},
                 "cache_root": str(cache.root), "vision_root": str(cache.vision_root),
                 "cache_manifest_sha256": cache.manifest_sha256,
@@ -626,8 +674,9 @@ def main():
                 "gpus": gpus, "batch_size": args.batch_size, "precision": "float32", "weights": "ema",
                 "windows": len(entries), "counts": {f"{split}/{source}": count for (split, source), count in counts.items()},
                 "label_specs": label_specs, "noise_rows": sorted(noise_rows), "noise_draws": 3,
-                "input": "six historical DINO frames only; all245 Gaussian channels; t=1; no trajectory",
-                "readout": "all eleven motion hidden states mean; no motion parameter optimization",
+                "input": "six historical DINO frames only; all245 Gaussian channels at t=1; "
+                         "one Euler update to t=0.9; no trajectory",
+                "readout": "second-call eleven motion hidden states mean; no motion parameter optimization",
                 "extract_epochs": [20, 100], "fit_models": ["epoch20", "epoch100", "dino"],
                 "sampling": {"train_episodes_per_source": args.train_episodes_per_source,
                              "val_episodes_per_source": args.val_episodes_per_source,

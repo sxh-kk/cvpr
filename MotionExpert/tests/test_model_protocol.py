@@ -120,3 +120,22 @@ def test_metadata_cannot_hide_changed_context_normalization():
     source["motionexpert_architecture"]["attention_normalization"] = "query_only"
     with pytest.raises(ValueError, match="architecture metadata"):
         checkpoint_config(source)
+
+
+def test_velocity_objective_and_second_call_are_versioned_without_changing_architecture():
+    cfg = smplh_motion_expert_config()
+    metadata = architecture_metadata(cfg)
+    assert metadata["architecture"] == "e7_smplh12_hands21_meanpool_qkvnorm_v2"
+    assert metadata["prediction_type"] == "velocity"
+    assert metadata["feature_t"] == 0.9
+    assert metadata["feature_extraction"]["euler_updates"] == 1
+    assert metadata["feature_extraction"]["model_evaluations"] == 2
+    assert not cfg.MODEL.PREDICT_XSTART
+    old = checkpoint(cfg)
+    old["motionexpert_architecture"]["prediction_type"] = "x0"
+    with pytest.raises(ValueError, match="legacy x0 prediction"):
+        checkpoint_config(old)
+    ambiguous = checkpoint(cfg)
+    ambiguous["motionexpert_architecture"].pop("feature_extraction")
+    with pytest.raises(ValueError, match="architecture metadata"):
+        checkpoint_config(ambiguous)

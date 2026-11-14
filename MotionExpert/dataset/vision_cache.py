@@ -10,6 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .npy_io import load_npy_mmap
+
 
 CONTRACT = "smplh-dino-shared-rgb-cache-v1"
 JOIN_DTYPES = {
@@ -194,7 +196,8 @@ class VisionProfileCache:
                 raise ValueError("Vision profile validity changed despite its equivalence declaration")
             cached = {"join": join, "features": None}
         if load_features and cached["features"] is None:
-            features = np.load(descriptor["artifacts"]["features.npy"][0], mmap_mode="r", allow_pickle=False)
+            # Keep the verified path as a string to avoid mmap resolving it again.
+            features = load_npy_mmap(os.fspath(descriptor["artifacts"]["features.npy"][0]))
             if features.shape != (descriptor["frames"], 5, 1024) or features.dtype != np.float32:
                 raise ValueError("Vision profile features must be float32 [Ncache,5,1024]")
             cached["features"] = features

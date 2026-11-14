@@ -294,6 +294,53 @@ def test_packed_hot_path_never_opens_episode_arrays_or_closes_global_mmaps(cache
     assert len(reader._image_cache) == 1
 
 
+def test_cache_readers_map_verified_string_paths_without_resolving_again(cached_archive, monkeypatch):
+    from MotionExpert.dataset import vision_cache, window_cache
+
+    original_mapping = window_cache.load_npy_mmap
+    phases = set()
+    phase = "packed"
+
+    def unexpected_resolve(*args, **kwargs):
+        raise AssertionError("Mapping repeated the cache's owned-path resolution")
+
+    def checked_mapping(path):
+        assert isinstance(path, str)
+        phases.add(phase)
+        # Initialization still performs its required owned-path checks. Only
+        # the mmap call must avoid repeating their filesystem metadata walk.
+        with monkeypatch.context() as mapping_patch:
+            mapping_patch.setattr(Path, "resolve", unexpected_resolve)
+            return original_mapping(path)
+
+    monkeypatch.setattr(window_cache, "load_npy_mmap", checked_mapping)
+    monkeypatch.setattr(vision_cache, "load_npy_mmap", checked_mapping)
+    cached = _dataset(cached_archive, cached=True)
+    reader = cached.window_cache
+    record = cached.records[0]
+    episode = record["episode_index"]
+    packed_arrays = reader._arrays(episode)
+
+    # Diagnostic caches use the same committed per-episode files. Exercise
+    # their mapping branch against this fixture's equivalent packed values.
+    phase = "episode"
+    packed_spec, reader._packed_spec = reader._packed_spec, None
+    try:
+        episode_arrays = reader._arrays(episode)
+        for key in packed_arrays:
+            np.testing.assert_array_equal(episode_arrays[key], packed_arrays[key])
+    finally:
+        reader._packed_spec = packed_spec
+
+    phase = "window_images"
+    selected = np.arange(0, 36, 6)
+    window_images = reader.read_images(record, selected, valid=np.ones(6, dtype=bool))
+    phase = "vision_images"
+    vision_images = cached.archive.vision_cache.read(record, selected, load_features=True)
+    np.testing.assert_array_equal(window_images.reshape(6, -1), vision_images["observation.features.dino"])
+    assert phases == {"packed", "episode", "window_images", "vision_images"}
+
+
 def _refresh_array_identity(root, identity, values):
     from MotionExpert.dataset.window_cache import file_sha256
     path = root / identity["path"]

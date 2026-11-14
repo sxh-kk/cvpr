@@ -60,7 +60,7 @@ Ego-Exo4D-HM 以原始 Aria 质量、时间和跟踪连续性为依据，open-lo
 
 ### 窗口缓存与统计
 
-预训练使用只读 mmap 缓存，保存 `[11,245]` 运动、`[11,18]` 轨迹、有效 mask 和解码变换。缓存按 episode 构建、按 split 打包；噪声和条件 dropout 在训练时生成，DINO 按需读取。
+预训练使用只读 mmap 缓存，保存 `[11,245]` 运动、`[11,18]` 轨迹、有效 mask 和解码变换。缓存按 episode 构建、按 split 打包；噪声和条件 dropout 在训练时生成，DINO 按需读取。NPY 文件头使用精确长度读取，避免并行文件系统的大块缓冲预读；已有缓存和统计可直接复用。
 
 在已有合规归档和完整 DINO 特征后，依次构建缓存、检查原始窗口、计算完整训练集统计、检查归一化窗口与 GPU 一致性：
 
@@ -93,6 +93,22 @@ python -m MotionExpert.validate_window_cache \
 统计脚本拒绝覆盖已有文件；已有匹配统计时无需重新计算。缓存绑定归档、分割、表示和生成代码，统计绑定产生它的缓存及检查记录；不能混用不同缓存或质量 mask 的统计。
 
 训练还会读取归档 `.pipeline/dataset-state.json`，核对训练就绪状态、统计 SHA、缓存 manifest、模型架构和当前训练代码对应的 GPU 检查记录。上述缓存检查不会发布训练就绪元数据；仓库尚未提供独立的训练就绪发布命令。完整输入要求见 [readiness.py](readiness.py)，不能通过手动改状态或复制旧检查记录替代。
+
+### 可选本机 DINO 读取缓存
+
+并行文件系统的小文件等待较高时，可将已验收窗口所需的零相位 5 Hz DINO 特征打包到本机存储。构建器逐块核对原始特征与副本的字节，全部完成后发布 manifest；训练按原历史帧索引读取，继续使用原统计、有效 mask 和 split。
+
+```bash
+LOCAL_VISION_CACHE=/dev/shm/motionexpert-vision5hz
+python -m MotionExpert.dataset.packed_vision_cache \
+  --vision-root "$ARCHIVE_ROOT/vision_profiles/psi0_256x480_v1_30hz" \
+  --records-path "$CACHE_ROOT/records.json" \
+  --output-root "$LOCAL_VISION_CACHE" \
+  --report "$REPORT_ROOT/packed-vision-read-cache.json" --workers 8
+export MOTIONEXPERT_VISION_READ_CACHE_ROOT="$LOCAL_VISION_CACHE"
+```
+
+预先确认本机存储和内存余量；构建器保留 128 GiB 可用内存，拒绝覆盖已有输出。`/dev/shm` 中的缓存随实例退出消失；可重新构建，或取消该环境变量以使用原始读取路径。启用时，缓存缺失、未完成或来源／文件身份不符会拒绝加载。已有源文件校验保留在启动阶段，worker 只映射本机副本。
 
 ## 模型与归一化
 

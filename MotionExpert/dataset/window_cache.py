@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .npy_io import load_npy_mmap
+
 CONTRACT = "smplh245-window-cache-v1"
 ARRAY_SPECS = {
     "start_frames": ("int64", ()),
@@ -281,6 +283,13 @@ class WindowCache:
         self._source_stamps[archive.state_path] = stamp(archive.state_path)
         self._source_stamps[archive.vision_cache.manifest_path] = archive.vision_cache._manifest_stamp
         self._cache_stamps[index_path] = stamp(index_path)
+        self._packed_vision = None
+        local_vision_root = os.environ.get("MOTIONEXPERT_VISION_READ_CACHE_ROOT")
+        if local_vision_root:
+            from .packed_vision_cache import PackedVisionCache
+            self._packed_vision = PackedVisionCache(
+                local_vision_root, vision_cache=archive.vision_cache, records=cached_records,
+                records_sha256=manifest["records_sha256"])
         self.assert_current()
 
     def _owned(self, relative):
@@ -299,6 +308,8 @@ class WindowCache:
         for path, original in {**self._source_stamps, **self._cache_stamps}.items():
             if stamp(path) != original:
                 raise ValueError("Window-cache source/index binding changed")
+        if self._packed_vision is not None:
+            self._packed_vision.assert_current()
 
     def _reset_for_process(self):
         if self._pid != os.getpid():
@@ -315,7 +326,8 @@ class WindowCache:
             path = self.root / identity["path"]
             if stamp(path) != (identity["size_bytes"], identity["mtime_ns"]):
                 raise ValueError("Packed window array changed before its first mapping")
-            value = np.load(path, mmap_mode="r" if self._packed_spec["windows"] else None, allow_pickle=False)
+            value = (load_npy_mmap(os.fspath(path)) if self._packed_spec["windows"]
+                     else np.load(path, allow_pickle=False))
             if list(value.shape) != identity["shape"] or str(value.dtype) != identity["dtype"]:
                 raise ValueError("Packed window mmap header differs from its manifest")
             opened[key] = value
@@ -341,7 +353,7 @@ class WindowCache:
                 path = self.root / spec["path"]
                 if episode not in self._verified and stamp(path) != (spec["size_bytes"], spec["mtime_ns"]):
                     raise ValueError("Window-cache artifact changed before its first mapping")
-                value = np.load(path, mmap_mode="r", allow_pickle=False)
+                value = load_npy_mmap(os.fspath(path))
                 if list(value.shape) != spec["shape"] or str(value.dtype) != spec["dtype"]:
                     raise ValueError("Window-cache mmap header differs from its receipt")
                 arrays[key] = value
@@ -391,22 +403,30 @@ class WindowCache:
         if valid is None or np.asarray(valid).shape != (6,):
             raise ValueError("Window-cache visual reads require the frozen historical validity")
         episode = record["episode_index"]
-        if episode in self._image_cache:
-            features = self._image_cache.pop(episode)
-        else:
-            descriptor = self.archive.vision_cache._episodes[episode]
-            path, original = descriptor["artifacts"]["features.npy"]
-            if episode not in self._image_verified and stamp(path) != original:
-                raise ValueError("DINO cache changed before its first mapping")
-            features = np.load(path, mmap_mode="r", allow_pickle=False)
-            if features.dtype != np.float32 or features.shape != (record["length"], 5, 1024):
-                raise ValueError("Window-cache DINO shape/dtype differs from native30Hz features")
+        if self._packed_vision is not None:
+            # Startup VisionProfileCache validates source stamps; the local
+            # cache binds those identities in memory. Workers touch local data.
+            output = self._packed_vision.read(record, selected)
             self._image_verified.add(episode)
-        self._image_cache[episode] = features
-        output = np.asarray(features[selected]).copy()
-        while len(self._image_cache) > self.file_cache:
-            _, removed = self._image_cache.popitem(last=False)
-            removed._mmap.close()
+        else:
+            if episode in self._image_cache:
+                features = self._image_cache.pop(episode)
+            else:
+                descriptor = self.archive.vision_cache._episodes[episode]
+                path, original = descriptor["artifacts"]["features.npy"]
+                if episode not in self._image_verified and stamp(path) != original:
+                    raise ValueError("DINO cache changed before its first mapping")
+                # The owned path was checked at startup; a string avoids repeating
+                # Path.resolve's filesystem metadata walk for mmap's filename.
+                features = load_npy_mmap(os.fspath(path))
+                if features.dtype != np.float32 or features.shape != (record["length"], 5, 1024):
+                    raise ValueError("Window-cache DINO shape/dtype differs from native30Hz features")
+                self._image_verified.add(episode)
+            self._image_cache[episode] = features
+            output = np.asarray(features[selected]).copy()
+            while len(self._image_cache) > self.file_cache:
+                _, removed = self._image_cache.popitem(last=False)
+                removed._mmap.close()
         if not np.isfinite(output).all() or np.any(output[~np.asarray(valid).astype(bool)] != 0):
             raise ValueError("Window-cache visual embeddings violate frozen validity/finite values")
         return output

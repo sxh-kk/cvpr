@@ -96,7 +96,7 @@ python -m MotionExpert.validate_window_cache \
 
 ### 可选本机 DINO 读取缓存
 
-并行文件系统的小文件等待较高时，可将已验收窗口所需的零相位 5 Hz DINO 特征打包到本机存储。构建器逐块核对原始特征与副本的字节，全部完成后发布 manifest；训练按原历史帧索引读取，继续使用原统计、有效 mask 和 split。
+并行文件系统的小文件等待较高时，可将已验收窗口所需的零相位 5 Hz DINO 特征打包到本机存储。构建器顺序读取原生帧，在内存中选帧并逐块核对副本的字节，全部完成后发布 manifest；训练按原历史帧索引读取，继续使用原统计、有效 mask 和 split。
 
 ```bash
 LOCAL_VISION_CACHE=/dev/shm/motionexpert-vision5hz
@@ -104,7 +104,7 @@ python -m MotionExpert.dataset.packed_vision_cache \
   --vision-root "$ARCHIVE_ROOT/vision_profiles/psi0_256x480_v1_30hz" \
   --records-path "$CACHE_ROOT/records.json" \
   --output-root "$LOCAL_VISION_CACHE" \
-  --report "$REPORT_ROOT/packed-vision-read-cache.json" --workers 8
+  --report "$REPORT_ROOT/packed-vision-read-cache.json" --workers 8 --block-rows 4096
 export MOTIONEXPERT_VISION_READ_CACHE_ROOT="$LOCAL_VISION_CACHE"
 ```
 

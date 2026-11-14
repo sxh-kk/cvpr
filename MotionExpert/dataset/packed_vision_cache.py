@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -86,6 +87,75 @@ def _check_memory_headroom():
                     break
     except FileNotFoundError:
         pass
+
+
+def _iter_native5hz_blocks(path, expected_frames, block_rows, *, cancelled=None):
+    """Yield independent C-order 5Hz blocks using bounded sequential source I/O.
+
+    Production features are C-order [N,5,1024]. Read consecutive native frames
+    into RAM before selecting every sixth frame, avoiding sparse GPFS mmap
+    faults. Fortran inputs retain the previous mmap behavior for compatibility.
+    """
+    if type(expected_frames) is not int or expected_frames < 0:
+        raise ValueError("Packed vision expected_frames must be non-negative")
+    if type(block_rows) is not int or block_rows < 1:
+        raise ValueError("Packed vision block_rows must be positive")
+
+    def check_read():
+        if cancelled is not None and cancelled.is_set():
+            raise RuntimeError("Packed vision build cancelled after another failure")
+        _check_memory_headroom()
+
+    check_read()
+    with open(os.fspath(path), "rb", buffering=0) as stream:
+        version = np.lib.format.read_magic(stream)
+        if version == (1, 0):
+            shape, fortran_order, dtype = np.lib.format.read_array_header_1_0(stream)
+        elif version == (2, 0):
+            shape, fortran_order, dtype = np.lib.format.read_array_header_2_0(stream)
+        elif version == (3, 0):
+            # NumPy has no public UTF-8 v3 reader (also used by load_npy_mmap).
+            shape, fortran_order, dtype = np.lib.format._read_array_header(stream, version)
+        else:
+            raise ValueError(f"Unsupported NPY format version: {version}")
+        if dtype.hasobject or dtype != np.float32 or shape != (expected_frames, 5, 1024):
+            raise ValueError("Packed vision source feature shape/dtype differs")
+        offset = stream.tell()
+        if offset + expected_frames * 5 * 1024 * dtype.itemsize > os.fstat(stream.fileno()).st_size:
+            raise ValueError("Packed vision source array data is truncated")
+        if not expected_frames:
+            return
+        rows = (expected_frames + 5) // 6
+        if fortran_order:
+            native = np.memmap(stream, dtype=dtype, mode="r", offset=offset, shape=shape, order="F")
+            try:
+                for start in range(0, rows, block_rows):
+                    check_read()
+                    stop = min(start + block_rows, rows)
+                    yield start, native[start * 6:stop * 6:6].copy(order="C")
+            finally:
+                native._mmap.close()
+            return
+        native_buffer = np.empty((min(expected_frames, 6 * block_rows), 5, 1024), dtype=dtype)
+        buffer_bytes = memoryview(native_buffer).cast("B")
+        for start in range(0, rows, block_rows):
+            check_read()
+            native_count = min(6 * block_rows, expected_frames - start * 6)
+            target_bytes = buffer_bytes[:native_count * 5 * 1024 * dtype.itemsize]
+            received = 0
+            while received < len(target_bytes):
+                if cancelled is not None and cancelled.is_set():
+                    raise RuntimeError("Packed vision build cancelled after another failure")
+                try:
+                    count = stream.readinto(target_bytes[received:])
+                except InterruptedError:
+                    continue
+                if not count:
+                    raise ValueError("Packed vision source array data is truncated while reading")
+                received += count
+            # A copy also owns single-row blocks, which NumPy can otherwise
+            # consider contiguous views of the reusable native buffer.
+            yield start, native_buffer[:native_count:6].copy(order="C")
 
 
 def build_packed_vision_cache(vision_root, records_path, output_root, *, report_path=None,
@@ -202,24 +272,19 @@ def build_packed_vision_cache(vision_root, records_path, output_root, *, report_
         path = prefix / "features.npy"
         if _identity(path) != descriptor["source_feature_identity"]:
             raise ValueError("Packed vision source feature changed before copying")
-        native = load_npy_mmap(os.fspath(path))
         digest = hashlib.sha256()
-        try:
-            if native.shape != (descriptor["length"], 5, 1024) or native.dtype != np.float32:
-                raise ValueError("Packed vision source feature shape/dtype differs")
-            for start in range(0, descriptor["rows"], block_rows):
+        with closing(_iter_native5hz_blocks(path, descriptor["length"], block_rows,
+                                            cancelled=cancelled)) as source_blocks:
+            for start, values in source_blocks:
                 if cancelled.is_set():
                     raise RuntimeError("Packed vision build cancelled after another failure")
                 _check_memory_headroom()
                 stop = min(start + block_rows, descriptor["rows"])
-                values = np.ascontiguousarray(native[start * 6:stop * 6:6])
                 target = packed[descriptor["row_offset"] + start:descriptor["row_offset"] + stop]
                 target[:] = values
                 if not np.array_equal(values.view(np.uint8), np.asarray(target).view(np.uint8)):
                     raise ValueError("Packed vision bitwise copy verification failed")
                 digest.update(values.view(np.uint8))
-        finally:
-            native._mmap.close()
         if (_identity(path) != descriptor["source_feature_identity"]
                 or _identity(prefix / "receipt.json") != descriptor["source_receipt_identity"]):
             raise ValueError("Packed vision source changed while copying")

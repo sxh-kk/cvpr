@@ -362,14 +362,14 @@ def test_parallel_builder_keeps_disjoint_episode_ranges_bitwise_equal(packed_sou
 def test_failed_builder_never_publishes_a_usable_manifest(packed_source, tmp_path, monkeypatch):
     vision, records, records_path = packed_source
     root = tmp_path / "interrupted-packed"
-    mapping = packed_module.load_npy_mmap
+    source_blocks = packed_module._iter_native5hz_blocks
 
-    def interrupted(path):
+    def interrupted(path, expected_frames, block_rows, *, cancelled=None):
         if Path(path).parent.name == "00000001":
             raise OSError("simulated source I/O failure")
-        return mapping(path)
+        yield from source_blocks(path, expected_frames, block_rows, cancelled=cancelled)
 
-    monkeypatch.setattr(packed_module, "load_npy_mmap", interrupted)
+    monkeypatch.setattr(packed_module, "_iter_native5hz_blocks", interrupted)
     with pytest.raises(OSError, match="simulated source I/O failure"):
         build_packed_vision_cache(vision.root, records_path, root, workers=2, block_rows=2)
     assert not (root / "manifest.json").exists()
